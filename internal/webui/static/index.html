@@ -169,7 +169,7 @@
           <label style="margin:0"><input type="checkbox" id="taskAutoRefresh" checked> 自动刷新</label>
         </div>
         <div id="taskMsg" class="msg"></div>
-        <table id="taskTable"><thead><tr><th>ID</th><th>目录</th><th>Prompt</th><th>状态</th><th>结果/错误</th><th>创建时间</th><th></th></tr></thead><tbody></tbody></table>
+        <table id="taskTable"><thead><tr><th>ID</th><th>目录</th><th>Prompt</th><th>状态</th><th>结果/错误</th><th>AI 摘要</th><th>创建时间</th><th></th></tr></thead><tbody></tbody></table>
       </div>
     </div>
 
@@ -185,6 +185,36 @@
 
     <!-- 自动化规则 -->
     <div id="page-rules" class="page">
+      <div class="card">
+        <h2>智能生成规则（AI）</h2>
+        <label>用一句话描述你的自动化需求</label>
+        <textarea id="nlDesc" placeholder="例如：每天早上8点检查前端依赖高危漏洞，有的话自动升级并跑测试"></textarea>
+        <div class="row" style="margin-top:12px">
+          <button onclick="generateRule()">生成规则草稿</button>
+          <span id="nlHint" class="muted" style="font-size:12px"></span>
+        </div>
+        <div id="nlMsg" class="msg"></div>
+        <div id="nlDraft" class="hidden" style="margin-top:14px">
+          <h2 style="font-size:14px">生成结果（请确认后创建）</h2>
+          <div class="grid">
+            <div><label>名称</label><input type="text" id="nlName"></div>
+            <div><label>类型</label>
+              <select id="nlKind">
+                <option value="cron">cron 定时</option>
+                <option value="git">git 监听</option>
+                <option value="http">webhook</option>
+              </select>
+            </div>
+          </div>
+          <label>调度</label><input type="text" id="nlSchedule">
+          <label>工作目录</label><input type="text" id="nlDirectory">
+          <label>Prompt</label><textarea id="nlPrompt"></textarea>
+          <div class="row" style="margin-top:12px">
+            <button onclick="confirmNlRule()">确认创建</button>
+            <button class="ghost" onclick="resetNl()">取消</button>
+          </div>
+        </div>
+      </div>
       <div class="card">
         <h2>新建规则</h2>
         <div class="grid">
@@ -273,6 +303,21 @@
     <!-- 设置 -->
     <div id="page-settings" class="page">
       <div class="card">
+        <h2>大模型配置（智能编排）</h2>
+        <p class="muted" style="font-size:12px;margin-top:0">用于智能生成规则、任务摘要、失败自愈决策。留空 API 地址则退回纯规则引擎。</p>
+        <label>API 地址（OpenAI 兼容，如 http://192.0.2.150:4000/v1）</label>
+        <input type="text" id="llmUrl" placeholder="留空表示禁用">
+        <label>API Key</label>
+        <input type="password" id="llmKey" placeholder="API Key">
+        <label>模型名（如 sensenova-deepseek-v4-pro）</label>
+        <input type="text" id="llmModel" placeholder="模型名">
+        <div class="row" style="margin-top:12px">
+          <button onclick="saveLLMConfig()">保存</button>
+          <span id="llmStatus" class="muted" style="font-size:12px"></span>
+        </div>
+        <div id="llmMsg" class="msg"></div>
+      </div>
+      <div class="card">
         <h2>修改管理密码</h2>
         <label>新密码</label>
         <input type="password" id="newpw" placeholder="至少 4 位">
@@ -338,6 +383,7 @@ function switchPage(name) {
   document.getElementById("page-" + name).classList.add("active");
   document.querySelectorAll("#nav button").forEach(b => b.classList.toggle("active", b.dataset.page === name));
   document.getElementById("pageTitle").textContent = TITLES[name] || name;
+  if (name === "settings") loadLLMConfig();
 }
 document.querySelectorAll("#nav button").forEach(b => {
   b.addEventListener("click", () => switchPage(b.dataset.page));
@@ -375,6 +421,8 @@ function saveAppToken() {
   const v = document.getElementById("appToken").value.trim();
   localStorage.setItem(APP_TOKEN_KEY, v);
   document.getElementById("appToken").value = v;
+  if (taskWS) taskWS.close();
+  connectTaskWS();
 }
 
 /* ---------- 概览 ---------- */
@@ -433,12 +481,13 @@ async function loadTasks() {
   tb.innerHTML = "";
   for (const t of list) {
     const detail = (t.error || t.result || t.progress || "").trim();
-    tb.insertAdjacentHTML("beforeend", `<tr>
+    tb.insertAdjacentHTML("beforeend", `<tr data-task="${escapeHtml(t.id)}">
       <td class="mono clip" title="${escapeHtml(t.id)}">${escapeHtml(t.id)}</td>
       <td class="clip" title="${escapeHtml(t.directory)}">${escapeHtml(t.directory) || "-"}</td>
       <td class="clip" title="${escapeHtml(t.prompt)}">${escapeHtml(t.prompt)}</td>
       <td><span class="badge ${escapeHtml(t.status)}">${TASK_STATUS[t.status] || t.status}</span></td>
       <td class="clip" title="${escapeHtml(detail)}">${escapeHtml(detail) || "-"}</td>
+      <td class="clip muted" title="${escapeHtml(t.aiSummary || "")}">${escapeHtml(t.aiSummary) || "-"}</td>
       <td>${fmtDate(t.createdAt)}</td>
       <td>${(t.status === "queued" || t.status === "running") ? `<button class="danger sm" onclick="cancelTask('${escapeHtml(t.id)}')">取消</button>` : ""}</td>
     </tr>`);
@@ -489,6 +538,59 @@ function ruleScheduleLabel() {
 }
 document.getElementById("ruleKind").addEventListener("change", ruleScheduleLabel);
 ruleScheduleLabel();
+
+/* ---------- 智能生成规则 ---------- */
+async function generateRule() {
+  const desc = document.getElementById("nlDesc").value.trim();
+  const msg = document.getElementById("nlMsg");
+  const hint = document.getElementById("nlHint");
+  if (!desc) { show(msg, "请填写自动化需求描述"); return; }
+  hint.textContent = "生成中…（可能需要数秒）";
+  try {
+    const res = await api("/api/rules/generate", { method: "POST", headers: hdr(), body: JSON.stringify({ description: desc }) });
+    const data = await res.json();
+    hint.textContent = "";
+    if (!res.ok) {
+      show(msg, data.error || "生成失败");
+      return;
+    }
+    const d = data.draft || {};
+    document.getElementById("nlName").value = d.name || "";
+    document.getElementById("nlKind").value = d.kind || "cron";
+    document.getElementById("nlSchedule").value = d.schedule || "";
+    document.getElementById("nlDirectory").value = d.directory || "";
+    document.getElementById("nlPrompt").value = d.prompt || "";
+    document.getElementById("nlDraft").classList.remove("hidden");
+    show(msg, "已生成草稿，请确认后创建", true);
+  } catch (e) {
+    hint.textContent = "";
+    if (e.message !== "unauthorized") show(msg, "生成失败，请稍后重试");
+  }
+}
+async function confirmNlRule() {
+  const body = {
+    name: document.getElementById("nlName").value.trim(),
+    kind: document.getElementById("nlKind").value,
+    schedule: document.getElementById("nlSchedule").value.trim(),
+    directory: document.getElementById("nlDirectory").value.trim(),
+    prompt: document.getElementById("nlPrompt").value.trim(),
+    enabled: true,
+  };
+  const msg = document.getElementById("nlMsg");
+  if (!body.name || !body.prompt) { show(msg, "名称和 Prompt 不能为空"); return; }
+  const res = await api("/api/rules", { method: "POST", headers: hdr(), body: JSON.stringify(body) });
+  const data = await res.json();
+  if (!res.ok) { show(msg, data.error || "创建失败"); return; }
+  show(msg, "规则已创建", true);
+  resetNl();
+  loadRules();
+}
+function resetNl() {
+  document.getElementById("nlDesc").value = "";
+  document.getElementById("nlDraft").classList.add("hidden");
+  document.getElementById("nlMsg").textContent = "";
+  document.getElementById("nlHint").textContent = "";
+}
 
 async function createRule() {
   const body = {
@@ -633,6 +735,31 @@ async function doRevoke(id) {
 }
 
 /* ---------- 设置 ---------- */
+async function loadLLMConfig() {
+  try {
+    const res = await api("/api/llm", { headers: hdr() });
+    const data = await res.json();
+    document.getElementById("llmUrl").value = data.url || "";
+    document.getElementById("llmModel").value = data.model || "";
+    document.getElementById("llmKey").placeholder = data.keySet ? "已设置（留空不修改）" : "API Key";
+    document.getElementById("llmKey").value = "";
+    const st = document.getElementById("llmStatus");
+    st.textContent = data.enabled ? "已启用" : "未启用";
+    st.style.color = data.enabled ? "var(--ok)" : "var(--muted)";
+  } catch (_) {}
+}
+async function saveLLMConfig() {
+  const body = {
+    url: document.getElementById("llmUrl").value.trim(),
+    key: document.getElementById("llmKey").value,
+    model: document.getElementById("llmModel").value.trim(),
+  };
+  const res = await api("/api/llm", { method: "POST", headers: hdr(), body: JSON.stringify(body) });
+  const data = await res.json();
+  if (!res.ok) { show(document.getElementById("llmMsg"), data.error || "保存失败"); return; }
+  show(document.getElementById("llmMsg"), "已保存" + (data.enabled ? "（已启用）" : "（已禁用）"), true);
+  loadLLMConfig();
+}
 async function doChangePassword() {
   const np = document.getElementById("newpw").value;
   const res = await api("/api/web/password", { method: "POST", headers: hdr(), body: JSON.stringify({ newPassword: np }) });
@@ -647,12 +774,47 @@ setInterval(() => {
   if (page && page.id === "page-tasks" && session) loadTasks();
 }, 4000);
 
+/* ---------- 实时推送（任务 AI 摘要 / 状态） ---------- */
+let taskWS = null;
+function connectTaskWS() {
+  const t = localStorage.getItem(APP_TOKEN_KEY) || "";
+  if (!t) return;
+  const proto = location.protocol === "https:" ? "wss:" : "ws:";
+  try {
+    taskWS = new WebSocket(`${proto}//${location.host}/api/ws?token=${encodeURIComponent(t)}`);
+  } catch (_) { return; }
+  taskWS.onmessage = (ev) => {
+    let msg;
+    try { msg = JSON.parse(ev.data); } catch (_) { return; }
+    if (!msg.payload) return;
+    if (msg.type === "task.summary") {
+      updateTaskAI(msg.payload.id, msg.payload.summary, false);
+    } else if (msg.type === "task.failure") {
+      updateTaskAI(msg.payload.id, msg.payload.analysis, true);
+    } else if (msg.type === "task.event") {
+      const page = document.querySelector(".page.active");
+      if (page && page.id === "page-tasks" && session) loadTasks();
+    }
+  };
+  taskWS.onclose = () => { setTimeout(connectTaskWS, 5000); };
+}
+function updateTaskAI(id, text, isFailure) {
+  const tr = document.querySelector('#taskTable tr[data-task="' + id + '"]');
+  if (!tr || tr.children.length < 6) return;
+  const aiCell = tr.children[5];
+  aiCell.textContent = text || "";
+  aiCell.title = text || "";
+  aiCell.className = isFailure ? "clip" : "clip muted";
+  if (isFailure) aiCell.style.color = "var(--danger)";
+}
+
 /* ---------- 启动 ---------- */
 document.getElementById("appToken").value = localStorage.getItem(APP_TOKEN_KEY) || "";
 renderAuth();
 if (session) {
   switchPage("overview");
   loadOverview();
+  connectTaskWS();
 }
 </script>
 </body>
