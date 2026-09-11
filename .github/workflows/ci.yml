@@ -18,14 +18,42 @@ jobs:
           go-version: '1.25'
       - name: Vet
         run: go vet ./...
-      - name: Test
-        run: go test ./internal/...
+      - name: Test with race detector
+        run: go test -race ./internal/...
       - name: Build
         run: go build ./...
 
+  # PostgreSQL is an optional backend. The pgtest-tagged tests build their own
+  # scratch database inside the service container and drop it afterwards.
+  postgres:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+      - name: Test PostgreSQL dialect
+        env:
+          OCB_PG_DSN: postgres://postgres:postgres@localhost:5432/postgres?sslmode=disable
+        run: go test -tags pgtest -run Postgres -v ./internal/store/
+
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: test
+    needs: [test, postgres]
     runs-on: ubuntu-latest
     strategy:
       matrix:
