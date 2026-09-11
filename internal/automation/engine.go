@@ -2,6 +2,8 @@ package automation
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"log"
 	"os/exec"
@@ -202,6 +204,11 @@ func matchTarget(schedule, target string) bool {
 	return schedule == target
 }
 
+// newRuleTaskID builds a unique task id for a rule firing. A random suffix is
+// required because two firings of the same rule within one second would
+// otherwise collide on the primary key.
 func newRuleTaskID(ruleID string) string {
-	return "task_" + ruleID + "_" + time.Now().Format("20060102150405")
+	buf := make([]byte, 4)
+	_, _ = rand.Read(buf)
+	return "task_" + ruleID + "_" + time.Now().Format("20060102150405") + "_" + hex.EncodeToString(buf)
 }
