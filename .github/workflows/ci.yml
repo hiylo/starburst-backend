@@ -51,9 +51,38 @@ jobs:
           OCB_PG_DSN: postgres://postgres:postgres@localhost:5432/postgres?sslmode=disable
         run: go test -tags pgtest -run Postgres -v ./internal/store/
 
+  # install.sh 在沙箱前缀下真实跑一遍：不装到系统，但验证参数解析、下载、目录
+  # 与 unit 生成。占位符断言防住 DSN 含 & 时被 ${var//pat/rep} 写坏的回归。
+  install-script:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+      - name: Shell syntax check
+        run: bash -n scripts/install.sh
+      - name: Build local binary
+        run: go build -o ./opencode-backend ./cmd/opencode-backend
+      - name: Sandbox install with special-character DSN
+        run: |
+          sandbox="$RUNNER_TEMP/sandbox"
+          OCB_BIN_URL="file://$(pwd)/opencode-backend" \
+            bash scripts/install.sh --prefix "$sandbox" --port 18080 \
+              --db postgres --workers 2 \
+              --pg-dsn 'postgres://user:p@ss@127.0.0.1:5432/db?sslmode=disable&application_name=a"b\c' \
+              --admin-password 'ad$min `x` !'
+      - name: Verify generated unit and binary
+        run: |
+          sandbox="$RUNNER_TEMP/sandbox"
+          test -x "$sandbox/usr/local/bin/opencode-backend"
+          "$sandbox/usr/local/bin/opencode-backend" --version
+          grep -F 'sslmode=disable&application_name' "$sandbox/etc/systemd/system/opencode-backend.service"
+          ! grep -E '@(BIN_PATH|PORT|EXEC_QUOTED_ARGS|OPENCODE_URL|DATA_DIR)@' "$sandbox/etc/systemd/system/opencode-backend.service"
+
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [test, postgres]
+    needs: [test, postgres, install-script]
     runs-on: ubuntu-latest
     strategy:
       matrix:
