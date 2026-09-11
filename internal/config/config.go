@@ -6,6 +6,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // Config holds all runtime configuration for opencode-backend.
@@ -30,6 +31,9 @@ type Config struct {
 	// Workers is how many orchestration tasks may run concurrently. 1 restores
 	// serial execution.
 	Workers int
+	// TaskRetention is how long finished tasks are kept before the janitor
+	// deletes them. Zero keeps them forever.
+	TaskRetention time.Duration
 	// LLMURL is the OpenAI-compatible base URL (e.g. a LiteLLM gateway).
 	// Empty disables all smart-orchestration features.
 	LLMURL string
@@ -61,6 +65,7 @@ func Parse(args []string) (*Config, error) {
 	defaultToken := fs.String("default-token", os.Getenv("OCB_DEFAULT_TOKEN"), "optional pre-provisioned API token registered on first run (empty = off)")
 	webhookSecret := fs.String("webhook-secret", os.Getenv("OCB_WEBHOOK_SECRET"), "optional shared secret protecting /api/webhook (empty = off)")
 	workers := fs.Int("workers", envInt("OCB_WORKERS", 4), "concurrent task executions (1 = serial)")
+	taskRetention := fs.Duration("task-retention", envDuration("OCB_TASK_RETENTION", 0), "finished task retention, 0 = forever")
 	llmURL := fs.String("llm-url", envOr("OCB_LLM_URL", ""), "OpenAI-compatible base URL for orchestration LLM (empty = disabled)")
 	llmKey := fs.String("llm-key", os.Getenv("OCB_LLM_KEY"), "API key for --llm-url")
 	llmModel := fs.String("llm-model", envOr("OCB_LLM_MODEL", ""), "model name for orchestration decisions")
@@ -89,6 +94,7 @@ func Parse(args []string) (*Config, error) {
 		DefaultToken:         *defaultToken,
 		WebhookSecret:        *webhookSecret,
 		Workers:              clampInt(*workers, 1, 64),
+		TaskRetention:        *taskRetention,
 		LLMURL:               strings.TrimRight(*llmURL, "/"),
 		LLMKey:               *llmKey,
 		LLMModel:             *llmModel,
@@ -116,6 +122,20 @@ func envInt(key string, fallback int) int {
 		return fallback
 	}
 	return n
+}
+
+// envDuration reads a Go duration environment variable ("72h", "168h0m"),
+// falling back when unset or unparseable.
+func envDuration(key string, fallback time.Duration) time.Duration {
+	v, ok := os.LookupEnv(key)
+	if !ok || strings.TrimSpace(v) == "" {
+		return fallback
+	}
+	d, err := time.ParseDuration(strings.TrimSpace(v))
+	if err != nil {
+		return fallback
+	}
+	return d
 }
 
 // clampInt limits n to [lo, hi].

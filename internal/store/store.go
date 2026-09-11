@@ -59,8 +59,14 @@ type Store interface {
 	// CreateTaskWithStatus persists a task with an explicit initial status,
 	// e.g. TaskPending when it must wait for its DependsOn task to succeed.
 	CreateTaskWithStatus(ctx context.Context, t *Task, status string) error
-	// ListTasks returns tasks, newest first, with optional status filter.
-	ListTasks(ctx context.Context, status string, limit int) ([]*Task, error)
+	// ListTasks returns tasks, newest first, with optional status filter and
+	// limit/offset pagination.
+	ListTasks(ctx context.Context, status string, limit, offset int) ([]*Task, error)
+	// CountTasks returns how many tasks match the optional status filter.
+	CountTasks(ctx context.Context, status string) (int, error)
+	// PurgeFinishedTasks deletes terminal tasks older than olderThan, skipping
+	// any that a dependent still references. Returns deleted and kept counts.
+	PurgeFinishedTasks(ctx context.Context, olderThan time.Duration, limit int) (int, int, error)
 	// GetTask loads a single task.
 	GetTask(ctx context.Context, id string) (*Task, error)
 	// ClaimNextTask picks the oldest queued task and marks it running.

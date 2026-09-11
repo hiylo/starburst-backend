@@ -86,6 +86,7 @@ var migrations = []migration{
 	{name: "rule_executions", apply: migrationRuleExecutions},
 	{name: "tasks_ai_summary", apply: migrationTasksAISummary},
 	{name: "tasks_depends_on", apply: migrationTasksDependsOn},
+	{name: "tasks_schedule", apply: migrationTasksSchedule},
 }
 
 // migrationTasksDependsOn adds the depends_on column holding the id of the
@@ -95,6 +96,23 @@ func migrationTasksDependsOn(ctx context.Context, driver string, db *sql.DB) err
 	stmts := []string{
 		`ALTER TABLE tasks ADD COLUMN depends_on TEXT NOT NULL DEFAULT ''`,
 		`CREATE INDEX IF NOT EXISTS idx_tasks_depends_on ON tasks(depends_on, status)`,
+	}
+	for _, s := range stmts {
+		if _, err := db.ExecContext(ctx, s); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// migrationTasksSchedule adds the name and scheduling columns that turn a task
+// into a named, optionally delayed (scheduled_at) or recurring (cron) job.
+func migrationTasksSchedule(ctx context.Context, driver string, db *sql.DB) error {
+	stmts := []string{
+		`ALTER TABLE tasks ADD COLUMN name TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE tasks ADD COLUMN scheduled_at TIMESTAMP NULL`,
+		`ALTER TABLE tasks ADD COLUMN cron TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE tasks ADD COLUMN last_fired_at TIMESTAMP NULL`,
 	}
 	for _, s := range stmts {
 		if _, err := db.ExecContext(ctx, s); err != nil {

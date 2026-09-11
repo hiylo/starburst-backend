@@ -102,7 +102,11 @@ func main() {
 	exec := tasks.NewExecutor(st, hub, cfg.OpenCodeURL)
 	exec.WithLLM(llmClient)
 	exec.WithWorkers(cfg.Workers)
+	exec.WithRetention(cfg.TaskRetention)
 	log.Printf("orchestration workers: %d", cfg.Workers)
+	if cfg.TaskRetention > 0 {
+		log.Printf("finished task retention: %s", cfg.TaskRetention)
+	}
 	go exec.Run(ctx)
 
 	// Automation engine: evaluates cron rules and handles webhook triggers.

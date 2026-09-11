@@ -19,6 +19,8 @@
 #   OCB_ADMIN_PASSWORD / --admin-password
 #   OCB_DEFAULT_TOKEN / --default-token (首次运行预置的 API token，客户端可免登录调用)
 #   OCB_WORKERS / --workers (并发执行的任务数，默认 4)
+#   OCB_TASK_RETENTION / --task-retention (保留已完成任务的时长，Go duration 语法，
+#     例如 168h0m=7 天；不设置则永久保留)
 #   OCB_PREFIX / --prefix
 #     安装根目录，默认 /（即 /usr/local/bin、/etc/...、/var/lib/...）。
 #     设成非根目录即"沙箱模式"：所有文件写到该目录下、跳过 systemctl，
@@ -33,6 +35,7 @@ PG_DSN="${OCB_PG_DSN:-}"
 ADMIN_PASSWORD="${OCB_ADMIN_PASSWORD:-}"
 DEFAULT_TOKEN="${OCB_DEFAULT_TOKEN:-}"
 WORKERS="${OCB_WORKERS:-4}"
+TASK_RETENTION="${OCB_TASK_RETENTION:-}"
 PREFIX="${OCB_PREFIX:-/}"
 
 while [[ $# -gt 0 ]]; do
@@ -40,9 +43,9 @@ while [[ $# -gt 0 ]]; do
   case "$opt" in
     -h|--help)
       echo "用法: $0 [--port 8080] [--db sqlite|postgres] [--pg-dsn dsn] [--admin-password pw] [--default-token tok] \\"
-      echo "       [--workers 4] [--prefix /]"
+      echo "       [--workers 4] [--task-retention 168h0m] [--prefix /]"
       exit 0 ;;
-    --port|--db|--pg-dsn|--admin-password|--default-token|--workers|--prefix)
+    --port|--db|--pg-dsn|--admin-password|--default-token|--workers|--task-retention|--prefix)
       if [[ $# -lt 2 ]]; then
         echo "!! 参数 $opt 需要一个值" >&2
         exit 1
@@ -54,6 +57,7 @@ while [[ $# -gt 0 ]]; do
         --admin-password) ADMIN_PASSWORD="$2" ;;
         --default-token) DEFAULT_TOKEN="$2" ;;
         --workers) WORKERS="$2" ;;
+        --task-retention) TASK_RETENTION="$2" ;;
         --prefix) PREFIX="$2" ;;
       esac
       shift 2
@@ -160,6 +164,7 @@ else
 fi
 [[ -n "$ADMIN_PASSWORD" ]] && EXEC_ARGS+=(--default-admin-password "$ADMIN_PASSWORD")
 [[ -n "$DEFAULT_TOKEN" ]] && EXEC_ARGS+=(--default-token "$DEFAULT_TOKEN")
+[[ -n "$TASK_RETENTION" ]] && EXEC_ARGS+=(--task-retention "$TASK_RETENTION")
 
 # systemd 按空白切分 ExecStart 的参数，含空格的值（DSN、密码）必须用双引号包裹；
 # 值内部的双引号/反斜杠也要转义，否则会被 systemd 错误解析。

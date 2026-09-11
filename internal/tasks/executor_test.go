@@ -498,3 +498,31 @@ func TestSessionGateSerializes(t *testing.T) {
 		t.Fatal("tasks without an explicit session id must not be serialized")
 	}
 }
+
+// TestExecutorPurgeOnceKeepsFreshTasks guards the janitor against nuking recent
+// work: a pass with a one-day window must leave tasks created moments ago alone
+// and report nothing deleted. Timestamp arithmetic itself is covered by the
+// store-level retention tests.
+func TestExecutorPurgeOnceKeepsFreshTasks(t *testing.T) {
+	e, st, _ := newTestEnv(t, func(w http.ResponseWriter, r *http.Request) { http.NotFound(w, r) })
+	e.WithRetention(24 * time.Hour)
+
+	ctx := context.Background()
+	for _, id := range []string{"fresh-a", "fresh-b"} {
+		if err := st.CreateTaskWithStatus(ctx, &store.Task{ID: id, Prompt: id}, store.TaskSucceeded); err != nil {
+			t.Fatalf("create %s: %v", id, err)
+		}
+	}
+	deleted, kept, err := e.purgeOnce(ctx)
+	if err != nil {
+		t.Fatalf("purge: %v", err)
+	}
+	if deleted != 0 || kept != 0 {
+		t.Fatalf("fresh tasks touched: deleted=%d kept=%d", deleted, kept)
+	}
+	for _, id := range []string{"fresh-a", "fresh-b"} {
+		if _, err := st.GetTask(ctx, id); err != nil {
+			t.Fatalf("%s disappeared: %v", id, err)
+		}
+	}
+}

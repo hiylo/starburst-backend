@@ -12,6 +12,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
@@ -205,4 +206,49 @@ func TestPostgresConcurrentClaim(t *testing.T) {
 			t.Fatalf("task %s claimed %d times, want exactly 1", id, n)
 		}
 	}
+}
+
+// TestPostgresIntervalBinding guards the pgx text-encoding pitfall: an int
+// bound where the SQL does `? || ' seconds'` cannot be encoded, so every
+// interval expression must receive the seconds as a string. Both the retry
+// backoff and the retention cutoff were broken on PostgreSQL until they did.
+func TestPostgresIntervalBinding(t *testing.T) {
+	st := openScratchStore(t)
+	ctx := context.Background()
+
+	if err := st.CreateTaskWithStatus(ctx, &Task{ID: "retry-1", Prompt: "r"}, TaskFailed); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if err := st.RetryTask(ctx, "retry-1", 120); err != nil {
+		t.Fatalf("retry backoff: %v", err)
+	}
+	got, err := st.GetTask(ctx, "retry-1")
+	if err != nil || got.Status != TaskQueued || got.Error != "" {
+		t.Fatalf("after retry: %+v err=%v", got, err)
+	}
+	if !got.AvailableAt.After(time.Now()) {
+		t.Fatalf("backoff not applied: available_at=%v", got.AvailableAt)
+	}
+
+	if err := st.CreateTaskWithStatus(ctx, &Task{ID: "old-1", Prompt: "o"}, TaskSucceeded); err != nil {
+		t.Fatalf("create old: %v", err)
+	}
+	if _, err := st.CancelTask(ctx, "retry-1"); err != nil {
+		t.Fatalf("cancel: %v", err)
+	}
+	backdateTasks(t, st.(*sqlStore), 7200, "old-1", "retry-1")
+	deleted, kept, err := st.PurgeFinishedTasks(ctx, time.Hour, 10)
+	if err != nil {
+		t.Fatalf("purge: %v", err)
+	}
+	if deleted != 2 || kept != 0 {
+		t.Fatalf("purge: deleted=%d kept=%d, want 2/0", deleted, kept)
+	}
+}
+
+// TestPostgresPurgeFinishedTasks covers the PostgreSQL branch of the retention
+// statement: the CURRENT_TIMESTAMP - interval cutoff and the DELETE-by-subselect
+// limit, neither of which the SQLite dialect exercises.
+func TestPostgresPurgeFinishedTasks(t *testing.T) {
+	assertRetentionPurge(t, openScratchStore(t))
 }

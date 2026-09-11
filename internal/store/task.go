@@ -15,17 +15,23 @@ const (
 	TaskSucceeded = "succeeded"
 	TaskFailed    = "failed"
 	TaskCanceled  = "canceled"
-	TaskPending   = "pending" // 等待前置依赖完成
-	TaskBlocked   = "blocked" // 前置依赖最终失败被阻塞
+	TaskPending   = "pending"    // 等待前置依赖完成
+	TaskBlocked   = "blocked"    // 前置依赖最终失败被阻塞
+	TaskScheduled = "scheduled"  // 已排期：等待 scheduled_at 到期，或周期模板（cron 非空）
 )
+
+// taskColumns is the canonical SELECT/RETURNING column list, kept in a single
+// place so scanTask and every query stay in lockstep.
+const taskColumns = "id, session_id, directory, name, prompt, depends_on, status, error, result, progress, ai_summary, attempts, created_at, updated_at, started_at, finished_at, available_at, scheduled_at, cron, last_fired_at"
 
 // Task is an asynchronous orchestration job submitted by a client.
 type Task struct {
 	ID          string     `json:"id"`
 	SessionID   string     `json:"sessionId"` // target OpenCode session id ("" = new session)
 	Directory   string     `json:"directory"` // working directory hint for new sessions
+	Name        string     `json:"name"`      // user-facing task name ("" = derive from prompt)
 	Prompt      string     `json:"prompt"`
-	DependsOn   string     `json:"dependsOn"` // 前置依赖任务 id（空表示无依赖）
+	DependsOn   string     `json:"dependsOn"`  // 前置依赖任务 id（空表示无依赖）
 	Status      string     `json:"status"`
 	Error       string     `json:"error"`
 	Result      string     `json:"result"`
@@ -37,6 +43,9 @@ type Task struct {
 	StartedAt   *time.Time `json:"startedAt"`
 	FinishedAt  *time.Time `json:"finishedAt"`
 	AvailableAt time.Time  `json:"availableAt"` // earliest time this task may be claimed (retry backoff)
+	ScheduledAt *time.Time `json:"scheduledAt"` // 一次性排期：到点后转 queued（为空=立即）
+	Cron        string     `json:"cron"`        // 周期模板：6 字段秒级 cron（非空时本任务不直接执行，到点克隆实体任务）
+	LastFiredAt *time.Time `json:"lastFiredAt"` // 周期任务上次触发时间（用于计算下一次）
 }
 
 // CreateTask persists a queued task.
@@ -50,16 +59,17 @@ func (s *sqlStore) CreateTask(ctx context.Context, t *Task) error {
 func (s *sqlStore) CreateTaskWithStatus(ctx context.Context, t *Task, status string) error {
 	t.Status = status
 	_, err := s.db.ExecContext(ctx, s.q(`
-		INSERT INTO tasks (id, session_id, directory, prompt, depends_on, status, error, result, progress, attempts, created_at, updated_at, available_at)
-		VALUES (?, ?, ?, ?, ?, ?, '', '', '', 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`),
-		t.ID, t.SessionID, t.Directory, t.Prompt, t.DependsOn, status,
+		INSERT INTO tasks (id, session_id, directory, name, prompt, depends_on, status, error, result, progress, attempts, created_at, updated_at, available_at, scheduled_at, cron)
+		VALUES (?, ?, ?, ?, ?, ?, ?, '', '', '', 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, ?, ?)`),
+		t.ID, t.SessionID, t.Directory, t.Name, t.Prompt, t.DependsOn, status, t.ScheduledAt, t.Cron,
 	)
 	return err
 }
 
-// ListTasks returns tasks ordered newest first, with an optional status filter.
-func (s *sqlStore) ListTasks(ctx context.Context, status string, limit int) ([]*Task, error) {
-	query := `SELECT id, session_id, directory, prompt, depends_on, status, error, result, progress, ai_summary, attempts, created_at, updated_at, started_at, finished_at, available_at FROM tasks`
+// ListTasks returns tasks ordered newest first, with an optional status filter
+// and limit/offset pagination.
+func (s *sqlStore) ListTasks(ctx context.Context, status string, limit, offset int) ([]*Task, error) {
+	query := `SELECT ` + taskColumns + ` FROM tasks`
 	args := []any{}
 	if status != "" {
 		query += ` WHERE status = ?`
@@ -70,6 +80,10 @@ func (s *sqlStore) ListTasks(ctx context.Context, status string, limit int) ([]*
 		query += ` LIMIT ?`
 		args = append(args, limit)
 	}
+	if offset > 0 {
+		query += ` OFFSET ?`
+		args = append(args, offset)
+	}
 	rows, err := s.db.QueryContext(ctx, s.q(query), args...)
 	if err != nil {
 		return nil, err
@@ -78,10 +92,26 @@ func (s *sqlStore) ListTasks(ctx context.Context, status string, limit int) ([]*
 	return scanTasks(rows)
 }
 
+// CountTasks returns how many tasks match the optional status filter. Report it
+// next to a limited ListTasks page so a client can tell whether more exist.
+func (s *sqlStore) CountTasks(ctx context.Context, status string) (int, error) {
+	query := `SELECT COUNT(*) FROM tasks`
+	args := []any{}
+	if status != "" {
+		query += ` WHERE status = ?`
+		args = append(args, status)
+	}
+	var n int
+	if err := s.db.QueryRowContext(ctx, s.q(query), args...).Scan(&n); err != nil {
+		return 0, err
+	}
+	return n, nil
+}
+
 // GetTask loads a single task.
 func (s *sqlStore) GetTask(ctx context.Context, id string) (*Task, error) {
 	row := s.db.QueryRowContext(ctx, s.q(`
-		SELECT id, session_id, directory, prompt, depends_on, status, error, result, progress, ai_summary, attempts, created_at, updated_at, started_at, finished_at, available_at
+		SELECT `+taskColumns+`
 		FROM tasks WHERE id = ?`), id)
 	t, err := scanTask(row)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -105,14 +135,14 @@ func (s *sqlStore) ClaimNextTask(ctx context.Context) (*Task, error) {
 		WHERE id = (
 			SELECT id FROM tasks WHERE status = ? AND available_at <= CURRENT_TIMESTAMP ORDER BY created_at ASC LIMIT 1 FOR UPDATE SKIP LOCKED
 		)
-		RETURNING id, session_id, directory, prompt, depends_on, status, error, result, progress, ai_summary, attempts, created_at, updated_at, started_at, finished_at, available_at`
+		RETURNING ` + taskColumns
 	} else {
 		query = `
 		UPDATE tasks SET status = ?, attempts = attempts + 1, started_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
 		WHERE id = (
 			SELECT id FROM tasks WHERE status = ? AND available_at <= CURRENT_TIMESTAMP ORDER BY created_at ASC LIMIT 1
 		)
-		RETURNING id, session_id, directory, prompt, depends_on, status, error, result, progress, ai_summary, attempts, created_at, updated_at, started_at, finished_at, available_at`
+		RETURNING ` + taskColumns
 	}
 	row := s.db.QueryRowContext(ctx, s.q(query), TaskRunning, TaskQueued)
 	t, err := scanTask(row)
@@ -177,7 +207,7 @@ func (s *sqlStore) RetryTask(ctx context.Context, id string, backoffSecs int) er
 				available_at = datetime('now', '+' || ? || ' seconds'), updated_at = CURRENT_TIMESTAMP
 			WHERE id = ? AND status = ?`
 	}
-	res, err := s.db.ExecContext(ctx, s.q(query), TaskQueued, backoffSecs, id, TaskFailed)
+	res, err := s.db.ExecContext(ctx, s.q(query), TaskQueued, itoa(backoffSecs), id, TaskFailed)
 	if err != nil {
 		return err
 	}
@@ -319,20 +349,68 @@ func (s *sqlStore) RecoverStaleRunning(ctx context.Context) (int, error) {
 	return int(n), nil
 }
 
+// ListScheduledTasks returns all tasks currently in the scheduled state
+// (both one-shot future tasks and recurring cron templates).
+func (s *sqlStore) ListScheduledTasks(ctx context.Context) ([]*Task, error) {
+	rows, err := s.db.QueryContext(ctx,
+		s.q(`SELECT `+taskColumns+` FROM tasks WHERE status = ? ORDER BY created_at ASC`), TaskScheduled)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanTasks(rows)
+}
+
+// PromoteScheduledTask flips a scheduled one-shot task to queued so the worker
+// can claim it. Returns false when the task is not in scheduled state.
+func (s *sqlStore) PromoteScheduledTask(ctx context.Context, id string) (bool, error) {
+	res, err := s.db.ExecContext(ctx, s.q(`
+		UPDATE tasks SET status = ?, available_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+		WHERE id = ? AND status = ?`),
+		TaskQueued, id, TaskScheduled)
+	if err != nil {
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
+}
+
+// SetTaskLastFiredAt records the last time a recurring cron template fired.
+func (s *sqlStore) SetTaskLastFiredAt(ctx context.Context, id string, at time.Time) error {
+	_, err := s.db.ExecContext(ctx,
+		s.q(`UPDATE tasks SET last_fired_at = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`), at, id)
+	return err
+}
+
+// CancelScheduledTask marks a scheduled (one-shot or recurring) task canceled.
+func (s *sqlStore) CancelScheduledTask(ctx context.Context, id string) (bool, error) {
+	res, err := s.db.ExecContext(ctx, s.q(`
+		UPDATE tasks SET status = ?, finished_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+		WHERE id = ? AND status = ?`),
+		TaskCanceled, id, TaskScheduled)
+	if err != nil {
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
+}
+
 type rowScanner interface {
 	Scan(dest ...any) error
 }
 
 func scanTask(row rowScanner) (*Task, error) {
 	t := &Task{}
-	var started, finished *time.Time
-	err := row.Scan(&t.ID, &t.SessionID, &t.Directory, &t.Prompt, &t.DependsOn, &t.Status,
-		&t.Error, &t.Result, &t.Progress, &t.AISummary, &t.Attempts, &t.CreatedAt, &t.UpdatedAt, &started, &finished, &t.AvailableAt)
+	var started, finished, scheduled, lastFired *time.Time
+	err := row.Scan(&t.ID, &t.SessionID, &t.Directory, &t.Name, &t.Prompt, &t.DependsOn, &t.Status,
+		&t.Error, &t.Result, &t.Progress, &t.AISummary, &t.Attempts, &t.CreatedAt, &t.UpdatedAt, &started, &finished, &t.AvailableAt, &scheduled, &t.Cron, &lastFired)
 	if err != nil {
 		return nil, err
 	}
 	t.StartedAt = started
 	t.FinishedAt = finished
+	t.ScheduledAt = scheduled
+	t.LastFiredAt = lastFired
 	return t, err
 }
 
@@ -346,4 +424,52 @@ func scanTasks(rows *sql.Rows) ([]*Task, error) {
 		out = append(out, t)
 	}
 	return out, rows.Err()
+}
+
+// PurgeFinishedTasks deletes succeeded/failed/canceled tasks whose updated_at is
+// older than olderThan, bounded by limit rows per pass. A finished task that a
+// dependent still references is kept so no dependent points at a missing
+// upstream; those are reported in the second return value so the caller can
+// log that retention cannot catch up. Non-terminal tasks are never touched.
+func (s *sqlStore) PurgeFinishedTasks(ctx context.Context, olderThan time.Duration, limit int) (int, int, error) {
+	if limit <= 0 {
+		limit = 500
+	}
+	secs := int(olderThan.Seconds())
+	// The timestamp column holds CURRENT_TIMESTAMP output, so the cutoff must be
+	// computed in SQL with the same format rather than passed as a time.Time.
+	var cutoff string
+	if isPostgres(s.driver) {
+		cutoff = "updated_at < CURRENT_TIMESTAMP - (? || ' seconds')::interval"
+	} else {
+		cutoff = "updated_at < datetime('now', '-' || ? || ' seconds')"
+	}
+	statuses := []any{TaskSucceeded, TaskFailed, TaskCanceled}
+	// The limit lives in the inner select: SQLite refuses DELETE ... LIMIT. The
+	// seconds are bound as text (pgx cannot encode an int where || expects
+	// text) and the limit is inlined like the other paged queries.
+	res, err := s.db.ExecContext(ctx, s.q(`
+		DELETE FROM tasks
+		WHERE id IN (
+			SELECT id FROM tasks
+			WHERE status IN (?, ?, ?) AND `+cutoff+`
+			  AND id NOT IN (SELECT depends_on FROM tasks WHERE depends_on <> '')
+			ORDER BY updated_at ASC
+			LIMIT `+itoa(limit)+`
+		)`),
+		statuses[0], statuses[1], statuses[2], itoa(secs))
+	if err != nil {
+		return 0, 0, err
+	}
+	deleted, _ := res.RowsAffected()
+
+	var kept int
+	if err := s.db.QueryRowContext(ctx, s.q(`
+		SELECT COUNT(*) FROM tasks
+		WHERE status IN (?, ?, ?) AND `+cutoff+`
+		  AND id IN (SELECT depends_on FROM tasks WHERE depends_on <> '')`),
+		statuses[0], statuses[1], statuses[2], itoa(secs)).Scan(&kept); err != nil {
+		return 0, 0, err
+	}
+	return int(deleted), kept, nil
 }

@@ -79,10 +79,10 @@
 ```
 - 无匹配 → `{"sessions":[]}`；缺 `{dir}` → 400
 
-### GET /api/tasks?status=queued（需 Token）
-任务列表（最新在前，最多 50 条），`status` 可选过滤：
+### GET /api/tasks?status=queued&limit=50&offset=0（需 Token）
+任务列表（最新在前）。`status` 可选过滤；`limit` 默认 50、最大 500（超出或 ≤0 回退到 50）；`offset` 默认 0（负数回退到 0）。`total` 是符合 `status` 过滤的总数，用于判断还有没有下一页：
 ```json
-{ "tasks": [ {
+{ "total": 137, "limit": 50, "offset": 0, "tasks": [ {
   "id":"task_...", "sessionId":"ses_...", "directory":"/path",
   "prompt":"...", "dependsOn":"task_...", "status":"queued|running|succeeded|failed|canceled|pending|blocked",
   "error":"", "result":"", "progress":"", "aiSummary":"", "attempts":0,

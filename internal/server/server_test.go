@@ -1097,3 +1097,90 @@ func TestWebhookSecretProtection(t *testing.T) {
 		t.Fatalf("expected 200 with correct secret, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
+
+// TestTaskListPagination covers the paged task listing: limit/offset params,
+// the total count, clamping of out-of-range values and the status filter.
+func TestTaskListPagination(t *testing.T) {
+	s := newTestServer(t)
+
+	rec := s.do(t, http.MethodPost, "/api/web/session", `{"password":"admin"}`, nil)
+	var login struct {
+		Session string `json:"session"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &login)
+	rec = s.do(t, http.MethodPost, "/api/tokens", `{"name":"page"}`, map[string]string{"X-Web-Session": login.Session})
+	var tok struct {
+		Token string `json:"token"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &tok)
+	th := map[string]string{"Authorization": "Bearer " + tok.Token}
+
+	for i := 0; i < 5; i++ {
+		rec = s.do(t, http.MethodPost, "/api/tasks", `{"prompt":"page task"}`, th)
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("create task %d: %d %s", i, rec.Code, rec.Body.String())
+		}
+	}
+
+	type page struct {
+		Tasks []struct {
+			ID string `json:"id"`
+		} `json:"tasks"`
+		Total  int `json:"total"`
+		Limit  int `json:"limit"`
+		Offset int `json:"offset"`
+	}
+	get := func(query string) page {
+		t.Helper()
+		rec = s.do(t, http.MethodGet, "/api/tasks?"+query, "", th)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("list ?%s: %d %s", query, rec.Code, rec.Body.String())
+		}
+		var p page
+		if err := json.Unmarshal(rec.Body.Bytes(), &p); err != nil {
+			t.Fatalf("decode page: %v", err)
+		}
+		return p
+	}
+
+	p1 := get("limit=2&offset=0")
+	if len(p1.Tasks) != 2 || p1.Total != 5 || p1.Limit != 2 || p1.Offset != 0 {
+		t.Fatalf("page 1: %+v", p1)
+	}
+	p2 := get("limit=2&offset=2")
+	if len(p2.Tasks) != 2 || p2.Offset != 2 || p2.Total != 5 {
+		t.Fatalf("page 2: %+v", p2)
+	}
+	for _, a := range p1.Tasks {
+		for _, b := range p2.Tasks {
+			if a.ID == b.ID {
+				t.Fatalf("pages overlap on %s", a.ID)
+			}
+		}
+	}
+	p3 := get("limit=2&offset=4")
+	if len(p3.Tasks) != 1 || p3.Total != 5 {
+		t.Fatalf("page 3: %+v", p3)
+	}
+
+	// Defaults: limit 50, offset 0, whole list in one page here.
+	d := get("")
+	if len(d.Tasks) != 5 || d.Total != 5 || d.Limit != 50 || d.Offset != 0 {
+		t.Fatalf("defaults: %+v", d)
+	}
+	if p := get("limit=9999"); p.Limit != 50 {
+		t.Fatalf("limit above 500 must fall back to 50, got %+v", p)
+	}
+	if p := get("limit=0"); p.Limit != 50 {
+		t.Fatalf("non-positive limit must fall back to 50, got %+v", p)
+	}
+	if p := get("limit=1&offset=-5"); p.Offset != 0 || len(p.Tasks) != 1 {
+		t.Fatalf("negative offset must fall back to 0, got %+v", p)
+	}
+	if p := get("status=queued&limit=1"); p.Total != 5 || len(p.Tasks) != 1 {
+		t.Fatalf("filtered page: %+v", p)
+	}
+	if p := get("status=blocked&limit=1"); p.Total != 0 || len(p.Tasks) != 0 {
+		t.Fatalf("empty filtered page: %+v", p)
+	}
+}

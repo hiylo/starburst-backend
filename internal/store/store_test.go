@@ -495,3 +495,135 @@ func TestClaimNextTaskConcurrent(t *testing.T) {
 		}
 	}
 }
+
+// backdateTasks moves updated_at back so a retention cutoff lands on the task.
+func backdateTasks(t *testing.T, s *sqlStore, seconds int, ids ...string) {
+	t.Helper()
+	var q string
+	if isPostgres(s.driver) {
+		q = "UPDATE tasks SET updated_at = CURRENT_TIMESTAMP - (? || ' seconds')::interval WHERE id = ?"
+	} else {
+		q = "UPDATE tasks SET updated_at = datetime('now', '-' || ? || ' seconds') WHERE id = ?"
+	}
+	for _, id := range ids {
+		if _, err := s.db.ExecContext(context.Background(), s.q(q), itoa(seconds), id); err != nil {
+			t.Fatalf("backdate %s: %v", id, err)
+		}
+	}
+}
+
+func taskExists(t *testing.T, st Store, id string) bool {
+	t.Helper()
+	_, err := st.GetTask(context.Background(), id)
+	if err == ErrNotFound {
+		return false
+	}
+	if err != nil {
+		t.Fatalf("get %s: %v", id, err)
+	}
+	return true
+}
+
+// assertRetentionPurge covers the retention behaviour shared by both dialects:
+// terminal tasks past the window are deleted, a terminal task that a dependent
+// still references is kept, non-terminal and fresh tasks are untouched, the
+// per-pass limit is honoured, and the reference protection lifts once the
+// dependent is gone.
+func assertRetentionPurge(t *testing.T, st Store) {
+	t.Helper()
+	ctx := context.Background()
+	s := st.(*sqlStore)
+
+	mk := func(id, status, dependsOn string) {
+		t.Helper()
+		if err := st.CreateTaskWithStatus(ctx, &Task{ID: id, Prompt: id, DependsOn: dependsOn}, status); err != nil {
+			t.Fatalf("create %s: %v", id, err)
+		}
+	}
+	mk("done-old", TaskSucceeded, "")
+	mk("cancel-old", TaskCanceled, "")
+	mk("fail-old", TaskFailed, "")
+	mk("done-new", TaskSucceeded, "")
+	mk("running", TaskRunning, "")
+	mk("queued", TaskQueued, "")
+	mk("dep", TaskPending, "fail-old")
+	backdateTasks(t, s, 7200, "done-old", "cancel-old", "fail-old", "running", "queued")
+
+	deleted, kept, err := st.PurgeFinishedTasks(ctx, time.Hour, 100)
+	if err != nil {
+		t.Fatalf("purge: %v", err)
+	}
+	if deleted != 2 || kept != 1 {
+		t.Fatalf("first pass: deleted=%d kept=%d, want 2 deleted / 1 kept", deleted, kept)
+	}
+	if taskExists(t, st, "done-old") || taskExists(t, st, "cancel-old") {
+		t.Fatalf("expired terminal tasks survived")
+	}
+	for _, id := range []string{"fail-old", "dep", "running", "queued", "done-new"} {
+		if !taskExists(t, st, id) {
+			t.Fatalf("%s must not be purged", id)
+		}
+	}
+
+	// One pass honours the row limit. fail-old is still referenced by dep, so
+	// it keeps showing up in the "kept" count until phase C below.
+	for _, id := range []string{"t1", "t2", "t3"} {
+		mk(id, TaskSucceeded, "")
+		backdateTasks(t, s, 7200, id)
+	}
+	deleted, kept, err = st.PurgeFinishedTasks(ctx, time.Hour, 2)
+	if err != nil {
+		t.Fatalf("limited purge: %v", err)
+	}
+	if deleted != 2 || kept != 1 {
+		t.Fatalf("limited pass: deleted=%d kept=%d, want 2/1", deleted, kept)
+	}
+	remaining := 0
+	for _, id := range []string{"t1", "t2", "t3"} {
+		if taskExists(t, st, id) {
+			remaining++
+		}
+	}
+	if remaining != 1 {
+		t.Fatalf("t1-t3 remaining=%d, want 1", remaining)
+	}
+	deleted, _, err = st.PurgeFinishedTasks(ctx, time.Hour, 2)
+	if err != nil || deleted != 1 {
+		t.Fatalf("drain pass: deleted=%d err=%v, want 1", deleted, err)
+	}
+
+	// Reference protection is dynamic. The protection is evaluated against the
+	// pre-delete snapshot, so the pass that removes the dependent only clears
+	// the dependent and the next pass picks up the formerly protected upstream.
+	if ok, err := st.CancelTask(ctx, "dep"); err != nil || !ok {
+		t.Fatalf("cancel dependent: ok=%v err=%v", ok, err)
+	}
+	backdateTasks(t, s, 7200, "dep")
+	deleted, kept, err = st.PurgeFinishedTasks(ctx, time.Hour, 100)
+	if err != nil {
+		t.Fatalf("final purge: %v", err)
+	}
+	if deleted != 1 || kept != 0 {
+		t.Fatalf("final pass: deleted=%d kept=%d, want 1/0", deleted, kept)
+	}
+	if taskExists(t, st, "dep") {
+		t.Fatalf("dep survived its own purge")
+	}
+	if !taskExists(t, st, "fail-old") {
+		t.Fatalf("fail-old purged while the dependent still existed")
+	}
+	deleted, kept, err = st.PurgeFinishedTasks(ctx, time.Hour, 100)
+	if err != nil || deleted != 1 || kept != 0 {
+		t.Fatalf("drain upstream: deleted=%d kept=%d err=%v, want 1/0", deleted, kept, err)
+	}
+	if taskExists(t, st, "fail-old") {
+		t.Fatalf("fail-old survived after its dependent was gone")
+	}
+	if !taskExists(t, st, "done-new") {
+		t.Fatalf("fresh terminal task was purged")
+	}
+}
+
+func TestPurgeFinishedTasks(t *testing.T) {
+	assertRetentionPurge(t, newTestStore(t))
+}

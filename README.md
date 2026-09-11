@@ -60,10 +60,13 @@ go build -o opencode-backend ./cmd/opencode-backend
 | `--llm-key` | `OCB_LLM_KEY` | — | `--llm-url` 的 API key |
 | `--llm-model` | `OCB_LLM_MODEL` | — | 编排决策使用的模型名 |
 | `--workers` | `OCB_WORKERS` | `4` | 并发执行的任务数（`1` = 串行） |
+| `--task-retention` | `OCB_TASK_RETENTION` | — | 已完成任务保留时长（Go duration，如 `168h0m`），不设置 = 永久保留 |
 | `--version` | — | — | 打印版本号退出 |
 | `--health-check` | — | — | 检查数据库/上游连通性后退出 |
 
 > 任务默认并发执行（`--workers 4`），适合批量下发；需要严格串行时设 `--workers 1`。显式指定同一个上游 `sessionId` 的多个任务会在后端自动排队，避免并发读回同一次会话的最后一条回复。
+
+> 已完成（succeeded/failed/canceled）的任务默认永久保留。设 `--task-retention 168h0m` 后每小时清一次超期的；仍被依赖引用的前置任务不会被删（否则依赖方会指向不存在的任务），等依赖方自己被清掉后下一轮再删。
 
 > 智能编排大模型也可在运行时不重启配置：Web 配置页调用 `GET/POST /api/llm` 修改地址/密钥/模型（见 [docs/API.md](docs/API.md)），后台配置持久化后**优先于**启动 flag/环境变量。
 

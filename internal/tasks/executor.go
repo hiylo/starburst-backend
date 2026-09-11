@@ -28,10 +28,11 @@ type Executor struct {
 	hub          *push.Hub
 	openCodeBase string // base URL of the OpenCode HTTP server
 	httpClient   *http.Client
-	llm          *llm.Client // optional orchestration LLM for summaries/self-healing
-	maxRetries   int         // additional attempts after the first failure
-	workers      int         // concurrent task executions
-	gateMu       sync.Mutex  // guards gates
+	llm          *llm.Client   // optional orchestration LLM for summaries/self-healing
+	maxRetries   int           // additional attempts after the first failure
+	workers      int           // concurrent task executions
+	retention    time.Duration // finished-task retention; 0 keeps them forever
+	gateMu       sync.Mutex    // guards gates
 	gates        map[string]*sessionGate
 }
 
@@ -78,6 +79,17 @@ func (e *Executor) WithWorkers(n int) *Executor {
 	return e
 }
 
+// WithRetention sets how long finished (succeeded/failed/canceled) tasks stay
+// in the database before the janitor deletes them. Zero or negative keeps them
+// forever. Negative input is clamped to 0 rather than rejected.
+func (e *Executor) WithRetention(d time.Duration) *Executor {
+	if d < 0 {
+		d = 0
+	}
+	e.retention = d
+	return e
+}
+
 // WithLLM wires the optional orchestration LLM used for result summaries and
 // failure self-healing decisions. Returns the receiver for chaining.
 func (e *Executor) WithLLM(c *llm.Client) *Executor {
@@ -96,6 +108,13 @@ func (e *Executor) Run(ctx context.Context) {
 	}
 
 	var wg sync.WaitGroup
+	if e.retention > 0 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			e.purgeLoop(ctx)
+		}()
+	}
 	for i := 0; i < e.workers; i++ {
 		wg.Add(1)
 		go func(id int) {

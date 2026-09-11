@@ -35,7 +35,7 @@ func TestFireCreatesTask(t *testing.T) {
 		t.Fatalf("fire: %v", err)
 	}
 
-	tasks, err := st.ListTasks(ctx, "", 10)
+	tasks, err := st.ListTasks(ctx, "", 10, 0)
 	if err != nil {
 		t.Fatalf("list tasks: %v", err)
 	}
@@ -61,7 +61,7 @@ func TestFireDisabledRuleNoOp(t *testing.T) {
 	if err := eng.Fire(ctx, "rule_dis"); err != nil {
 		t.Fatalf("fire disabled: %v", err)
 	}
-	tasks, _ := st.ListTasks(ctx, "", 10)
+	tasks, _ := st.ListTasks(ctx, "", 10, 0)
 	if len(tasks) != 0 {
 		t.Fatalf("disabled rule created a task")
 	}
@@ -79,7 +79,7 @@ func TestFireKindMatchesTarget(t *testing.T) {
 	if err != nil || !fired {
 		t.Fatalf("firekind: fired=%v err=%v", fired, err)
 	}
-	tasks, _ := st.ListTasks(ctx, "", 10)
+	tasks, _ := st.ListTasks(ctx, "", 10, 0)
 	if len(tasks) != 1 {
 		t.Fatalf("expected 1 task, got %d", len(tasks))
 	}

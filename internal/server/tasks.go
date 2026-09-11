@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/hiylo/opencode-backend/internal/push"
@@ -32,17 +33,43 @@ func (s *Server) handleTasks(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleTasksStatus lists tasks filtered by ?status=.
+// listTasks returns one page of tasks as {"tasks", "total", "limit", "offset"}.
+// ?status= filters, ?limit= (default 50, max 500) and ?offset= (default 0)
+// page; total is the count matching the status filter so a client knows
+// whether a next page exists.
 func (s *Server) listTasks(w http.ResponseWriter, r *http.Request) {
 	status := r.URL.Query().Get("status")
+	limit := 50
+	if v := r.URL.Query().Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= 500 {
+			limit = n
+		}
+	}
+	offset := 0
+	if v := r.URL.Query().Get("offset"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			offset = n
+		}
+	}
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
 
-	tasks, err := s.store.ListTasks(ctx, status, 50)
+	tasks, err := s.store.ListTasks(ctx, status, limit, offset)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "list tasks failed")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"tasks": tasks})
+	total, err := s.store.CountTasks(ctx, status)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "count tasks failed")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"tasks":  tasks,
+		"total":  total,
+		"limit":  limit,
+		"offset": offset,
+	})
 }
 
 // createTask accepts {"prompt","sessionId"?,"directory"?,"dependsOn"?} and
