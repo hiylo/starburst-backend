@@ -84,8 +84,14 @@ OCB_PG_DSN='postgres://user:pass@host/db?sslmode=disable' \
 curl -fsSL https://<host>/install.sh | bash
 ```
 
-或本地 `bash scripts/install.sh [--port 8080] [--db sqlite|postgres] [--pg-dsn "..."] [--admin-password "..."]`。
+或本地 `bash scripts/install.sh [--port 8080] [--db sqlite|postgres] [--pg-dsn "..."] [--admin-password "..."] [--workers 4]`。
 安装为 systemd 服务，数据存 `/var/lib/opencode-backend`。
+
+只验证脚本、不触碰真实系统时加 `--prefix <目录>`（沙箱模式）：二进制、配置、unit 全部写到该目录下并跳过 systemctl，配合 `OCB_BIN_URL=file:///本地二进制` 可跳过下载：
+
+```bash
+OCB_BIN_URL="file://$(pwd)/opencode-backend" bash scripts/install.sh --prefix /tmp/sandbox --db postgres --pg-dsn "$OCB_PG_DSN"
+```
 
 ## Docker
 
