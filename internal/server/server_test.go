@@ -11,6 +11,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gorilla/websocket"
+
 	"github.com/hiylo/opencode-backend/internal/auth"
 	"github.com/hiylo/opencode-backend/internal/automation"
 	"github.com/hiylo/opencode-backend/internal/config"
@@ -286,6 +288,343 @@ func TestTaskRequiresToken(t *testing.T) {
 	rec := s.do(t, http.MethodPost, "/api/tasks", `{"prompt":"x"}`, nil)
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("expected 401 without token, got %d", rec.Code)
+	}
+}
+
+func TestTaskDependsOn(t *testing.T) {
+	s := newTestServer(t)
+	ctx := context.Background()
+
+	rec := s.do(t, http.MethodPost, "/api/web/session", `{"password":"admin"}`, nil)
+	var login struct {
+		Session string `json:"session"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &login)
+	rec = s.do(t, http.MethodPost, "/api/tokens", `{"name":"dep"}`, map[string]string{"X-Web-Session": login.Session})
+	var tok struct {
+		Token string `json:"token"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &tok)
+	th := map[string]string{"Authorization": "Bearer " + tok.Token}
+
+	// Upstream task starts queued.
+	rec = s.do(t, http.MethodPost, "/api/tasks", `{"prompt":"upstream"}`, th)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create upstream: %d %s", rec.Code, rec.Body.String())
+	}
+	var up struct {
+		ID string `json:"id"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &up)
+
+	// A dependent on a queued task must be pending, not queued.
+	rec = s.do(t, http.MethodPost, "/api/tasks", `{"prompt":"downstream","dependsOn":"`+up.ID+`"}`, th)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create dependent: %d %s", rec.Code, rec.Body.String())
+	}
+	var dep struct {
+		ID        string `json:"id"`
+		Status    string `json:"status"`
+		DependsOn string `json:"dependsOn"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &dep)
+	if dep.Status != "pending" {
+		t.Fatalf("dependent status = %q, want pending", dep.Status)
+	}
+	if dep.DependsOn != up.ID {
+		t.Fatalf("dependsOn = %q, want %q", dep.DependsOn, up.ID)
+	}
+
+	// A typo in dependsOn fails fast instead of parking a pending task forever.
+	rec = s.do(t, http.MethodPost, "/api/tasks", `{"prompt":"x","dependsOn":"task_missing"}`, th)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("unknown dependsOn: got %d want 400", rec.Code)
+	}
+
+	// Canceling the upstream blocks its pending dependents.
+	rec = s.do(t, http.MethodDelete, "/api/tasks/"+up.ID, "", th)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("cancel upstream: %d %s", rec.Code, rec.Body.String())
+	}
+	var blocked struct {
+		OK      bool `json:"ok"`
+		Blocked int  `json:"blocked"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &blocked)
+	if !blocked.OK || blocked.Blocked != 1 {
+		t.Fatalf("cancel should block 1 dependent, got %+v", blocked)
+	}
+	rec = s.do(t, http.MethodGet, "/api/tasks/"+dep.ID, "", th)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("get dependent: %d", rec.Code)
+	}
+	var depAfter struct {
+		Status string `json:"status"`
+		Error  string `json:"error"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &depAfter)
+	if depAfter.Status != "blocked" || depAfter.Error == "" {
+		t.Fatalf("dependent = %+v, want blocked with a reason", depAfter)
+	}
+
+	// A dependency that already finished is rejected.
+	rec = s.do(t, http.MethodPost, "/api/tasks", `{"prompt":"x","dependsOn":"`+up.ID+`"}`, th)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("finished dependsOn: got %d want 400", rec.Code)
+	}
+
+	// A dependency that already succeeded runs immediately.
+	if err := s.store.CreateTask(ctx, &store.Task{ID: "task_done", Prompt: "done"}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if err := s.store.CompleteTask(ctx, "task_done", "ok"); err != nil {
+		t.Fatalf("complete: %v", err)
+	}
+	rec = s.do(t, http.MethodPost, "/api/tasks", `{"prompt":"after done","dependsOn":"task_done"}`, th)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create after done: %d %s", rec.Code, rec.Body.String())
+	}
+	var after struct {
+		Status string `json:"status"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &after)
+	if after.Status != "queued" {
+		t.Fatalf("status after succeeded upstream = %q, want queued", after.Status)
+	}
+}
+
+// TestTaskUnblockAndDependentPush verifies that blocking a dependent pushes a
+// warning to every connected device, and that a human can unblock it manually.
+func TestTaskUnblockAndDependentPush(t *testing.T) {
+	s := newTestServer(t)
+	backend := httptest.NewServer(s.testMux)
+	t.Cleanup(backend.Close)
+
+	rec := s.do(t, http.MethodPost, "/api/web/session", `{"password":"admin"}`, nil)
+	var login struct {
+		Session string `json:"session"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &login)
+	rec = s.do(t, http.MethodPost, "/api/tokens", `{"name":"push"}`, map[string]string{"X-Web-Session": login.Session})
+	var tok struct {
+		Token string `json:"token"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &tok)
+	th := map[string]string{"Authorization": "Bearer " + tok.Token}
+
+	wsURL := "ws" + strings.TrimPrefix(backend.URL, "http") + "/api/ws?token=" + tok.Token
+	dialer := websocket.Dialer{}
+	conn, _, err := dialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("ws dial: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+
+	// First frame is the subscription confirmation.
+	_, data, err := conn.ReadMessage()
+	if err != nil {
+		t.Fatalf("read subscribed: %v", err)
+	}
+	var sub push.Message
+	_ = json.Unmarshal(data, &sub)
+	if sub.Type != "subscribed" {
+		t.Fatalf("expected subscribed, got %s", sub.Type)
+	}
+
+	readEvent := func() (push.Message, map[string]any) {
+		t.Helper()
+		_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+		_, data, err := conn.ReadMessage()
+		if err != nil {
+			t.Fatalf("read push event: %v", err)
+		}
+		var msg push.Message
+		if err := json.Unmarshal(data, &msg); err != nil {
+			t.Fatalf("unmarshal event: %v", err)
+		}
+		payload := map[string]any{}
+		if len(msg.Payload) > 0 {
+			_ = json.Unmarshal(msg.Payload, &payload)
+		}
+		return msg, payload
+	}
+
+	rec = s.do(t, http.MethodPost, "/api/tasks", `{"prompt":"upstream"}`, th)
+	var up struct {
+		ID string `json:"id"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &up)
+	rec = s.do(t, http.MethodPost, "/api/tasks", `{"prompt":"downstream","dependsOn":"`+up.ID+`"}`, th)
+	var dep struct {
+		ID string `json:"id"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &dep)
+
+	// Canceling the upstream blocks the dependent and pushes a warning.
+	rec = s.do(t, http.MethodDelete, "/api/tasks/"+up.ID, "", th)
+	var blockedResp struct {
+		OK      bool `json:"ok"`
+		Blocked int  `json:"blocked"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &blockedResp)
+	if !blockedResp.OK || blockedResp.Blocked != 1 {
+		t.Fatalf("cancel upstream: %+v", blockedResp)
+	}
+	msg, payload := readEvent()
+	if msg.Type != "task.event" || msg.Severity != push.Warning {
+		t.Fatalf("blocked event = %+v, want task.event/warning", msg)
+	}
+	if payload["id"] != dep.ID || payload["status"] != "blocked" || payload["upstream"] != up.ID {
+		t.Fatalf("blocked payload = %+v", payload)
+	}
+	if payload["reason"] == "" {
+		t.Fatal("blocked event must carry a reason")
+	}
+
+	// A human fixes the upstream out of band and unblocks the dependent.
+	rec = s.do(t, http.MethodPost, "/api/tasks/"+dep.ID, "", th)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unblock: %d %s", rec.Code, rec.Body.String())
+	}
+	msg, payload = readEvent()
+	if payload["id"] != dep.ID || payload["status"] != "queued" {
+		t.Fatalf("unblock event = %+v", payload)
+	}
+	rec = s.do(t, http.MethodGet, "/api/tasks/"+dep.ID, "", th)
+	var depAfter struct {
+		Status string `json:"status"`
+		Error  string `json:"error"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &depAfter)
+	if depAfter.Status != "queued" || depAfter.Error != "" {
+		t.Fatalf("dependent after unblock = %+v", depAfter)
+	}
+
+	// Unblocking a task that is not blocked is a conflict.
+	rec = s.do(t, http.MethodPost, "/api/tasks/"+dep.ID, "", th)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("unblock again: got %d want 409", rec.Code)
+	}
+	// Unknown tasks are not blocked either.
+	rec = s.do(t, http.MethodPost, "/api/tasks/task_missing", "", th)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("unblock missing: got %d want 409", rec.Code)
+	}
+}
+
+func TestProjectsGroupAndFilter(t *testing.T) {
+	s := newTestServer(t)
+
+	rec := s.do(t, http.MethodPost, "/api/web/session", `{"password":"admin"}`, nil)
+	var login struct {
+		Session string `json:"session"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &login)
+	rec = s.do(t, http.MethodPost, "/api/tokens", `{"name":"proj"}`, map[string]string{"X-Web-Session": login.Session})
+	var tok struct {
+		Token string `json:"token"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &tok)
+	th := map[string]string{"Authorization": "Bearer " + tok.Token}
+
+	// Projects are grouped by directory, not raw sessions.
+	rec = s.do(t, http.MethodGet, "/api/projects", "", th)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("projects: %d", rec.Code)
+	}
+	var proj struct {
+		Projects []struct {
+			ID           string `json:"id"`
+			Directory    string `json:"directory"`
+			SessionCount int    `json:"sessionCount"`
+		} `json:"projects"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &proj)
+	if len(proj.Projects) != 1 || proj.Projects[0].ID != "/w" || proj.Projects[0].SessionCount != 1 {
+		t.Fatalf("projects = %+v, want one group for /w", proj.Projects)
+	}
+
+	// The drill-down returns only sessions of that directory.
+	rec = s.do(t, http.MethodGet, "/api/projects/%2Fw", "", th)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("project sessions: %d %s", rec.Code, rec.Body.String())
+	}
+	var sess struct {
+		Sessions []struct {
+			ID string `json:"id"`
+		} `json:"sessions"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &sess)
+	if len(sess.Sessions) != 1 || sess.Sessions[0].ID != "ses_a" {
+		t.Fatalf("sessions = %+v, want ses_a only", sess.Sessions)
+	}
+
+	// An unknown directory yields an empty list, not an error.
+	rec = s.do(t, http.MethodGet, "/api/projects/%2Fother", "", th)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unknown dir: %d", rec.Code)
+	}
+	var empty struct {
+		Sessions []struct{} `json:"sessions"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &empty)
+	if len(empty.Sessions) != 0 {
+		t.Fatalf("unknown dir returned %d sessions", len(empty.Sessions))
+	}
+
+	// A missing id is a client error.
+	if rec = s.do(t, http.MethodGet, "/api/projects/", "", th); rec.Code != http.StatusBadRequest {
+		t.Fatalf("missing id: got %d want 400", rec.Code)
+	}
+}
+
+func TestLoginRateLimit(t *testing.T) {
+	s := newTestServer(t)
+
+	// Five wrong passwords are allowed (each returns 401)...
+	for i := 0; i < 5; i++ {
+		rec := s.do(t, http.MethodPost, "/api/web/session", `{"password":"nope"}`, nil)
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("attempt %d: got %d want 401", i+1, rec.Code)
+		}
+	}
+	// ...the sixth is throttled.
+	rec := s.do(t, http.MethodPost, "/api/web/session", `{"password":"admin"}`, nil)
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("attempt 6: got %d want 429", rec.Code)
+	}
+
+	// A correct password resets the bucket.
+	s.loginLimit.clear(clientKey(httptest.NewRequest(http.MethodPost, "/api/web/session", nil)))
+	rec = s.do(t, http.MethodPost, "/api/web/session", `{"password":"admin"}`, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("login after clear: got %d want 200", rec.Code)
+	}
+}
+
+func TestSystemRequiresAuth(t *testing.T) {
+	s := newTestServer(t)
+
+	if rec := s.do(t, http.MethodGet, "/api/system", "", nil); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("system without auth: got %d want 401", rec.Code)
+	}
+
+	rec := s.do(t, http.MethodPost, "/api/web/session", `{"password":"admin"}`, nil)
+	var login struct {
+		Session string `json:"session"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &login)
+	if rec = s.do(t, http.MethodGet, "/api/system", "", map[string]string{"X-Web-Session": login.Session}); rec.Code != http.StatusOK {
+		t.Fatalf("system with web session: got %d want 200", rec.Code)
+	}
+
+	rec = s.do(t, http.MethodPost, "/api/tokens", `{"name":"sys"}`, map[string]string{"X-Web-Session": login.Session})
+	var tok struct {
+		Token string `json:"token"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &tok)
+	if rec = s.do(t, http.MethodGet, "/api/system", "", map[string]string{"Authorization": "Bearer " + tok.Token}); rec.Code != http.StatusOK {
+		t.Fatalf("system with token: got %d want 200", rec.Code)
 	}
 }
 

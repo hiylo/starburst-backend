@@ -24,17 +24,18 @@ import (
 
 // Server wires all backend components behind an HTTP/WS listener.
 type Server struct {
-	cfg         *config.Config
-	store       store.Store
-	auth        *auth.Manager
-	openCode    *opencode.Client
-	hub         *push.Hub
-	automation  *automation.Engine
-	llm         *llm.Client
-	httpServer  *http.Server
-	hasWebUI    bool
-	webUIFS     webUIFSProvider
-	testMux     http.Handler // set only in tests
+	cfg        *config.Config
+	store      store.Store
+	auth       *auth.Manager
+	openCode   *opencode.Client
+	hub        *push.Hub
+	automation *automation.Engine
+	llm        *llm.Client
+	httpServer *http.Server
+	hasWebUI   bool
+	webUIFS    webUIFSProvider
+	testMux    http.Handler // set only in tests
+	loginLimit *loginLimiter
 }
 
 // New assembles the server with its dependencies.
@@ -45,6 +46,7 @@ func New(cfg *config.Config, st store.Store, am *auth.Manager, oc *opencode.Clie
 		auth:       am,
 		openCode:   oc,
 		hub:        hub,
+		loginLimit: newLoginLimiter(5, 5*time.Minute),
 	}
 }
 
@@ -150,6 +152,7 @@ func (s *Server) tokenFromRequest(r *http.Request) (*store.Token, bool) {
 		if err != nil || rec == nil {
 			return nil, false
 		}
+		_ = s.auth.TouchToken(r.Context(), rec.ID)
 		return rec, true
 	}
 	return nil, false

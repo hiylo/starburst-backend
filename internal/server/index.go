@@ -2,9 +2,10 @@ package server
 
 import "net/http"
 
-// handleIndex serves the config page when embedded assets exist, otherwise a
-// plain text hint. The backend is headless: this endpoint just documents that
-// the config UI is reachable on the same port at /config.
+// handleIndex serves the embedded config page at / when web assets are built,
+// otherwise a plain text hint that the backend is running. Authentication is
+// done by the web UI itself via /api/web/session; the page itself is public so
+// the login screen can be reached.
 func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/" {
 		writeErr(w, http.StatusNotFound, "not found")
@@ -16,5 +17,5 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write([]byte("opencode-backend is running (headless).\nConfig UI: GET /config (needs web session)\n"))
+	_, _ = w.Write([]byte("opencode-backend is running (headless).\nConfig UI is not compiled in; authenticate via POST /api/web/session.\n"))
 }

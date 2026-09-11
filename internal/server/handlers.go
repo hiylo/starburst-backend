@@ -35,10 +35,15 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleSystem reports version and server config summary.
+// handleSystem reports version and server config summary. It leaks internal
+// hostnames, so it requires either an APP token or a web session.
 func (s *Server) handleSystem(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if _, ok := s.tokenFromRequest(r); !ok && !s.requireWeb(r) {
+		writeErr(w, http.StatusUnauthorized, "invalid token")
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
@@ -46,10 +51,10 @@ func (s *Server) handleSystem(w http.ResponseWriter, r *http.Request) {
 
 	version, _ := s.openCode.GetVersion(ctx)
 	writeJSON(w, http.StatusOK, map[string]any{
-		"backend":       "opencode-backend",
-		"opencodeURL":   s.cfg.OpenCodeURL,
+		"backend":         "opencode-backend",
+		"opencodeURL":     s.cfg.OpenCodeURL,
 		"opencodeVersion": version,
-		"db":            s.cfg.DBDriver,
+		"db":              s.cfg.DBDriver,
 	})
 }
 
@@ -65,6 +70,11 @@ func (s *Server) handleWebSession(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusBadRequest, "invalid request body")
 			return
 		}
+		key := clientKey(r)
+		if !s.loginLimit.allow(key) {
+			writeErr(w, http.StatusTooManyRequests, "too many login attempts, try again later")
+			return
+		}
 		ok, err := s.auth.VerifyPassword(r.Context(), req.Password)
 		if err != nil {
 			writeErr(w, http.StatusInternalServerError, "auth error")
@@ -74,6 +84,7 @@ func (s *Server) handleWebSession(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusUnauthorized, "invalid password")
 			return
 		}
+		s.loginLimit.clear(key)
 		sid, err := s.registerWebSession(r)
 		if err != nil {
 			writeErr(w, http.StatusInternalServerError, "create session failed")
@@ -181,29 +192,20 @@ func (s *Server) handleTokenByID(w http.ResponseWriter, r *http.Request) {
 // The token may be supplied via the Authorization header (Bearer) or the
 // ?token= query parameter, since browsers cannot set WS headers.
 func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.requireToken(r); !ok {
-		if q := r.URL.Query().Get("token"); q != "" {
-			rec, err := s.auth.VerifyToken(r.Context(), q)
-			if err != nil || rec == nil {
-				writeErr(w, http.StatusUnauthorized, "invalid token")
-				return
-			}
-			_ = s.auth.TouchToken(r.Context(), rec.ID)
-		} else {
-			writeErr(w, http.StatusUnauthorized, "invalid token")
-			return
-		}
+	if _, ok := s.tokenFromRequest(r); !ok {
+		writeErr(w, http.StatusUnauthorized, "invalid token")
+		return
 	}
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		log.Printf("ws upgrade failed: %v", err)
 		return
 	}
-	s.hub.Register(conn)
-	defer s.hub.Unregister(conn)
+	hc := s.hub.Register(conn)
+	defer s.hub.Unregister(hc)
 
 	// Notify the client it is subscribed.
-	_ = conn.WriteJSON(push.Message{Type: "subscribed"})
+	_ = hc.Write(push.Message{Type: "subscribed"})
 
 	// Read loop: discard inbound frames (keep-alive pings); on error exit.
 	for {
