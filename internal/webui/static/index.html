@@ -70,6 +70,8 @@
   .badge.queued, .badge.retrying { background: rgba(245,158,11,.15); color: var(--warn); }
   .badge.running { background: rgba(99,102,241,.15); color: var(--primary); }
   .badge.canceled { background: rgba(154,161,173,.2); color: var(--muted); }
+  .badge.pending { background: rgba(154,161,173,.2); color: var(--muted); }
+  .badge.blocked { background: rgba(239,68,68,.15); color: var(--danger); }
   .badge.enabled { background: rgba(16,185,129,.15); color: var(--ok); }
   .badge.disabled { background: rgba(154,161,173,.2); color: var(--muted); }
   .clip { max-width: 280px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -85,15 +87,24 @@
   .stream .line { padding: 2px 0; border-bottom: 1px solid #1a1d24; }
   .stream .t { color: var(--primary); }
   .stream .meta { color: var(--muted); }
+  .toast-wrap { position: fixed; top: 14px; right: 14px; z-index: 99; display: flex; flex-direction: column; gap: 8px; max-width: 360px; }
+  .toast { padding: 10px 14px; border-radius: 8px; font-size: 13px; line-height: 1.5; background: var(--panel); border: 1px solid var(--border); box-shadow: 0 6px 20px rgba(0,0,0,.35); animation: toastIn .25s ease; }
+  .toast.warn { border-left: 3px solid var(--warn); }
+  .toast.crit { border-left: 3px solid var(--danger); }
+  .toast.info { border-left: 3px solid var(--primary); }
+  .toast b { display: block; margin-bottom: 2px; }
+  @keyframes toastIn { from { opacity: 0; transform: translateY(-6px); } to { opacity: 1; transform: none; } }
 </style>
 </head>
 <body>
+<div class="toast-wrap" id="toastWrap"></div>
 <div class="app">
   <aside class="sidebar">
     <div class="logo">OpenCode <span>Backend</span></div>
     <nav class="nav" id="nav">
       <button data-page="overview" class="active">概览</button>
       <button data-page="tasks">任务</button>
+      <button data-page="stream">实时流</button>
       <button data-page="projects">项目 / 会话</button>
       <button data-page="rules">自动化规则</button>
       <button data-page="archives">会话归档</button>
@@ -148,9 +159,11 @@
         <textarea id="taskPrompt" placeholder="例如：给所有 controller 加日志"></textarea>
         <label>目录（可选，新会话用）</label>
         <input type="text" id="taskDirectory" placeholder="/path/to/repo">
+        <label>前置任务 ID（可选，等它成功后再执行）</label>
+        <input type="text" id="taskDependsOn" class="mono" placeholder="task_...">
         <div class="row" style="margin-top:12px">
           <button onclick="submitTask()">提交任务</button>
-          <span class="muted" style="font-size:12px">提交后立即返回，后台执行，可通过流式/刷新查看进度</span>
+          <span class="muted" style="font-size:12px">提交后立即返回，后台执行；填了前置任务则先等待它完成</span>
         </div>
         <div id="taskSubmitMsg" class="msg"></div>
       </div>
@@ -164,12 +177,31 @@
             <option value="succeeded">已完成</option>
             <option value="failed">失败</option>
             <option value="canceled">已取消</option>
+            <option value="pending">等待前置</option>
+            <option value="blocked">被阻塞</option>
           </select>
           <button class="ghost" onclick="loadTasks()">刷新</button>
           <label style="margin:0"><input type="checkbox" id="taskAutoRefresh" checked> 自动刷新</label>
         </div>
         <div id="taskMsg" class="msg"></div>
-        <table id="taskTable"><thead><tr><th>ID</th><th>目录</th><th>Prompt</th><th>状态</th><th>结果/错误</th><th>AI 摘要</th><th>创建时间</th><th></th></tr></thead><tbody></tbody></table>
+        <table id="taskTable"><thead><tr><th>ID</th><th>目录</th><th>Prompt</th><th>状态</th><th>前置</th><th>结果/错误</th><th>AI 摘要</th><th>创建时间</th><th></th></tr></thead><tbody></tbody></table>
+      </div>
+    </div>
+
+    <!-- 实时流 -->
+    <div id="page-stream" class="page">
+      <div class="card">
+        <h2>上游事件流（SSE）</h2>
+        <p class="muted" style="font-size:12px;margin-top:0">
+          后端持有到本机 OpenCode 的长连接并逐事件转发，断线自动重连。需在右上角填入 APP Token 后才能打开。
+        </p>
+        <div class="row">
+          <button class="ghost" id="streamToggle" onclick="toggleStream()">打开</button>
+          <button class="ghost" onclick="clearStream()">清空</button>
+          <span id="streamState" class="muted" style="font-size:12px">未连接</span>
+        </div>
+        <div id="streamMsg" class="msg"></div>
+        <div id="streamBox" class="stream"></div>
       </div>
     </div>
 
@@ -179,7 +211,14 @@
         <h2>本机 OpenCode 会话</h2>
         <div class="row"><button class="ghost" onclick="loadProjects()">刷新</button></div>
         <div id="projectMsg" class="msg"></div>
-        <table id="projectTable"><thead><tr><th>标题</th><th>目录</th><th>模型</th><th>Agent</th><th>Token(输入/输出)</th><th>状态</th><th>更新时间</th></tr></thead><tbody></tbody></table>
+        <table id="projectTable"><thead><tr><th>目录</th><th>会话数</th><th></th></tr></thead><tbody></tbody></table>
+      </div>
+      <div id="projectSessionCard" class="card hidden">
+        <h2>会话明细 <span id="projectSessionDir" class="mono muted" style="font-size:13px"></span></h2>
+        <div class="row">
+          <button class="ghost" onclick="closeProjectSessions()">收起</button>
+        </div>
+        <table id="projectSessionTable"><thead><tr><th>标题</th><th>会话 ID</th><th>模型</th><th>Agent</th><th>Token(输入/输出)</th><th>状态</th><th>更新时间</th></tr></thead><tbody></tbody></table>
       </div>
     </div>
 
@@ -336,6 +375,7 @@ let session = localStorage.getItem(SESSION_KEY) || "";
 const TASK_STATUS = {
   queued: "排队中", running: "执行中", succeeded: "已完成",
   failed: "失败", retrying: "重试中", canceled: "已取消",
+  pending: "等待前置", blocked: "被阻塞",
 };
 const KIND_LABEL = { cron: "cron 定时", git: "git 监听", http: "webhook" };
 
@@ -353,6 +393,21 @@ function appHeaders() {
 function show(el, msg, ok) {
   el.textContent = msg || "";
   el.className = "msg " + (ok ? "ok" : "err");
+}
+// toast 弹出右上角通知，用于展示服务端推送的关键任务事件。
+// kind 为 info / warn / crit；ttl 毫秒后自动消失（默认 6 秒）。
+function toast(title, text, kind, ttl) {
+  const wrap = document.getElementById("toastWrap");
+  if (!wrap) return;
+  const el = document.createElement("div");
+  el.className = "toast " + (kind || "info");
+  el.innerHTML = "<b>" + escapeHtml(title) + "</b>" + escapeHtml(text || "");
+  wrap.appendChild(el);
+  setTimeout(() => {
+    el.style.transition = "opacity .3s";
+    el.style.opacity = "0";
+    setTimeout(() => el.remove(), 300);
+  }, ttl || 6000);
 }
 function escapeHtml(s) {
   return String(s ?? "").replace(/[&<>"']/g, c =>
@@ -374,7 +429,7 @@ async function api(path, opts) {
 
 /* ---------- 路由 ---------- */
 const TITLES = {
-  overview: "概览", tasks: "任务", projects: "项目 / 会话",
+  overview: "概览", tasks: "任务", stream: "实时流", projects: "项目 / 会话",
   rules: "自动化规则", archives: "会话归档", audit: "审计日志",
   tokens: "Token 管理", settings: "设置",
 };
@@ -384,6 +439,7 @@ function switchPage(name) {
   document.querySelectorAll("#nav button").forEach(b => b.classList.toggle("active", b.dataset.page === name));
   document.getElementById("pageTitle").textContent = TITLES[name] || name;
   if (name === "settings") loadLLMConfig();
+  if (name === "stream") ensureStream();
 }
 document.querySelectorAll("#nav button").forEach(b => {
   b.addEventListener("click", () => switchPage(b.dataset.page));
@@ -423,6 +479,7 @@ function saveAppToken() {
   document.getElementById("appToken").value = v;
   if (taskWS) taskWS.close();
   connectTaskWS();
+  if (document.getElementById("page-stream").classList.contains("active")) ensureStream(true);
 }
 
 /* ---------- 概览 ---------- */
@@ -462,12 +519,17 @@ async function loadOverview() {
 async function submitTask() {
   const prompt = document.getElementById("taskPrompt").value.trim();
   const directory = document.getElementById("taskDirectory").value.trim();
+  const dependsOn = document.getElementById("taskDependsOn").value.trim();
   if (!prompt) { show(document.getElementById("taskSubmitMsg"), "请填写 Prompt"); return; }
-  const res = await api("/api/tasks", { method: "POST", headers: appHeaders(), body: JSON.stringify({ prompt, directory }) });
+  const body = { prompt, directory };
+  if (dependsOn) body.dependsOn = dependsOn;
+  const res = await api("/api/tasks", { method: "POST", headers: appHeaders(), body: JSON.stringify(body) });
   const data = await res.json();
   if (!res.ok) { show(document.getElementById("taskSubmitMsg"), data.error || "提交失败"); return; }
-  show(document.getElementById("taskSubmitMsg"), `已提交任务 ${data.id}`, true);
+  const note = data.status === "pending" ? "（等待前置任务）" : "";
+  show(document.getElementById("taskSubmitMsg"), `已提交任务 ${data.id}${note}`, true);
   document.getElementById("taskPrompt").value = "";
+  document.getElementById("taskDependsOn").value = "";
   loadTasks();
 }
 async function loadTasks() {
@@ -481,20 +543,37 @@ async function loadTasks() {
   tb.innerHTML = "";
   for (const t of list) {
     const detail = (t.error || t.result || t.progress || "").trim();
-    tb.insertAdjacentHTML("beforeend", `<tr data-task="${escapeHtml(t.id)}">
-      <td class="mono clip" title="${escapeHtml(t.id)}">${escapeHtml(t.id)}</td>
+    const cancellable = t.status === "queued" || t.status === "running" || t.status === "pending";
+    const tid = escapeHtml(t.id);
+    const action = t.status === "blocked"
+      ? `<button class="ghost sm" onclick="unblockTask('${tid}')">解阻</button>`
+      : (cancellable ? `<button class="danger sm" onclick="cancelTask('${tid}')">取消</button>` : "");
+    tb.insertAdjacentHTML("beforeend", `<tr data-task="${tid}">
+      <td class="mono clip" title="${tid}">${tid}</td>
       <td class="clip" title="${escapeHtml(t.directory)}">${escapeHtml(t.directory) || "-"}</td>
       <td class="clip" title="${escapeHtml(t.prompt)}">${escapeHtml(t.prompt)}</td>
       <td><span class="badge ${escapeHtml(t.status)}">${TASK_STATUS[t.status] || t.status}</span></td>
+      <td class="mono clip muted" title="${escapeHtml(t.dependsOn || "")}">${escapeHtml(t.dependsOn) || "-"}</td>
       <td class="clip" title="${escapeHtml(detail)}">${escapeHtml(detail) || "-"}</td>
       <td class="clip muted" title="${escapeHtml(t.aiSummary || "")}">${escapeHtml(t.aiSummary) || "-"}</td>
       <td>${fmtDate(t.createdAt)}</td>
-      <td>${(t.status === "queued" || t.status === "running") ? `<button class="danger sm" onclick="cancelTask('${escapeHtml(t.id)}')">取消</button>` : ""}</td>
+      <td>${action}</td>
     </tr>`);
   }
 }
 async function cancelTask(id) {
   await api("/api/tasks/" + encodeURIComponent(id), { method: "DELETE", headers: appHeaders() });
+  loadTasks();
+}
+// unblockTask 手动解阻：人工处理完前置问题后，把 blocked 任务重新排队。
+async function unblockTask(id) {
+  if (!confirm("确认手动解阻该任务？\n前置任务不会重新执行，该任务会直接重新排队。")) return;
+  const res = await api("/api/tasks/" + encodeURIComponent(id), { method: "POST", headers: appHeaders() });
+  if (!res.ok) {
+    const data = await res.json();
+    show(document.getElementById("taskMsg"), data.error || "解阻失败");
+    return;
+  }
   loadTasks();
 }
 
@@ -507,19 +586,48 @@ async function loadProjects() {
   const tb = document.querySelector("#projectTable tbody");
   tb.innerHTML = "";
   for (const p of list) {
-    const cls = p.busy ? "busy" : "idle";
-    const label = p.busy ? "忙碌" : "空闲";
-    const tokens = p.inputTokens != null ? `${fmtNum(p.inputTokens)} / ${fmtNum(p.outputTokens)}` : "-";
     tb.insertAdjacentHTML("beforeend", `<tr>
-      <td title="${escapeHtml(p.id)}">${escapeHtml(p.title || p.slug || p.id)}</td>
       <td class="clip" title="${escapeHtml(p.directory)}">${escapeHtml(p.directory) || "-"}</td>
-      <td class="clip">${escapeHtml(p.model) || "-"}</td>
-      <td>${escapeHtml(p.agent) || "-"}</td>
-      <td class="mono">${tokens}</td>
-      <td><span class="badge ${cls}">${label}</span></td>
-      <td>${p.updatedMs ? new Date(p.updatedMs).toLocaleString() : "-"}</td>
+      <td class="mono">${p.sessionCount ?? 0}</td>
+      <td><button class="ghost sm" onclick="loadProjectSessions('${escapeHtml(p.id).replace(/'/g, "\\'")}')">查看会话</button></td>
     </tr>`);
   }
+  if (!list.length) {
+    tb.insertAdjacentHTML("beforeend", `<tr><td colspan="3" class="muted">暂无会话</td></tr>`);
+  }
+}
+async function loadProjectSessions(dir) {
+  const card = document.getElementById("projectSessionCard");
+  card.classList.remove("hidden");
+  document.getElementById("projectSessionDir").textContent = dir;
+  const tb = document.querySelector("#projectSessionTable tbody");
+  tb.innerHTML = `<tr><td colspan="7" class="muted">加载中…</td></tr>`;
+  const res = await api("/api/projects/" + encodeURIComponent(dir), { headers: appHeaders() });
+  const data = await res.json();
+  if (!res.ok) { tb.innerHTML = `<tr><td colspan="7" class="muted">${escapeHtml(data.error || "加载失败")}</td></tr>`; return; }
+  const list = data.sessions || [];
+  tb.innerHTML = "";
+  for (const s of list) {
+    const cls = s.busy ? "busy" : "idle";
+    const label = s.busy ? "忙碌" : "空闲";
+    const tokens = s.inputTokens != null ? `${fmtNum(s.inputTokens)} / ${fmtNum(s.outputTokens)}` : "-";
+    tb.insertAdjacentHTML("beforeend", `<tr>
+      <td class="clip" title="${escapeHtml(s.id)}">${escapeHtml(s.title || s.slug || s.id)}</td>
+      <td class="mono clip" title="${escapeHtml(s.id)}">${escapeHtml(s.id)}</td>
+      <td class="clip">${escapeHtml(s.model) || "-"}</td>
+      <td>${escapeHtml(s.agent) || "-"}</td>
+      <td class="mono">${tokens}</td>
+      <td><span class="badge ${cls}">${label}</span></td>
+      <td>${s.updatedMs ? new Date(s.updatedMs).toLocaleString() : "-"}</td>
+    </tr>`);
+  }
+  if (!list.length) {
+    tb.insertAdjacentHTML("beforeend", `<tr><td colspan="7" class="muted">该项目下暂无会话</td></tr>`);
+  }
+}
+function closeProjectSessions() {
+  document.getElementById("projectSessionCard").classList.add("hidden");
+  document.getElementById("projectSessionDir").textContent = "";
 }
 function fmtNum(n) {
   if (n >= 1e9) return (n / 1e9).toFixed(1) + "B";
@@ -792,6 +900,17 @@ function connectTaskWS() {
     } else if (msg.type === "task.failure") {
       updateTaskAI(msg.payload.id, msg.payload.analysis, true);
     } else if (msg.type === "task.event") {
+      const p = msg.payload || {};
+      const label = TASK_STATUS[p.status] || p.status || "";
+      if (p.status === "blocked") {
+        // 前置任务失败/取消：需要人工介入，弹通知并跳到任务页。
+        toast("任务被阻塞：" + label, (p.reason ? "原因：" + p.reason : "") + (p.upstream ? "（前置 " + p.upstream + "）" : ""), "warn", 12000);
+      } else if (p.status === "failed") {
+        toast("任务失败：" + label, "", "crit", 12000);
+      } else if (p.status === "queued" && (p.reason === "manual unblock" || p.upstream)) {
+        const why = p.reason === "manual unblock" ? "已手动解阻" : "前置 " + p.upstream + " 已完成";
+        toast("任务已重新排队", why, "info");
+      }
       const page = document.querySelector(".page.active");
       if (page && page.id === "page-tasks" && session) loadTasks();
     }
@@ -800,12 +919,66 @@ function connectTaskWS() {
 }
 function updateTaskAI(id, text, isFailure) {
   const tr = document.querySelector('#taskTable tr[data-task="' + id + '"]');
-  if (!tr || tr.children.length < 6) return;
-  const aiCell = tr.children[5];
+  if (!tr || tr.children.length < 7) return;
+  const aiCell = tr.children[6];
   aiCell.textContent = text || "";
   aiCell.title = text || "";
   aiCell.className = isFailure ? "clip" : "clip muted";
   if (isFailure) aiCell.style.color = "var(--danger)";
+}
+
+/* ---------- 实时事件流（SSE 中继） ---------- */
+const STREAM_MAX_LINES = 500;
+let streamES = null;
+
+function streamState(text, color) {
+  const el = document.getElementById("streamState");
+  el.textContent = text;
+  el.style.color = color || "var(--muted)";
+}
+function appendStreamLine(text) {
+  const box = document.getElementById("streamBox");
+  box.insertAdjacentHTML("beforeend",
+    `<div class="line"><span class="t">${new Date().toLocaleTimeString()}</span> ${escapeHtml(text)}</div>`);
+  while (box.children.length > STREAM_MAX_LINES) box.removeChild(box.firstChild);
+  box.scrollTop = box.scrollHeight;
+}
+function ensureStream(force) {
+  const t = localStorage.getItem(APP_TOKEN_KEY) || "";
+  if (!t) {
+    streamState("未连接");
+    show(document.getElementById("streamMsg"), "先在右上角填入 APP Token 并保存，再打开事件流");
+    return;
+  }
+  if (streamES && !force) return;
+  if (streamES) { streamES.close(); streamES = null; }
+  document.getElementById("streamToggle").textContent = "停止";
+  const es = new EventSource("/api/stream?token=" + encodeURIComponent(t));
+  streamES = es;
+  streamState("连接中…");
+  show(document.getElementById("streamMsg"), "");
+  es.addEventListener("connected", () => streamState("已连接", "var(--ok)"));
+  es.onmessage = (ev) => {
+    let pretty = ev.data;
+    try { pretty = JSON.stringify(JSON.parse(pretty)); } catch (_) {}
+    appendStreamLine(pretty);
+  };
+  es.onerror = () => {
+    if (streamES === es) streamState("已断开，等待后端重连…", "var(--warn)");
+  };
+}
+function toggleStream() {
+  if (streamES) {
+    streamES.close();
+    streamES = null;
+    streamState("已停止");
+    document.getElementById("streamToggle").textContent = "打开";
+  } else {
+    ensureStream(true);
+  }
+}
+function clearStream() {
+  document.getElementById("streamBox").innerHTML = "";
 }
 
 /* ---------- 启动 ---------- */
