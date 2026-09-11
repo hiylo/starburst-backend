@@ -109,3 +109,28 @@ func contains(set []int, v int) bool {
 	}
 	return false
 }
+
+// ParseCron validates a 6-field cron expression and returns the split fields.
+// It returns an error when the expression is malformed, so callers can reject
+// invalid schedules up front.
+func ParseCron(expr string) ([]string, error) {
+	fields := strings.Fields(expr)
+	if len(fields) != 6 {
+		return nil, fmt.Errorf("cron: expected 6 fields, got %d", len(fields))
+	}
+	_, err := nextCron(time.Now(), fields)
+	if err != nil {
+		return nil, err
+	}
+	return fields, nil
+}
+
+// NextCron returns the next fire time strictly after `after` for a 6-field
+// cron expression. It is the exported entry point used by the task scheduler.
+func NextCron(after time.Time, expr string) (time.Time, error) {
+	fields, err := ParseCron(expr)
+	if err != nil {
+		return time.Time{}, err
+	}
+	return nextCron(after, fields)
+}

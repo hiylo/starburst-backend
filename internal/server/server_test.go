@@ -1184,3 +1184,120 @@ func TestTaskListPagination(t *testing.T) {
 		t.Fatalf("empty filtered page: %+v", p)
 	}
 }
+
+func TestFireRecurringFirstOccurrence(t *testing.T) {
+	s := newTestServer(t)
+	ctx := context.Background()
+
+	tmpl := &store.Task{ID: "tmpl_1", Name: "每秒", Prompt: "recurring", Cron: "* * * * * *"}
+	if err := s.store.CreateTaskWithStatus(ctx, tmpl, store.TaskScheduled); err != nil {
+		t.Fatalf("create template: %v", err)
+	}
+	got, err := s.store.GetTask(ctx, "tmpl_1")
+	if err != nil {
+		t.Fatalf("read template: %v", err)
+	}
+	if got.CreatedAt.IsZero() {
+		t.Fatalf("template createdAt is zero, the fire base is unusable")
+	}
+
+	// First poll happens 30s after creation, so the first occurrence
+	// (created+1s) is already due and must be cloned.
+	due := got.CreatedAt.Add(30 * time.Second)
+	s.fireRecurring(ctx, got, due)
+
+	listed, err := s.store.ListTasks(ctx, "", 20, 0)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	clones := 0
+	for _, task := range listed {
+		if task.ID == "tmpl_1" || task.Prompt != "recurring" {
+			continue
+		}
+		clones++
+		if task.Status != store.TaskQueued {
+			t.Fatalf("clone %s status %q, want queued", task.ID, task.Status)
+		}
+	}
+	if clones != 1 {
+		t.Fatalf("clones %d, want 1: a template must fire its first occurrence", clones)
+	}
+
+	got, err = s.store.GetTask(ctx, "tmpl_1")
+	if err != nil {
+		t.Fatalf("read template after fire: %v", err)
+	}
+	if got.LastFiredAt == nil {
+		t.Fatalf("lastFiredAt was not recorded")
+	}
+	if d := got.LastFiredAt.Sub(due); d > 2*time.Second || d < -2*time.Second {
+		t.Fatalf("lastFiredAt %v, want %v", got.LastFiredAt, due)
+	}
+
+	// A poll right after creation: the first occurrence is still ahead, so
+	// nothing may be cloned yet.
+	fresh := &store.Task{ID: "tmpl_2", Prompt: "later", Cron: "* * * * * *"}
+	if err := s.store.CreateTaskWithStatus(ctx, fresh, store.TaskScheduled); err != nil {
+		t.Fatalf("create fresh template: %v", err)
+	}
+	freshGot, err := s.store.GetTask(ctx, "tmpl_2")
+	if err != nil {
+		t.Fatalf("read fresh template: %v", err)
+	}
+	s.fireRecurring(ctx, freshGot, freshGot.CreatedAt.Add(500*time.Millisecond))
+
+	listed, err = s.store.ListTasks(ctx, "", 20, 0)
+	if err != nil {
+		t.Fatalf("list again: %v", err)
+	}
+	for _, task := range listed {
+		if task.Prompt == "later" && task.ID != "tmpl_2" {
+			t.Fatalf("template fired before its first occurrence")
+		}
+	}
+}
+
+func TestTaskCreateReturnsStoredTimestamps(t *testing.T) {
+	s := newTestServer(t)
+
+	rec := s.do(t, http.MethodPost, "/api/web/session", `{"password":"admin"}`, nil)
+	var login struct {
+		Session string `json:"session"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &login)
+	rec = s.do(t, http.MethodPost, "/api/tokens", `{"name":"ts"}`, map[string]string{"X-Web-Session": login.Session})
+	var tok struct {
+		Token string `json:"token"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &tok)
+	th := map[string]string{"Authorization": "Bearer " + tok.Token}
+
+	before := time.Now()
+	rec = s.do(t, http.MethodPost, "/api/tasks", `{"prompt":"timestamps"}`, th)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create status %d: %s", rec.Code, rec.Body.String())
+	}
+	var out store.Task
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if out.Status != store.TaskQueued {
+		t.Fatalf("status %q, want queued", out.Status)
+	}
+	for _, f := range []struct {
+		name string
+		ts   time.Time
+	}{
+		{"createdAt", out.CreatedAt},
+		{"updatedAt", out.UpdatedAt},
+		{"availableAt", out.AvailableAt},
+	} {
+		if f.ts.IsZero() {
+			t.Fatalf("%s is zero in the create response", f.name)
+		}
+		if f.ts.Before(before.Add(-time.Minute)) || f.ts.After(time.Now().Add(time.Minute)) {
+			t.Fatalf("%s %v is out of range", f.name, f.ts)
+		}
+	}
+}

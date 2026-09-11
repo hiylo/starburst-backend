@@ -115,6 +115,10 @@ func main() {
 	srv.SetAutomation(eng)
 	go eng.Run(ctx)
 
+	// Task scheduler: promotes due one-shot scheduled tasks to queued and
+	// clones recurring cron templates into concrete tasks.
+	go srv.RunScheduler(ctx)
+
 	// Housekeeping: purge audit logs and expired web sessions periodically.
 	go func() {
 		ticker := time.NewTicker(6 * time.Hour)

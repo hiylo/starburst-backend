@@ -103,6 +103,20 @@ type Store interface {
 	// process restart) back to queued so the executor picks them up again.
 	RecoverStaleRunning(ctx context.Context) (int, error)
 
+	// ---- Task scheduling ----
+
+	// ListScheduledTasks returns all tasks in the scheduled state (one-shot
+	// future and recurring cron templates).
+	ListScheduledTasks(ctx context.Context) ([]*Task, error)
+	// PromoteScheduledTask flips a scheduled one-shot task to queued.
+	// Returns true if changed.
+	PromoteScheduledTask(ctx context.Context, id string) (bool, error)
+	// SetTaskLastFiredAt records the last time a recurring template fired.
+	SetTaskLastFiredAt(ctx context.Context, id string, at time.Time) error
+	// CancelScheduledTask cancels a scheduled (one-shot or recurring) task.
+	// Returns true if changed.
+	CancelScheduledTask(ctx context.Context, id string) (bool, error)
+
 	// ---- Automation rules ----
 
 	// CreateRule persists a new rule.

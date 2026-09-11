@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/hiylo/opencode-backend/internal/automation"
 	"github.com/hiylo/opencode-backend/internal/push"
 	"github.com/hiylo/opencode-backend/internal/store"
 )
@@ -35,8 +36,8 @@ func (s *Server) handleTasks(w http.ResponseWriter, r *http.Request) {
 // handleTasksStatus lists tasks filtered by ?status=.
 // listTasks returns one page of tasks as {"tasks", "total", "limit", "offset"}.
 // ?status= filters, ?limit= (default 50, max 500) and ?offset= (default 0)
-// page; total is the count matching the status filter so a client knows
-// whether a next page exists.
+// page; total is the unfiltered-by-page count so a client knows whether a
+// next page exists.
 func (s *Server) listTasks(w http.ResponseWriter, r *http.Request) {
 	status := r.URL.Query().Get("status")
 	limit := 50
@@ -72,15 +73,20 @@ func (s *Server) listTasks(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// createTask accepts {"prompt","sessionId"?,"directory"?,"dependsOn"?} and
-// enqueues it. When dependsOn points at an existing non-terminal task the new
-// task is created as pending and is only re-queued once the upstream succeeds.
+// createTask accepts {"name"?,"prompt","sessionId"?,"directory"?,"dependsOn"?,
+// "scheduledAt"?,"cron"?} and enqueues it. Scheduling (scheduledAt = one-shot
+// future, cron = recurring) marks the task "scheduled"; the scheduler later
+// promotes it to queued. When dependsOn points at an existing non-terminal task
+// the new task is created as pending and is only re-queued once upstream succeeds.
 func (s *Server) createTask(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Prompt    string `json:"prompt"`
-		SessionID string `json:"sessionId"`
-		Directory string `json:"directory"`
-		DependsOn string `json:"dependsOn"`
+		Name        string `json:"name"`
+		Prompt      string `json:"prompt"`
+		SessionID   string `json:"sessionId"`
+		Directory   string `json:"directory"`
+		DependsOn   string `json:"dependsOn"`
+		ScheduledAt string `json:"scheduledAt"`
+		Cron        string `json:"cron"`
 	}
 	if err := readJSON(r, &req); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid request body")
@@ -94,38 +100,77 @@ func (s *Server) createTask(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
 
-	// Validate the dependency before creating so a typo fails fast instead of
-	// leaving a task pending forever.
-	status := store.TaskQueued
-	if req.DependsOn != "" {
-		up, err := s.store.GetTask(ctx, req.DependsOn)
+	var scheduledAt *time.Time
+	if req.ScheduledAt != "" {
+		parsed, err := time.Parse(time.RFC3339, req.ScheduledAt)
 		if err != nil {
-			writeErr(w, http.StatusBadRequest, "dependsOn task not found")
+			writeErr(w, http.StatusBadRequest, "scheduledAt must be RFC3339")
 			return
 		}
-		switch up.Status {
-		case store.TaskSucceeded:
-			// Already done: run immediately.
-		case store.TaskQueued, store.TaskRunning, store.TaskPending:
-			status = store.TaskPending
-		default:
-			writeErr(w, http.StatusBadRequest, "dependsOn task already finished with status "+up.Status)
+		scheduledAt = &parsed
+	}
+	if req.Cron != "" {
+		if _, err := automation.ParseCron(req.Cron); err != nil {
+			writeErr(w, http.StatusBadRequest, "invalid cron: "+err.Error())
 			return
 		}
 	}
 
 	t := &store.Task{
-		ID:        newTaskID(),
-		SessionID: req.SessionID,
-		Directory: req.Directory,
-		Prompt:    req.Prompt,
-		DependsOn: req.DependsOn,
+		ID:          newTaskID(),
+		SessionID:   req.SessionID,
+		Directory:   req.Directory,
+		Name:        req.Name,
+		Prompt:      req.Prompt,
+		DependsOn:   req.DependsOn,
+		ScheduledAt: scheduledAt,
+		Cron:        req.Cron,
 	}
+
+	// Determine initial status. Scheduling takes precedence over dependency:
+	// a scheduled task is gated by time, not by an upstream task.
+	status := store.TaskQueued
+	switch {
+	case req.Cron != "":
+		status = store.TaskScheduled
+	case scheduledAt != nil && scheduledAt.After(time.Now()):
+		status = store.TaskScheduled
+	default:
+		// Validate the dependency before creating so a typo fails fast instead
+		// of leaving a task pending forever.
+		if req.DependsOn != "" {
+			up, err := s.store.GetTask(ctx, req.DependsOn)
+			if err != nil {
+				writeErr(w, http.StatusBadRequest, "dependsOn task not found")
+				return
+			}
+			switch up.Status {
+			case store.TaskSucceeded:
+				// Already done: run immediately.
+			case store.TaskQueued, store.TaskRunning, store.TaskPending, store.TaskScheduled:
+				status = store.TaskPending
+			default:
+				writeErr(w, http.StatusBadRequest, "dependsOn task already finished with status "+up.Status)
+				return
+			}
+		}
+	}
+
 	if err := s.store.CreateTaskWithStatus(ctx, t, status); err != nil {
 		writeErr(w, http.StatusInternalServerError, "create task failed")
 		return
 	}
-	writeJSON(w, http.StatusCreated, t)
+	if status == store.TaskScheduled {
+		s.pushTaskEvent(store.TaskScheduled, map[string]any{"id": t.ID, "status": store.TaskScheduled})
+	}
+	// Echo the stored row: the INSERT stamps created_at/updated_at/available_at
+	// in SQL, so the in-memory struct would report zero times.
+	created, err := s.store.GetTask(ctx, t.ID)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "create task failed")
+		return
+	}
+	writeJSON(w, http.StatusCreated, created)
 }
 
 // handleTaskByID reads (GET), cancels (DELETE) or manually unblocks (POST) a
@@ -157,7 +202,19 @@ func (s *Server) handleTaskByID(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if !canceled {
-			writeErr(w, http.StatusConflict, "task already finished")
+			// Scheduled tasks (one-shot or recurring) are not covered by
+			// CancelTask, so try the scheduled-specific path.
+			sc, err2 := s.store.CancelScheduledTask(ctx, id)
+			if err2 != nil {
+				writeErr(w, http.StatusInternalServerError, "cancel failed")
+				return
+			}
+			if !sc {
+				writeErr(w, http.StatusConflict, "task already finished")
+				return
+			}
+			s.pushTaskEvent(store.TaskCanceled, map[string]any{"id": id, "status": store.TaskCanceled})
+			writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 			return
 		}
 		// A canceled task can never succeed, so release its waiters as blocked.
