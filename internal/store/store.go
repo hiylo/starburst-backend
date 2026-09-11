@@ -56,12 +56,25 @@ type Store interface {
 
 	// CreateTask persists a queued task.
 	CreateTask(ctx context.Context, t *Task) error
+	// CreateTaskWithStatus persists a task with an explicit initial status,
+	// e.g. TaskPending when it must wait for its DependsOn task to succeed.
+	CreateTaskWithStatus(ctx context.Context, t *Task, status string) error
 	// ListTasks returns tasks, newest first, with optional status filter.
 	ListTasks(ctx context.Context, status string, limit int) ([]*Task, error)
 	// GetTask loads a single task.
 	GetTask(ctx context.Context, id string) (*Task, error)
 	// ClaimNextTask picks the oldest queued task and marks it running.
 	ClaimNextTask(ctx context.Context) (*Task, error)
+	// PromotePendingDependents re-queues every pending or blocked task waiting
+	// on upstreamID, e.g. when the upstream later succeeds after a retry.
+	// Returns the ids of the re-queued tasks.
+	PromotePendingDependents(ctx context.Context, upstreamID string) ([]string, error)
+	// BlockDependents marks every pending task waiting on upstreamID as
+	// blocked, recording reason in the error column. Returns the ids of the
+	// blocked tasks.
+	BlockDependents(ctx context.Context, upstreamID, reason string) ([]string, error)
+	// UnblockTask manually re-queues a blocked task. Returns true if changed.
+	UnblockTask(ctx context.Context, id string) (bool, error)
 	// UpdateTaskProgress records a progress note for a running task.
 	UpdateTaskProgress(ctx context.Context, id, progress string) error
 	// SetTaskSession records the resolved session id for a task.
@@ -76,7 +89,7 @@ type Store interface {
 	// incrementing attempts and clearing the error. Returns ErrNotFound if the
 	// task does not exist.
 	RetryTask(ctx context.Context, id string, backoffSecs int) error
-	// CancelTask marks a queued/running task canceled. Returns true if changed.
+	// CancelTask marks a queued/pending/running task canceled. Returns true if changed.
 	CancelTask(ctx context.Context, id string) (bool, error)
 	// IsTaskCanceled reports whether a task is currently in canceled state.
 	IsTaskCanceled(ctx context.Context, id string) (bool, error)

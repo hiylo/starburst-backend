@@ -11,6 +11,8 @@ type TaskStats struct {
 	Succeeded int `json:"succeeded"`
 	Failed    int `json:"failed"`
 	Canceled  int `json:"canceled"`
+	Pending   int `json:"pending"` // waiting for its DependsOn task to succeed
+	Blocked   int `json:"blocked"` // upstream failed, can never run
 	Retried   int `json:"retried"` // tasks with attempts > 1 among all tasks
 	Total     int `json:"total"`
 }
@@ -51,6 +53,10 @@ func (s *sqlStore) TaskStats(ctx context.Context) (*TaskStats, error) {
 			st.Failed = n
 		case TaskCanceled:
 			st.Canceled = n
+		case TaskPending:
+			st.Pending = n
+		case TaskBlocked:
+			st.Blocked = n
 		}
 	}
 	if err := rows.Err(); err != nil {

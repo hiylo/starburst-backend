@@ -295,3 +295,145 @@ func TestDeleteAuditOlderThan(t *testing.T) {
 	}
 	_ = n // no strict assertion; just verifies the call works on both dialects
 }
+
+func TestTaskDependencyPromoteAndBlock(t *testing.T) {
+	ctx := context.Background()
+	st := newTestStore(t)
+
+	// Upstream succeeds first: downstream pending tasks must be re-queued.
+	if err := st.CreateTask(ctx, &Task{ID: "up_ok", Prompt: "up"}); err != nil {
+		t.Fatalf("create upstream: %v", err)
+	}
+	if err := st.CreateTaskWithStatus(ctx, &Task{ID: "dn1", Prompt: "dn1", DependsOn: "up_ok"}, TaskPending); err != nil {
+		t.Fatalf("create dependent: %v", err)
+	}
+	if err := st.CreateTaskWithStatus(ctx, &Task{ID: "dn2", Prompt: "dn2", DependsOn: "up_ok"}, TaskPending); err != nil {
+		t.Fatalf("create dependent: %v", err)
+	}
+
+	// Pending tasks must never be claimed.
+	if got, err := st.ClaimNextTask(ctx); err == nil && got.DependsOn != "" {
+		t.Fatalf("pending task claimed: %+v", got)
+	}
+
+	ids, err := st.PromotePendingDependents(ctx, "up_ok")
+	if err != nil || len(ids) != 2 {
+		t.Fatalf("promote: ids=%v err=%v", ids, err)
+	}
+	got, err := st.GetTask(ctx, "dn1")
+	if err != nil || got.Status != TaskQueued {
+		t.Fatalf("dn1 should be queued: %+v err=%v", got, err)
+	}
+
+	// Upstream fails: downstream pending tasks must be blocked with a reason.
+	if err := st.CreateTask(ctx, &Task{ID: "up_bad", Prompt: "up"}); err != nil {
+		t.Fatalf("create upstream: %v", err)
+	}
+	if err := st.CreateTaskWithStatus(ctx, &Task{ID: "dn3", Prompt: "dn3", DependsOn: "up_bad"}, TaskPending); err != nil {
+		t.Fatalf("create dependent: %v", err)
+	}
+	ids, err = st.BlockDependents(ctx, "up_bad", "upstream failed")
+	if err != nil || len(ids) != 1 || ids[0] != "dn3" {
+		t.Fatalf("block: ids=%v err=%v", ids, err)
+	}
+	got, err = st.GetTask(ctx, "dn3")
+	if err != nil || got.Status != TaskBlocked || got.Error != "upstream failed" {
+		t.Fatalf("dn3 should be blocked: %+v err=%v", got, err)
+	}
+
+	// Blocked tasks are not cancellable; they need an explicit unblock.
+	if ok, err := st.CancelTask(ctx, "dn3"); err != nil || ok {
+		t.Fatalf("cancel blocked should fail: ok=%v err=%v", ok, err)
+	}
+
+	// Stats must expose the new statuses.
+	stats, err := st.TaskStats(ctx)
+	if err != nil {
+		t.Fatalf("stats: %v", err)
+	}
+	if stats.Blocked != 1 || stats.Pending != 0 {
+		t.Fatalf("stats: pending=%d blocked=%d want 0/1", stats.Pending, stats.Blocked)
+	}
+
+	// Pending tasks can be canceled.
+	if err := st.CreateTaskWithStatus(ctx, &Task{ID: "dn4", Prompt: "dn4", DependsOn: "up_bad"}, TaskPending); err != nil {
+		t.Fatalf("create dependent: %v", err)
+	}
+	if ok, err := st.CancelTask(ctx, "dn4"); err != nil || !ok {
+		t.Fatalf("cancel pending: ok=%v err=%v", ok, err)
+	}
+}
+
+// TestTaskUnblockAndRepromote covers the two ways a blocked task becomes
+// runnable again: a human unblocks it directly, or the upstream is retried and
+// eventually succeeds.
+func TestTaskUnblockAndRepromote(t *testing.T) {
+	ctx := context.Background()
+	st := newTestStore(t)
+
+	if err := st.CreateTask(ctx, &Task{ID: "up1", Prompt: "up"}); err != nil {
+		t.Fatalf("create upstream: %v", err)
+	}
+	if err := st.CreateTaskWithStatus(ctx, &Task{ID: "b1", Prompt: "b1", DependsOn: "up1"}, TaskPending); err != nil {
+		t.Fatalf("create dependent: %v", err)
+	}
+	if err := st.CreateTaskWithStatus(ctx, &Task{ID: "b2", Prompt: "b2", DependsOn: "up1"}, TaskPending); err != nil {
+		t.Fatalf("create dependent: %v", err)
+	}
+	if ids, err := st.BlockDependents(ctx, "up1", "upstream failed"); err != nil || len(ids) != 2 {
+		t.Fatalf("block: ids=%v err=%v", ids, err)
+	}
+
+	// Manual unblock: re-queued, block reason cleared.
+	ok, err := st.UnblockTask(ctx, "b1")
+	if err != nil || !ok {
+		t.Fatalf("unblock b1: ok=%v err=%v", ok, err)
+	}
+	got, err := st.GetTask(ctx, "b1")
+	if err != nil || got.Status != TaskQueued || got.Error != "" {
+		t.Fatalf("b1 should be queued with no error: %+v err=%v", got, err)
+	}
+	// Unblocking a task that is not blocked is a no-op.
+	if ok, err := st.UnblockTask(ctx, "b1"); err != nil || ok {
+		t.Fatalf("unblock queued should fail: ok=%v err=%v", ok, err)
+	}
+	if ok, err := st.UnblockTask(ctx, "missing"); err != nil || ok {
+		t.Fatalf("unblock missing should fail: ok=%v err=%v", ok, err)
+	}
+
+	// Upstream retried and succeeded: the remaining blocked task is resurrected.
+	ids, err := st.PromotePendingDependents(ctx, "up1")
+	if err != nil || len(ids) != 1 || ids[0] != "b2" {
+		t.Fatalf("repromote: ids=%v err=%v", ids, err)
+	}
+	got, err = st.GetTask(ctx, "b2")
+	if err != nil || got.Status != TaskQueued || got.Error != "" {
+		t.Fatalf("b2 should be re-queued with no error: %+v err=%v", got, err)
+	}
+
+	// Nothing left to promote.
+	if ids, err := st.PromotePendingDependents(ctx, "up1"); err != nil || len(ids) != 0 {
+		t.Fatalf("repromote again: ids=%v err=%v", ids, err)
+	}
+}
+
+// TestMigrateDialectHelpers guards the DDL emitted per backend. PostgreSQL is
+// reached under the registered database/sql name "pgx" (OpenFromConfig maps
+// the logical name to it), so both spellings must be recognised — otherwise the
+// AUTOINCREMENT branch silently wins and migrations fail on PG.
+func TestMigrateDialectHelpers(t *testing.T) {
+	for _, driver := range []string{"postgres", "pgx"} {
+		if !isPostgres(driver) {
+			t.Fatalf("isPostgres(%q) = false, want true", driver)
+		}
+		if got := idColumn(driver); got != "id BIGSERIAL PRIMARY KEY" {
+			t.Fatalf("idColumn(%q) = %q", driver, got)
+		}
+	}
+	if isPostgres("sqlite") {
+		t.Fatal("isPostgres(sqlite) = true, want false")
+	}
+	if got := idColumn("sqlite"); got != "id INTEGER PRIMARY KEY AUTOINCREMENT" {
+		t.Fatalf("idColumn(sqlite) = %q", got)
+	}
+}
