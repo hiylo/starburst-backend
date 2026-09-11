@@ -61,3 +61,74 @@ func TestHubBroadcastNoClients(t *testing.T) {
 	// Broadcasting with zero clients must not panic.
 	hub.Broadcast(Message{Type: "noone"})
 }
+
+func TestHubDropsBrokenClient(t *testing.T) {
+	hub := NewHub()
+	go hub.Run()
+	conn := newTestConn(t, hub)
+
+	// Eat the "subscribed" confirmation.
+	if _, _, err := conn.ReadMessage(); err != nil {
+		t.Fatalf("read subscribed: %v", err)
+	}
+	if hub.Count() != 1 {
+		t.Fatalf("count = %d, want 1", hub.Count())
+	}
+
+	// A dead peer fails the write, so Broadcast must drop it instead of
+	// keeping it in the fan-out set.
+	conn.Close()
+	hub.Broadcast(Message{Type: "after-close"})
+	if hub.Count() != 0 {
+		t.Fatalf("count = %d after dead peer, want 0", hub.Count())
+	}
+}
+
+func TestHubConcurrentBroadcast(t *testing.T) {
+	hub := NewHub()
+	go hub.Run()
+	conn := newTestConn(t, hub)
+	if _, _, err := conn.ReadMessage(); err != nil {
+		t.Fatalf("read subscribed: %v", err)
+	}
+
+	// Fan out from many goroutines at once; must not race or deadlock.
+	done := make(chan struct{}, 8)
+	for i := 0; i < 8; i++ {
+		go func(n int) {
+			defer func() { done <- struct{}{} }()
+			hub.Broadcast(Message{Type: "conc"})
+		}(i)
+	}
+	for i := 0; i < 8; i++ {
+		<-done
+	}
+	if hub.Count() != 1 {
+		t.Fatalf("count = %d, want 1", hub.Count())
+	}
+}
+
+func TestHubStopClosesConnections(t *testing.T) {
+	hub := NewHub()
+	done := make(chan struct{})
+	go func() {
+		hub.Run()
+		close(done)
+	}()
+	conn := newTestConn(t, hub)
+	if _, _, err := conn.ReadMessage(); err != nil {
+		t.Fatalf("read subscribed: %v", err)
+	}
+
+	hub.Stop()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not return after Stop")
+	}
+	if hub.Count() != 0 {
+		t.Fatalf("count = %d after Stop, want 0", hub.Count())
+	}
+	// Stop is idempotent.
+	hub.Stop()
+}

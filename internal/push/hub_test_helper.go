@@ -20,9 +20,9 @@ func newHubServer(t *testing.T, hub *Hub) string {
 		if err != nil {
 			return
 		}
-		hub.Register(conn)
-		defer hub.Unregister(conn)
-		_ = conn.WriteJSON(Message{Type: "subscribed"})
+		hc := hub.Register(conn)
+		defer hub.Unregister(hc)
+		_ = hc.Write(Message{Type: "subscribed"})
 		for {
 			if _, _, err := conn.ReadMessage(); err != nil {
 				return

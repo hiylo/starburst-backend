@@ -75,6 +75,9 @@ func main() {
 	oc := opencode.New(cfg.OpenCodeURL)
 	hub := push.NewHub()
 	go hub.Run()
+	// Deferred so Stop runs after the HTTP server has shut down and no handler
+	// can register a new connection.
+	defer hub.Stop()
 
 	srv := server.New(cfg, st, am, oc, hub)
 	srv.SetWebUI(webui.New())
