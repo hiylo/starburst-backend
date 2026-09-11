@@ -101,6 +101,51 @@ func TestTokenRoundTrip(t *testing.T) {
 	}
 }
 
+func TestEnsureDefaultToken(t *testing.T) {
+	ctx := context.Background()
+	m := newTestManager(t)
+
+	// 未配置默认 token：不做任何事。
+	raw, err := m.EnsureDefaultToken(ctx, "")
+	if err != nil || raw != "" {
+		t.Fatalf("unconfigured: raw=%q err=%v", raw, err)
+	}
+	if n, err := m.ListTokens(ctx); err != nil || len(n) != 0 {
+		t.Fatalf("expected no tokens, got %d (%v)", len(n), err)
+	}
+
+	// 首次运行：预置一个可验证的 token，且只落哈希不落原文。
+	raw, err = m.EnsureDefaultToken(ctx, "ocb_fixed_dev_token")
+	if err != nil {
+		t.Fatalf("ensure: %v", err)
+	}
+	if raw != "ocb_fixed_dev_token" {
+		t.Fatalf("unexpected raw token %q", raw)
+	}
+	rec, err := m.VerifyToken(ctx, raw)
+	if err != nil || rec == nil {
+		t.Fatalf("verify default token: %v", err)
+	}
+	if rec.ID != "default" || rec.Name != "default" {
+		t.Fatalf("unexpected record id=%q name=%q", rec.ID, rec.Name)
+	}
+	if rec.TokenHash == raw {
+		t.Fatalf("raw token leaked into store")
+	}
+
+	// 幂等：已预置过就不再创建，也不会被新值覆盖。
+	again, err := m.EnsureDefaultToken(ctx, "ocb_other")
+	if err != nil || again != "" {
+		t.Fatalf("second run: raw=%q err=%v", again, err)
+	}
+	if n, err := m.ListTokens(ctx); err != nil || len(n) != 1 {
+		t.Fatalf("expected 1 token, got %d (%v)", len(n), err)
+	}
+	if _, err := m.VerifyToken(ctx, "ocb_other"); err != store.ErrNotFound {
+		t.Fatalf("expected old value to win, got %v", err)
+	}
+}
+
 func TestTokenPrefix(t *testing.T) {
 	m := newTestManager(t)
 	raw, err := m.CreateToken(context.Background(), "x")

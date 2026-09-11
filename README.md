@@ -55,6 +55,7 @@ go build -o opencode-backend ./cmd/opencode-backend
 | `--sqlite-path` | `OCB_SQLITE_PATH` | `opencode-backend.db` | SQLite 数据库文件 |
 | `--pg-dsn` | `OCB_PG_DSN` | — | PostgreSQL 连接串 |
 | `--default-admin-password` | `OCB_ADMIN_PASSWORD` | `admin` | 首次初始化密码（可后改） |
+| `--default-token` | `OCB_DEFAULT_TOKEN` | — | 首次运行时预置的 API token（只落哈希，明文只在日志里打一次） |
 | `--llm-url` | `OCB_LLM_URL` | — | OpenAI 兼容编排大模型地址（如 LiteLLM 网关），空 = 关闭智能编排 |
 | `--llm-key` | `OCB_LLM_KEY` | — | `--llm-url` 的 API key |
 | `--llm-model` | `OCB_LLM_MODEL` | — | 编排决策使用的模型名 |
@@ -86,6 +87,8 @@ curl -fsSL https://<host>/install.sh | bash
 
 或本地 `bash scripts/install.sh [--port 8080] [--db sqlite|postgres] [--pg-dsn "..."] [--admin-password "..."] [--workers 4]`。
 安装为 systemd 服务，数据存 `/var/lib/opencode-backend`。
+
+加 `--default-token <值>`（或 `OCB_DEFAULT_TOKEN`）可在首次启动时预置一个固定 API token，客户端直接拿它调 API/WS/SSE，不用再登网页建 token。该值只在首次运行生效一次（仅保存哈希，日志里打印一次明文），之后改配置不重建；在配置页删除它则彻底取消。
 
 只验证脚本、不触碰真实系统时加 `--prefix <目录>`（沙箱模式）：二进制、配置、unit 全部写到该目录下并跳过 systemctl，配合 `OCB_BIN_URL=file:///本地二进制` 可跳过下载：
 

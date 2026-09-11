@@ -45,6 +45,32 @@ func (m *Manager) Initialize(ctx context.Context, defaultPassword string) (bool,
 	return true, nil
 }
 
+// EnsureDefaultToken registers the configured default token on first run so
+// clients can connect without first creating a token via the web UI. Idempotent:
+// returns the raw token if it provisioned one, or "" when not configured/already set.
+func (m *Manager) EnsureDefaultToken(ctx context.Context, defaultToken string) (string, error) {
+	if strings.TrimSpace(defaultToken) == "" {
+		return "", nil
+	}
+	if _, err := m.store.GetSetting(ctx, SettingDefaultTokenSet); err == nil {
+		return "", nil // already provisioned
+	} else if err != store.ErrNotFound {
+		return "", err
+	}
+	rec := &store.Token{
+		ID:        "default",
+		Name:      "default",
+		TokenHash: HashToken(defaultToken),
+	}
+	if err := m.store.CreateToken(ctx, rec); err != nil {
+		return "", err
+	}
+	if err := m.store.SetSetting(ctx, SettingDefaultTokenSet, "1"); err != nil {
+		return "", err
+	}
+	return defaultToken, nil
+}
+
 // SetPassword stores a new bcrypt hash for the admin password.
 func (m *Manager) SetPassword(ctx context.Context, plain string) error {
 	if len(plain) < 4 {

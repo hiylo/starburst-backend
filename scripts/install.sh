@@ -17,6 +17,7 @@
 #   OCB_DB / --db (sqlite|postgres)
 #   OCB_PG_DSN / --pg-dsn
 #   OCB_ADMIN_PASSWORD / --admin-password
+#   OCB_DEFAULT_TOKEN / --default-token (首次运行预置的 API token，客户端可免登录调用)
 #   OCB_WORKERS / --workers (并发执行的任务数，默认 4)
 #   OCB_PREFIX / --prefix
 #     安装根目录，默认 /（即 /usr/local/bin、/etc/...、/var/lib/...）。
@@ -30,6 +31,7 @@ PORT="${OCB_PORT:-8080}"
 DB="${OCB_DB:-sqlite}"
 PG_DSN="${OCB_PG_DSN:-}"
 ADMIN_PASSWORD="${OCB_ADMIN_PASSWORD:-}"
+DEFAULT_TOKEN="${OCB_DEFAULT_TOKEN:-}"
 WORKERS="${OCB_WORKERS:-4}"
 PREFIX="${OCB_PREFIX:-/}"
 
@@ -37,9 +39,10 @@ while [[ $# -gt 0 ]]; do
   opt="$1"
   case "$opt" in
     -h|--help)
-      echo "用法: $0 [--port 8080] [--db sqlite|postgres] [--pg-dsn dsn] [--admin-password pw] [--workers 4] [--prefix /]"
+      echo "用法: $0 [--port 8080] [--db sqlite|postgres] [--pg-dsn dsn] [--admin-password pw] [--default-token tok] \\"
+      echo "       [--workers 4] [--prefix /]"
       exit 0 ;;
-    --port|--db|--pg-dsn|--admin-password|--workers|--prefix)
+    --port|--db|--pg-dsn|--admin-password|--default-token|--workers|--prefix)
       if [[ $# -lt 2 ]]; then
         echo "!! 参数 $opt 需要一个值" >&2
         exit 1
@@ -49,6 +52,7 @@ while [[ $# -gt 0 ]]; do
         --db) DB="$2" ;;
         --pg-dsn) PG_DSN="$2" ;;
         --admin-password) ADMIN_PASSWORD="$2" ;;
+        --default-token) DEFAULT_TOKEN="$2" ;;
         --workers) WORKERS="$2" ;;
         --prefix) PREFIX="$2" ;;
       esac
@@ -155,6 +159,7 @@ else
   EXEC_ARGS+=(--pg-dsn "$PG_DSN")
 fi
 [[ -n "$ADMIN_PASSWORD" ]] && EXEC_ARGS+=(--default-admin-password "$ADMIN_PASSWORD")
+[[ -n "$DEFAULT_TOKEN" ]] && EXEC_ARGS+=(--default-token "$DEFAULT_TOKEN")
 
 # systemd 按空白切分 ExecStart 的参数，含空格的值（DSN、密码）必须用双引号包裹；
 # 值内部的双引号/反斜杠也要转义，否则会被 systemd 错误解析。

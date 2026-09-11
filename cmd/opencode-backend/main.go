@@ -71,6 +71,11 @@ func main() {
 	if created {
 		log.Printf("initialized admin password (change it via the config UI)")
 	}
+	if raw, err := am.EnsureDefaultToken(ctx, cfg.DefaultToken); err != nil {
+		log.Fatalf("provision default token: %v", err)
+	} else if raw != "" {
+		log.Printf("provisioned default API token: %s", raw)
+	}
 
 	oc := opencode.New(cfg.OpenCodeURL)
 	hub := push.NewHub()
