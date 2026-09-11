@@ -3,6 +3,8 @@ package tasks
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -93,15 +95,8 @@ func (e *Executor) Run(ctx context.Context) {
 // On failure it either re-queues the task for another attempt (bounded by
 // maxRetries, with exponential backoff) or marks it permanently failed.
 func (e *Executor) execute(ctx context.Context, t *store.Task) {
-	pushTask := func(status string, task *store.Task) {
-		e.hub.Broadcast(push.Message{
-			Type: "task.event",
-			Payload: mustJSON(map[string]any{
-				"id":     t.ID,
-				"status": status,
-			}),
-			Severity: severityFor(status),
-		})
+	pushTask := func(status string, _ *store.Task) {
+		e.pushTaskEvent(status, map[string]any{"id": t.ID, "status": status})
 	}
 
 	failWithRetry := func(errMsg string) {
@@ -125,6 +120,7 @@ func (e *Executor) execute(ctx context.Context, t *store.Task) {
 				}
 			}
 			_ = e.store.FailTask(ctx, t.ID, errMsg)
+			e.resolveDependents(ctx, t.ID, false, errMsg)
 			pushTask("failed", t)
 			e.pushFailureAnalysis(ctx, t, errMsg)
 			return
@@ -136,6 +132,7 @@ func (e *Executor) execute(ctx context.Context, t *store.Task) {
 		}
 		if err := e.store.RetryTask(ctx, t.ID, backoff); err != nil {
 			_ = e.store.FailTask(ctx, t.ID, errMsg)
+			e.resolveDependents(ctx, t.ID, false, errMsg)
 			pushTask("failed", t)
 			return
 		}
@@ -155,6 +152,7 @@ func (e *Executor) execute(ctx context.Context, t *store.Task) {
 	sessionID := t.SessionID
 	if sessionID == "" {
 		if canceled() {
+			e.resolveDependents(ctx, t.ID, false, "upstream task canceled")
 			pushTask("canceled", t)
 			return
 		}
@@ -174,6 +172,7 @@ func (e *Executor) execute(ctx context.Context, t *store.Task) {
 	})
 	if err != nil {
 		if errors.Is(err, errCanceled) {
+			e.resolveDependents(ctx, t.ID, false, "upstream task canceled")
 			pushTask("canceled", t)
 			return
 		}
@@ -182,8 +181,53 @@ func (e *Executor) execute(ctx context.Context, t *store.Task) {
 	}
 
 	_ = e.store.CompleteTask(ctx, t.ID, result)
+	e.resolveDependents(ctx, t.ID, true, "")
 	pushTask("succeeded", t)
 	e.pushSummary(ctx, t, result)
+}
+
+// resolveDependents releases or blocks the tasks that wait on id, pushing one
+// event per dependent so a human sees the state change in real time.
+func (e *Executor) resolveDependents(ctx context.Context, id string, succeed bool, reason string) {
+	if succeed {
+		ids, err := e.store.PromotePendingDependents(ctx, id)
+		if err != nil {
+			log.Printf("tasks: promote dependents of %s: %v", id, err)
+			return
+		}
+		if len(ids) == 0 {
+			return
+		}
+		log.Printf("tasks: %s re-queued %d dependent task(s)", id, len(ids))
+		for _, depID := range ids {
+			e.pushTaskEvent(store.TaskQueued, map[string]any{
+				"id":       depID,
+				"status":   store.TaskQueued,
+				"upstream": id,
+			})
+		}
+		return
+	}
+	if reason == "" {
+		reason = "upstream task failed"
+	}
+	ids, err := e.store.BlockDependents(ctx, id, reason)
+	if err != nil {
+		log.Printf("tasks: block dependents of %s: %v", id, err)
+		return
+	}
+	if len(ids) == 0 {
+		return
+	}
+	log.Printf("tasks: %s blocked %d dependent task(s): %s", id, len(ids), reason)
+	for _, depID := range ids {
+		e.pushTaskEvent(store.TaskBlocked, map[string]any{
+			"id":       depID,
+			"status":   store.TaskBlocked,
+			"upstream": id,
+			"reason":   reason,
+		})
+	}
 }
 
 var errCanceled = errors.New("task canceled")
@@ -223,7 +267,7 @@ func (e *Executor) createSession(ctx context.Context, directory string) (string,
 // canceled is polled so a client cancellation aborts the wait promptly.
 func (e *Executor) promptSession(ctx context.Context, sessionID, prompt, directory string, canceled func() bool, onProgress func(string)) (string, error) {
 	body, _ := json.Marshal(map[string]any{
-		"id":       "msg_ocb" + time.Now().Format("20060102150405"),
+		"id":       "msg_ocb" + time.Now().Format("20060102150405") + "_" + randSuffix(3),
 		"prompt":   map[string]any{"text": prompt},
 		"delivery": "steer",
 		"resume":   true,
@@ -352,6 +396,14 @@ func mustJSON(v any) json.RawMessage {
 	return b
 }
 
+// randSuffix returns n random hex bytes, used to make generated message ids
+// unique even when two tasks prompt in the same second.
+func randSuffix(n int) string {
+	buf := make([]byte, n)
+	_, _ = rand.Read(buf)
+	return hex.EncodeToString(buf)
+}
+
 // failureDecision is the LLM's self-healing verdict for a failed task.
 type failureDecision struct {
 	Action string `json:"action"` // "retry" or "escalate"
@@ -433,14 +485,20 @@ func truncateStr(s string, n int) string {
 	return s[:n] + "..."
 }
 
+// pushTaskEvent broadcasts one task lifecycle event to all connected clients.
+// Clients refresh the task list on any task.event, so dependents that were
+// blocked or re-queued are surfaced without polling.
+func (e *Executor) pushTaskEvent(status string, payload map[string]any) {
+	e.hub.Broadcast(push.Message{
+		Type:     "task.event",
+		Payload:  mustJSON(payload),
+		Severity: severityFor(status),
+	})
+}
+
 // severityFor maps a task status to a push severity for notification routing.
+// The single source of truth is push.SeverityFor so the executor and the HTTP
+// layer classify events identically.
 func severityFor(status string) string {
-	switch status {
-	case "failed":
-		return push.Critical
-	case "retrying":
-		return push.Warning
-	default:
-		return push.Info
-	}
+	return push.SeverityFor(status)
 }
