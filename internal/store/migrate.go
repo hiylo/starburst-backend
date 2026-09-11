@@ -25,7 +25,7 @@ func migrate(ctx context.Context, driver string, db *sql.DB) error {
 	for current < len(migrations) {
 		next := current + 1
 		m := migrations[current]
-		if err := m.apply(ctx, db); err != nil {
+		if err := m.apply(ctx, driver, db); err != nil {
 			return fmt.Errorf("migration %d (%s): %w", next, m.name, err)
 		}
 		if _, err := db.ExecContext(ctx, rebind(driver,
@@ -47,9 +47,30 @@ func currentVersion(ctx context.Context, db *sql.DB) (int, error) {
 }
 
 // migration is a single versioned schema step with a portable name.
+// apply receives the logical driver ("sqlite" or "postgres") so DDL can be
+// emitted per dialect where the two backends diverge.
 type migration struct {
 	name  string
-	apply func(ctx context.Context, db *sql.DB) error
+	apply func(ctx context.Context, driver string, db *sql.DB) error
+}
+
+// isPostgres reports whether driver refers to the PostgreSQL backend. It may
+// arrive as the logical name "postgres" (store.Open called directly) or as the
+// registered database/sql name "pgx" (the path actually used via
+// OpenFromConfig), so both spellings are accepted.
+func isPostgres(driver string) bool {
+	return driver == "postgres" || driver == "pgx"
+}
+
+// idColumn returns a portable auto-increment primary key definition.
+// PostgreSQL has no AUTOINCREMENT keyword and the SQLite bundled with
+// modernc.org/sqlite predates GENERATED AS IDENTITY, so the two backends need
+// different DDL.
+func idColumn(driver string) string {
+	if isPostgres(driver) {
+		return "id BIGSERIAL PRIMARY KEY"
+	}
+	return "id INTEGER PRIMARY KEY AUTOINCREMENT"
 }
 
 // migrations is the ordered list of schema steps.
@@ -64,11 +85,28 @@ var migrations = []migration{
 	{name: "web_sessions", apply: migrationWebSessions},
 	{name: "rule_executions", apply: migrationRuleExecutions},
 	{name: "tasks_ai_summary", apply: migrationTasksAISummary},
+	{name: "tasks_depends_on", apply: migrationTasksDependsOn},
+}
+
+// migrationTasksDependsOn adds the depends_on column holding the id of the
+// single upstream task this task waits for before it may be executed, plus an
+// index for the dependents lookup used when the upstream finishes.
+func migrationTasksDependsOn(ctx context.Context, driver string, db *sql.DB) error {
+	stmts := []string{
+		`ALTER TABLE tasks ADD COLUMN depends_on TEXT NOT NULL DEFAULT ''`,
+		`CREATE INDEX IF NOT EXISTS idx_tasks_depends_on ON tasks(depends_on, status)`,
+	}
+	for _, s := range stmts {
+		if _, err := db.ExecContext(ctx, s); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // migrationTasksAISummary adds the ai_summary column holding the LLM-generated
 // result summary (success) or root-cause analysis (failure) for a task.
-func migrationTasksAISummary(ctx context.Context, db *sql.DB) error {
+func migrationTasksAISummary(ctx context.Context, driver string, db *sql.DB) error {
 	if _, err := db.ExecContext(ctx, `
 		ALTER TABLE tasks ADD COLUMN ai_summary TEXT NOT NULL DEFAULT ''`); err != nil {
 		return err
@@ -77,14 +115,14 @@ func migrationTasksAISummary(ctx context.Context, db *sql.DB) error {
 }
 
 // migrationRuleExecutions adds the rule execution history table.
-func migrationRuleExecutions(ctx context.Context, db *sql.DB) error {
+func migrationRuleExecutions(ctx context.Context, driver string, db *sql.DB) error {
 	stmts := []string{
-		`CREATE TABLE IF NOT EXISTS rule_executions (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
+		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS rule_executions (
+			%s,
 			rule_id TEXT NOT NULL,
 			task_id TEXT NOT NULL DEFAULT '',
 			triggered_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
-		)`,
+		)`, idColumn(driver)),
 		`CREATE INDEX IF NOT EXISTS idx_rule_exec_rule_id ON rule_executions(rule_id, id)`,
 	}
 	for _, s := range stmts {
@@ -96,7 +134,7 @@ func migrationRuleExecutions(ctx context.Context, db *sql.DB) error {
 }
 
 // migrationWebSessions adds the persisted web admin session table.
-func migrationWebSessions(ctx context.Context, db *sql.DB) error {
+func migrationWebSessions(ctx context.Context, driver string, db *sql.DB) error {
 	stmts := []string{
 		`CREATE TABLE IF NOT EXISTS web_sessions (
 			id TEXT PRIMARY KEY,
@@ -113,7 +151,7 @@ func migrationWebSessions(ctx context.Context, db *sql.DB) error {
 }
 
 // migrationArchives adds the session archive table.
-func migrationArchives(ctx context.Context, db *sql.DB) error {
+func migrationArchives(ctx context.Context, driver string, db *sql.DB) error {
 	stmts := []string{
 		`CREATE TABLE IF NOT EXISTS archives (
 			id TEXT PRIMARY KEY,
@@ -134,17 +172,17 @@ func migrationArchives(ctx context.Context, db *sql.DB) error {
 }
 
 // migrationAuditLog adds the API audit trail table.
-func migrationAuditLog(ctx context.Context, db *sql.DB) error {
+func migrationAuditLog(ctx context.Context, driver string, db *sql.DB) error {
 	stmts := []string{
-		`CREATE TABLE IF NOT EXISTS audit_log (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
+		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS audit_log (
+			%s,
 			token_id TEXT NOT NULL DEFAULT '',
 			token_name TEXT NOT NULL DEFAULT '',
 			method TEXT NOT NULL DEFAULT '',
 			path TEXT NOT NULL DEFAULT '',
 			status INTEGER NOT NULL DEFAULT 0,
 			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
-		)`,
+		)`, idColumn(driver)),
 		`CREATE INDEX IF NOT EXISTS idx_audit_token_created ON audit_log(token_id, id)`,
 	}
 	for _, s := range stmts {
@@ -156,7 +194,7 @@ func migrationAuditLog(ctx context.Context, db *sql.DB) error {
 }
 
 // migrationRules adds the automation rules table.
-func migrationRules(ctx context.Context, db *sql.DB) error {
+func migrationRules(ctx context.Context, driver string, db *sql.DB) error {
 	stmts := []string{
 		`CREATE TABLE IF NOT EXISTS rules (
 			id TEXT PRIMARY KEY,
@@ -165,7 +203,7 @@ func migrationRules(ctx context.Context, db *sql.DB) error {
 			schedule TEXT NOT NULL DEFAULT '',
 			directory TEXT NOT NULL DEFAULT '',
 			prompt TEXT NOT NULL DEFAULT '',
-			enabled BOOLEAN NOT NULL DEFAULT 1,
+			enabled BOOLEAN NOT NULL DEFAULT TRUE,
 			last_fired_at TIMESTAMP NULL,
 			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 		)`,
@@ -180,7 +218,7 @@ func migrationRules(ctx context.Context, db *sql.DB) error {
 
 // migrationTasksAvailableAt adds the available_at gate used for retry backoff.
 // It must tolerate both freshly-migrated and pre-existing databases.
-func migrationTasksAvailableAt(ctx context.Context, db *sql.DB) error {
+func migrationTasksAvailableAt(ctx context.Context, driver string, db *sql.DB) error {
 	// SQLite supports ADD COLUMN with a constant default; PG too.
 	if _, err := db.ExecContext(ctx, `
 		ALTER TABLE tasks ADD COLUMN available_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP`); err != nil {
@@ -195,7 +233,7 @@ func migrationTasksAvailableAt(ctx context.Context, db *sql.DB) error {
 
 // migrationInitial creates the base tables shared by all drivers.
 // DDL uses only portable constructs that both SQLite and PostgreSQL accept.
-func migrationInitial(ctx context.Context, db *sql.DB) error {
+func migrationInitial(ctx context.Context, driver string, db *sql.DB) error {
 	stmts := []string{
 		`CREATE TABLE IF NOT EXISTS settings (
 			key TEXT PRIMARY KEY,
@@ -220,7 +258,7 @@ func migrationInitial(ctx context.Context, db *sql.DB) error {
 }
 
 // migrationTasks adds the async orchestration task table.
-func migrationTasks(ctx context.Context, db *sql.DB) error {
+func migrationTasks(ctx context.Context, driver string, db *sql.DB) error {
 	stmts := []string{
 		`CREATE TABLE IF NOT EXISTS tasks (
 			id TEXT PRIMARY KEY,
