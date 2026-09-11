@@ -5,9 +5,12 @@ package store
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"net/url"
 	"os"
+	"sync"
+	"sync/atomic"
 	"testing"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
@@ -19,23 +22,28 @@ import (
 //	OCB_PG_DSN='postgres://user:pass@host:5432/db?sslmode=disable' \
 //	    go test -tags pgtest -run Postgres ./internal/store/
 //
-// The test creates and drops its own scratch database, so the shared server is
+// Each test creates and drops its own scratch database, so the shared server is
 // left untouched.
 
-func TestPostgresMigrationsAndDependentOps(t *testing.T) {
+var scratchSeq int64
+
+// openScratchStore creates a fresh scratch PostgreSQL database, runs the
+// migrations through the public OpenFromConfig entry point and registers a
+// cleanup that drops the database again.
+func openScratchStore(t *testing.T) Store {
+	t.Helper()
 	dsn := os.Getenv("OCB_PG_DSN")
 	if dsn == "" {
 		t.Skip("OCB_PG_DSN not set; PostgreSQL dialect not tested")
 	}
-
 	ctx := context.Background()
+
 	admin, err := sql.Open("pgx", dsn)
 	if err != nil {
 		t.Fatalf("open admin: %v", err)
 	}
 	admin.SetMaxOpenConns(1)
-
-	dbName := fmt.Sprintf("ocb_test_%d", os.Getpid())
+	dbName := fmt.Sprintf("ocb_test_%d_%d", os.Getpid(), atomic.AddInt64(&scratchSeq, 1))
 	_, _ = admin.ExecContext(ctx, "DROP DATABASE IF EXISTS "+dbName)
 	if _, err := admin.ExecContext(ctx, "CREATE DATABASE "+dbName); err != nil {
 		admin.Close()
@@ -64,6 +72,12 @@ func TestPostgresMigrationsAndDependentOps(t *testing.T) {
 			t.Logf("drop scratch db %q: %v", dbName, err)
 		}
 	})
+	return st
+}
+
+func TestPostgresMigrationsAndDependentOps(t *testing.T) {
+	st := openScratchStore(t)
+	ctx := context.Background()
 
 	// Pending -> queued on upstream success, for every dependent at once.
 	if err := st.CreateTask(ctx, &Task{ID: "up_ok", Prompt: "up"}); err != nil {
@@ -135,5 +149,60 @@ func TestPostgresMigrationsAndDependentOps(t *testing.T) {
 	}
 	if stats.Blocked != 0 {
 		t.Fatalf("blocked=%d, want 0", stats.Blocked)
+	}
+}
+
+// TestPostgresConcurrentClaim guards the PostgreSQL claim statement. Without
+// FOR UPDATE SKIP LOCKED two workers would read the same candidate row before
+// either lock lands and both would mark that task running.
+func TestPostgresConcurrentClaim(t *testing.T) {
+	st := openScratchStore(t)
+	ctx := context.Background()
+
+	const total = 30
+	for i := 0; i < total; i++ {
+		if err := st.CreateTask(ctx, &Task{ID: fmt.Sprintf("task_pg%d", i), Prompt: "p"}); err != nil {
+			t.Fatalf("create task: %v", err)
+		}
+	}
+
+	const workers = 12
+	var wg sync.WaitGroup
+	claimed := make(chan *Task, total)
+	var failed bool
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				tk, err := st.ClaimNextTask(ctx)
+				if errors.Is(err, ErrNotFound) {
+					return
+				}
+				if err != nil {
+					failed = true
+					return
+				}
+				claimed <- tk
+			}
+		}()
+	}
+	wg.Wait()
+	close(claimed)
+	if failed {
+		t.Fatal("claim returned an unexpected error")
+	}
+
+	counts := make(map[string]int, total)
+	for tk := range claimed {
+		counts[tk.ID]++
+	}
+	if len(counts) != total {
+		t.Fatalf("claimed %d distinct tasks, want %d", len(counts), total)
+	}
+	for id, n := range counts {
+		if n != 1 {
+			t.Fatalf("task %s claimed %d times, want exactly 1", id, n)
+		}
 	}
 }

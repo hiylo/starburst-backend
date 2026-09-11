@@ -96,6 +96,8 @@ func main() {
 	// upstream OpenCode server. Runs for the lifetime of the process.
 	exec := tasks.NewExecutor(st, hub, cfg.OpenCodeURL)
 	exec.WithLLM(llmClient)
+	exec.WithWorkers(cfg.Workers)
+	log.Printf("orchestration workers: %d", cfg.Workers)
 	go exec.Run(ctx)
 
 	// Automation engine: evaluates cron rules and handles webhook triggers.

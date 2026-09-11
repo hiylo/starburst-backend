@@ -2,8 +2,11 @@ package store
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 )
@@ -435,5 +438,60 @@ func TestMigrateDialectHelpers(t *testing.T) {
 	}
 	if got := idColumn("sqlite"); got != "id INTEGER PRIMARY KEY AUTOINCREMENT" {
 		t.Fatalf("idColumn(sqlite) = %q", got)
+	}
+}
+
+// TestClaimNextTaskConcurrent verifies that concurrent claims never hand the
+// same task to two workers. Each task must be claimed exactly once, which is
+// what makes the executor worker pool safe.
+func TestClaimNextTaskConcurrent(t *testing.T) {
+	ctx := context.Background()
+	st := newTestStore(t)
+
+	const total = 24
+	for i := 0; i < total; i++ {
+		if err := st.CreateTask(ctx, &Task{ID: fmt.Sprintf("task_conc%d", i), Prompt: "p"}); err != nil {
+			t.Fatalf("create task: %v", err)
+		}
+	}
+
+	const workers = 8
+	var wg sync.WaitGroup
+	claimed := make(chan *Task, total)
+	var failed bool
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				tk, err := st.ClaimNextTask(ctx)
+				if errors.Is(err, ErrNotFound) {
+					return
+				}
+				if err != nil {
+					failed = true
+					return
+				}
+				claimed <- tk
+			}
+		}()
+	}
+	wg.Wait()
+	close(claimed)
+	if failed {
+		t.Fatal("claim returned an unexpected error")
+	}
+
+	counts := make(map[string]int, total)
+	for tk := range claimed {
+		counts[tk.ID]++
+	}
+	if len(counts) != total {
+		t.Fatalf("claimed %d distinct tasks, want %d", len(counts), total)
+	}
+	for id, n := range counts {
+		if n != 1 {
+			t.Fatalf("task %s claimed %d times, want exactly 1", id, n)
+		}
 	}
 }

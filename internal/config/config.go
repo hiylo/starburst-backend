@@ -24,6 +24,9 @@ type Config struct {
 	DefaultAdminPassword string
 	// WebhookSecret optionally protects /api/webhook (shared secret). Empty = off.
 	WebhookSecret string
+	// Workers is how many orchestration tasks may run concurrently. 1 restores
+	// serial execution.
+	Workers int
 	// LLMURL is the OpenAI-compatible base URL (e.g. a LiteLLM gateway).
 	// Empty disables all smart-orchestration features.
 	LLMURL string
@@ -52,6 +55,7 @@ func Parse(args []string) (*Config, error) {
 	postgresDSN := fs.String("pg-dsn", os.Getenv("OCB_PG_DSN"), "PostgreSQL connection string")
 	defaultAdmin := fs.String("default-admin-password", envOr("OCB_ADMIN_PASSWORD", "admin"), "default web admin password (used only on first initialization)")
 	webhookSecret := fs.String("webhook-secret", os.Getenv("OCB_WEBHOOK_SECRET"), "optional shared secret protecting /api/webhook (empty = off)")
+	workers := fs.Int("workers", envInt("OCB_WORKERS", 4), "concurrent task executions (1 = serial)")
 	llmURL := fs.String("llm-url", envOr("OCB_LLM_URL", ""), "OpenAI-compatible base URL for orchestration LLM (empty = disabled)")
 	llmKey := fs.String("llm-key", os.Getenv("OCB_LLM_KEY"), "API key for --llm-url")
 	llmModel := fs.String("llm-model", envOr("OCB_LLM_MODEL", ""), "model name for orchestration decisions")
@@ -78,6 +82,7 @@ func Parse(args []string) (*Config, error) {
 		PostgresDSN:          *postgresDSN,
 		DefaultAdminPassword: *defaultAdmin,
 		WebhookSecret:        *webhookSecret,
+		Workers:              clampInt(*workers, 1, 64),
 		LLMURL:               strings.TrimRight(*llmURL, "/"),
 		LLMKey:               *llmKey,
 		LLMModel:             *llmModel,
@@ -91,6 +96,31 @@ func envOr(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// envInt reads an integer environment variable, falling back when unset or
+// unparseable.
+func envInt(key string, fallback int) int {
+	v, ok := os.LookupEnv(key)
+	if !ok || strings.TrimSpace(v) == "" {
+		return fallback
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(v))
+	if err != nil {
+		return fallback
+	}
+	return n
+}
+
+// clampInt limits n to [lo, hi].
+func clampInt(n, lo, hi int) int {
+	if n < lo {
+		return lo
+	}
+	if n > hi {
+		return hi
+	}
+	return n
 }
 
 // Port returns the numeric port from ListenAddr (e.g. ":8080" -> 8080).

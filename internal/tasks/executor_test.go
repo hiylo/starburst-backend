@@ -2,15 +2,40 @@ package tasks
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/hiylo/opencode-backend/internal/push"
 	"github.com/hiylo/opencode-backend/internal/store"
 )
+
+// concurrencyProbe tracks how many goroutines are inside a critical section at
+// the same time and remembers the highest observed count.
+type concurrencyProbe struct {
+	current int64
+	peak    int64
+}
+
+func (p *concurrencyProbe) enter() {
+	cur := atomic.AddInt64(&p.current, 1)
+	for {
+		old := atomic.LoadInt64(&p.peak)
+		if cur <= old || atomic.CompareAndSwapInt64(&p.peak, old, cur) {
+			return
+		}
+	}
+}
+
+func (p *concurrencyProbe) leave() { atomic.AddInt64(&p.current, -1) }
+
+func (p *concurrencyProbe) Peak() int64 { return atomic.LoadInt64(&p.peak) }
 
 // newTestEnv wires a store, hub and fake upstream into an executor.
 func newTestEnv(t *testing.T, upstream http.HandlerFunc) (*Executor, store.Store, *push.Hub) {
@@ -368,6 +393,7 @@ func TestSeverityMapping(t *testing.T) {
 	cases := map[string]string{
 		"failed":    push.Critical,
 		"retrying":  push.Warning,
+		"blocked":   push.Warning,
 		"running":   push.Info,
 		"succeeded": push.Info,
 	}
@@ -375,5 +401,100 @@ func TestSeverityMapping(t *testing.T) {
 		if got := severityFor(status); got != want {
 			t.Fatalf("severityFor(%q) = %q, want %q", status, got, want)
 		}
+	}
+}
+
+// TestExecutorRunsTasksInParallel verifies the worker pool actually executes
+// tasks concurrently instead of serializing them one by one.
+func TestExecutorRunsTasksInParallel(t *testing.T) {
+	var probe concurrencyProbe
+	var sessions int64
+	upstream := func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/session":
+			n := atomic.AddInt64(&sessions, 1)
+			_, _ = fmt.Fprintf(w, `{"id":"ses_%d","directory":"/w"}`, n)
+		case r.Method == http.MethodGet && r.URL.Path == "/session/status":
+			_, _ = w.Write([]byte(`{}`))
+		case strings.HasPrefix(r.URL.Path, "/api/session/") && strings.HasSuffix(r.URL.Path, "/prompt"):
+			probe.enter()
+			time.Sleep(300 * time.Millisecond)
+			probe.leave()
+			_, _ = w.Write([]byte(`{"data":{"admittedSeq":1,"id":"msg_p","sessionID":"ses_1"}}`))
+		default: // GET /session/{id}/message
+			_, _ = w.Write([]byte(`[{"role":"assistant","content":[{"type":"text","text":"并行结果"}]}]`))
+		}
+	}
+
+	exec, st, _ := newTestEnv(t, upstream)
+	exec.WithWorkers(4)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	const n = 4
+	for i := 1; i <= n; i++ {
+		if err := st.CreateTask(ctx, &store.Task{ID: fmt.Sprintf("task_par%d", i), Directory: "/w", Prompt: "parallel"}); err != nil {
+			t.Fatalf("create task: %v", err)
+		}
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		exec.Run(ctx)
+	}()
+
+	deadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) {
+		stats, err := st.TaskStats(ctx)
+		if err == nil && stats.Succeeded == n {
+			break
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	cancel()
+	<-done
+
+	if got := probe.Peak(); got < 2 {
+		t.Fatalf("tasks ran serially: peak concurrent executions = %d", got)
+	}
+	if got := atomic.LoadInt64(&sessions); got != n {
+		t.Fatalf("created %d upstream sessions, want %d (each task should get its own)", got, n)
+	}
+}
+
+// TestSessionGateSerializes verifies that executions sharing one upstream
+// session id never overlap, and that released gates are dropped from the map so
+// it does not grow without bound.
+func TestSessionGateSerializes(t *testing.T) {
+	exec := &Executor{gates: make(map[string]*sessionGate)}
+	var probe concurrencyProbe
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			g := exec.hold("ses_shared")
+			defer exec.release(g)
+			g.mu.Lock()
+			defer g.mu.Unlock()
+			probe.enter()
+			time.Sleep(20 * time.Millisecond)
+			probe.leave()
+		}()
+	}
+	wg.Wait()
+
+	if got := probe.Peak(); got != 1 {
+		t.Fatalf("peak concurrency = %d, want 1 (shared session must be serialized)", got)
+	}
+	exec.gateMu.Lock()
+	left := len(exec.gates)
+	exec.gateMu.Unlock()
+	if left != 0 {
+		t.Fatalf("%d session gate(s) left after all holders released", left)
+	}
+	if g := exec.hold(""); g != nil {
+		t.Fatal("tasks without an explicit session id must not be serialized")
 	}
 }

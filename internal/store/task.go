@@ -93,14 +93,28 @@ func (s *sqlStore) GetTask(ctx context.Context, id string) (*Task, error) {
 // ClaimNextTask atomically picks the oldest queued and available task.
 // Each claim increments attempts, so retried tasks report their true run count.
 func (s *sqlStore) ClaimNextTask(ctx context.Context) (*Task, error) {
-	// Single statement keeps it atomic enough for a single-node backend.
-	row := s.db.QueryRowContext(ctx, s.q(`
+	// Single statement keeps the claim atomic. The inner select differs by
+	// dialect: SQLite serializes writers so a plain select is enough, while
+	// PostgreSQL would let two concurrent claims read the same row before either
+	// lock lands, so it uses FOR UPDATE SKIP LOCKED to let the second worker
+	// take the next task instead.
+	var query string
+	if isPostgres(s.driver) {
+		query = `
+		UPDATE tasks SET status = ?, attempts = attempts + 1, started_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+		WHERE id = (
+			SELECT id FROM tasks WHERE status = ? AND available_at <= CURRENT_TIMESTAMP ORDER BY created_at ASC LIMIT 1 FOR UPDATE SKIP LOCKED
+		)
+		RETURNING id, session_id, directory, prompt, depends_on, status, error, result, progress, ai_summary, attempts, created_at, updated_at, started_at, finished_at, available_at`
+	} else {
+		query = `
 		UPDATE tasks SET status = ?, attempts = attempts + 1, started_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
 		WHERE id = (
 			SELECT id FROM tasks WHERE status = ? AND available_at <= CURRENT_TIMESTAMP ORDER BY created_at ASC LIMIT 1
 		)
-		RETURNING id, session_id, directory, prompt, depends_on, status, error, result, progress, ai_summary, attempts, created_at, updated_at, started_at, finished_at, available_at`),
-		TaskRunning, TaskQueued)
+		RETURNING id, session_id, directory, prompt, depends_on, status, error, result, progress, ai_summary, attempts, created_at, updated_at, started_at, finished_at, available_at`
+	}
+	row := s.db.QueryRowContext(ctx, s.q(query), TaskRunning, TaskQueued)
 	t, err := scanTask(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound

@@ -12,6 +12,7 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/hiylo/opencode-backend/internal/llm"
@@ -20,7 +21,8 @@ import (
 )
 
 // Executor runs claimed tasks against the OpenCode server and reports
-// progress through the push hub.
+// progress through the push hub. Run spawns a pool of worker goroutines that
+// claim tasks concurrently.
 type Executor struct {
 	store        store.Store
 	hub          *push.Hub
@@ -28,6 +30,18 @@ type Executor struct {
 	httpClient   *http.Client
 	llm          *llm.Client // optional orchestration LLM for summaries/self-healing
 	maxRetries   int         // additional attempts after the first failure
+	workers      int         // concurrent task executions
+	gateMu       sync.Mutex  // guards gates
+	gates        map[string]*sessionGate
+}
+
+// sessionGate serializes concurrent executions that target the same upstream
+// session id. Each execution reads the last assistant message of its session,
+// so two tasks explicitly sharing a session must not run at the same time.
+type sessionGate struct {
+	sessionID string
+	mu        sync.Mutex // serializes executions sharing sessionID
+	holders   int        // goroutines waiting on or holding mu
 }
 
 // NewExecutor wires an executor. openCodeBase is required; the executor only
@@ -39,6 +53,8 @@ func NewExecutor(st store.Store, hub *push.Hub, openCodeBase string) *Executor {
 		openCodeBase: openCodeBase,
 		httpClient:   &http.Client{Timeout: 90 * time.Second},
 		maxRetries:   2,
+		workers:      4,
+		gates:        make(map[string]*sessionGate),
 	}
 }
 
@@ -52,6 +68,16 @@ func (e *Executor) WithMaxRetries(n int) *Executor {
 	return e
 }
 
+// WithWorkers sets how many tasks may run concurrently. 1 restores the original
+// serial behavior. Values below 1 are clamped to 1.
+func (e *Executor) WithWorkers(n int) *Executor {
+	if n < 1 {
+		n = 1
+	}
+	e.workers = n
+	return e
+}
+
 // WithLLM wires the optional orchestration LLM used for result summaries and
 // failure self-healing decisions. Returns the receiver for chaining.
 func (e *Executor) WithLLM(c *llm.Client) *Executor {
@@ -59,8 +85,8 @@ func (e *Executor) WithLLM(c *llm.Client) *Executor {
 	return e
 }
 
-// Run is the worker loop: claim one queued task, execute it, repeat.
-// It returns when ctx is canceled.
+// Run is the worker pool: each worker claims one queued task and executes it,
+// repeating until ctx is canceled. It returns once every worker has drained.
 func (e *Executor) Run(ctx context.Context) {
 	// Recover tasks left "running" by a previous crash/restart.
 	if n, err := e.store.RecoverStaleRunning(ctx); err != nil {
@@ -69,6 +95,22 @@ func (e *Executor) Run(ctx context.Context) {
 		log.Printf("tasks: recovered %d stale running tasks back to queued", n)
 	}
 
+	var wg sync.WaitGroup
+	for i := 0; i < e.workers; i++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			if e.workers > 1 {
+				log.Printf("tasks: worker %d/%d started", id+1, e.workers)
+			}
+			e.worker(ctx)
+		}(i)
+	}
+	wg.Wait()
+}
+
+// worker is the claim-execute loop of a single worker goroutine.
+func (e *Executor) worker(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
@@ -80,14 +122,74 @@ func (e *Executor) Run(ctx context.Context) {
 		if err != nil {
 			if errors.Is(err, store.ErrNotFound) {
 				// No work: back off before polling again.
-				time.Sleep(2 * time.Second)
+				if !sleep(ctx, 2*time.Second) {
+					return
+				}
 				continue
 			}
 			log.Printf("tasks: claim failed: %v", err)
-			time.Sleep(2 * time.Second)
+			if !sleep(ctx, 2*time.Second) {
+				return
+			}
 			continue
 		}
-		e.execute(ctx, t)
+		e.runClaimed(ctx, t)
+	}
+}
+
+// runClaimed drives one claimed task to completion. Tasks that explicitly
+// share an upstream session id are serialized against each other.
+func (e *Executor) runClaimed(ctx context.Context, t *store.Task) {
+	g := e.hold(t.SessionID)
+	if g != nil {
+		// Deferred in this order so release runs only after mu.Unlock: the gate
+		// must not be dropped from the map while an execution still holds it.
+		defer e.release(g)
+		g.mu.Lock()
+		defer g.mu.Unlock()
+	}
+	e.execute(ctx, t)
+}
+
+// hold returns the serialization gate for sessionID, registering one holder.
+// Tasks without an explicit session id create their own upstream session and
+// therefore need no serialization.
+func (e *Executor) hold(sessionID string) *sessionGate {
+	if sessionID == "" {
+		return nil
+	}
+	e.gateMu.Lock()
+	defer e.gateMu.Unlock()
+	g, ok := e.gates[sessionID]
+	if !ok {
+		g = &sessionGate{sessionID: sessionID}
+		e.gates[sessionID] = g
+	}
+	g.holders++
+	return g
+}
+
+// release drops one holder registered by hold, freeing the gate once no worker
+// is waiting on it any more.
+func (e *Executor) release(g *sessionGate) {
+	e.gateMu.Lock()
+	defer e.gateMu.Unlock()
+	g.holders--
+	if g.holders <= 0 {
+		delete(e.gates, g.sessionID)
+	}
+}
+
+// sleep waits for d or for ctx to be canceled, reporting whether the wait was
+// interrupted by cancellation.
+func sleep(ctx context.Context, d time.Duration) bool {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
 	}
 }
 

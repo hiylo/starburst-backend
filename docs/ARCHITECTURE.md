@@ -65,7 +65,8 @@ queued ──claim──▶ running ──成功──▶ succeeded
 queued/running ──cancel──▶ canceled
 ```
 
-- `ClaimNextTask` 用单条 `UPDATE ... RETURNING` 保证单节点原子性，claim 时 `attempts+1`、检查 `available_at ≤ now`。
+- `ClaimNextTask` 用单条 `UPDATE ... RETURNING` 保证单节点原子性，claim 时 `attempts+1`、检查 `available_at ≤ now`。SQLite 写串行化即天然互斥；PostgreSQL 额外用 `FOR UPDATE SKIP LOCKED`，否则并发 worker 会在任一方加锁前读到同一行、把同一任务 claim 两次。
+- 执行器是 worker 池（`--workers`，默认 4，`1` 即串行）：每个 goroutine 独立 claim。显式共享同一个上游 `sessionId` 的任务由进程内 `sessionGate` 串行，避免并发读回同一次会话的最后一条回复。
 - 重试通过 `RetryTask(id, backoffSecs)` 把任务置回 `queued` 并排 `available_at` 到未来；SQLite 与 PG 用不同时间运算方言（`rebind` 外的 driver 分支）。
 
 ### 自动化规则
@@ -79,7 +80,7 @@ queued/running ──cancel──▶ canceled
 ```
 POST /api/tasks {prompt, directory?, dependsOn?}
   → store.CreateTask(status=queued；有未完成前置则 pending)
-  → Executor.Run 循环 ClaimNextTask
+  → Executor.Run 起 N 个 worker（--workers）并发 ClaimNextTask
   → createSession（无 sessionId 时）→ SetTaskSession
   → POST /api/session/{id}/prompt  （V2 admitted：id 须 msg_ 前缀 + x-opencode-directory）
   → 轮询 /session/status 直到非 busy
