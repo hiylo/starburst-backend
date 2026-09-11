@@ -48,7 +48,7 @@ func newTestServer(t *testing.T) *Server {
 		case "/config":
 			_, _ = w.Write([]byte(`{"version":"v9.9.9"}`))
 		case "/session/ses_test123/message":
-			_, _ = w.Write([]byte(`[{"role":"assistant","content":[{"type":"text","text":"这是结果"}]}]`))
+			_, _ = w.Write([]byte(`[{"info":{"role":"assistant"},"parts":[{"type":"text","text":"这是结果"}]}]`))
 		default:
 			http.NotFound(w, r)
 		}

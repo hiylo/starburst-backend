@@ -159,6 +159,40 @@ func TestExportMarkdown(t *testing.T) {
 	}
 }
 
+// TestFetchSessionMessagesRealShape ensures the parser handles the actual
+// OpenCode message envelope ({info.role, parts[].text}) rather than the
+// legacy {role, content[]} shape, so archives are not empty.
+func TestFetchSessionMessagesRealShape(t *testing.T) {
+	body := `[
+		{"info":{"id":"msg_1","role":"user"},
+		 "parts":[{"type":"text","text":"hello"}]},
+		{"info":{"id":"msg_2","role":"assistant"},
+		 "parts":[{"type":"text","text":"hi there"}]},
+		{"info":{"id":"msg_3","role":"tool"},
+		 "parts":[{"type":"tool","tool":"bash"}]}
+	]`
+	srv := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/session/ses_1/message" {
+			t.Errorf("unexpected path %s", r.URL.Path)
+		}
+		_, _ = w.Write([]byte(body))
+	})
+	c := New(srv.URL)
+	msgs, err := c.FetchSessionMessages(context.Background(), "ses_1")
+	if err != nil {
+		t.Fatalf("fetch: %v", err)
+	}
+	if len(msgs) != 2 {
+		t.Fatalf("want 2 messages (tool part filtered), got %d", len(msgs))
+	}
+	if msgs[0].Role != "user" || msgs[0].Content != "hello" {
+		t.Fatalf("bad first message: %+v", msgs[0])
+	}
+	if msgs[1].Role != "assistant" || msgs[1].Content != "hi there" {
+		t.Fatalf("bad second message: %+v", msgs[1])
+	}
+}
+
 func TestStreamEventsParsesSSE(t *testing.T) {
 	srv := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/global/event" {

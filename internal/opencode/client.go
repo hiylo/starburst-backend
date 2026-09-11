@@ -223,11 +223,13 @@ func (c *Client) FetchSessionMessages(ctx context.Context, sessionID string) ([]
 	}
 
 	var doc []struct {
-		Role    string `json:"role"`
-		Content []struct {
+		Info struct {
+			Role string `json:"role"`
+		} `json:"info"`
+		Parts []struct {
 			Type string `json:"type"`
 			Text string `json:"text"`
-		} `json:"content"`
+		} `json:"parts"`
 	}
 	if err := json.Unmarshal(raw, &doc); err != nil {
 		return nil, fmt.Errorf("parse messages: %w", err)
@@ -236,13 +238,17 @@ func (c *Client) FetchSessionMessages(ctx context.Context, sessionID string) ([]
 	var out []Message
 	for _, m := range doc {
 		var sb strings.Builder
-		for _, c := range m.Content {
-			if c.Text != "" {
+		for _, c := range m.Parts {
+			if c.Type == "text" && c.Text != "" {
 				sb.WriteString(c.Text)
 				sb.WriteString("\n")
 			}
 		}
-		out = append(out, Message{Role: m.Role, Content: strings.TrimSpace(sb.String())})
+		content := strings.TrimSpace(sb.String())
+		if content == "" {
+			continue
+		}
+		out = append(out, Message{Role: m.Info.Role, Content: content})
 	}
 	return out, nil
 }
