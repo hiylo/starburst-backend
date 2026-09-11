@@ -13,9 +13,11 @@ OpenCode 客户端的轻量独立后端（Go 单二进制）。运行在开发�
 - **会话编排**：`/api/projects` 聚合本机 OpenCode 所有会话
 - **流式对话中继**：`/api/stream` 把 OpenCode 全局 SSE 事件流原样转发（自动重连），APP 一条稳定连接即可流畅收流式输出
 - **异步任务队列**：提交即返回，后台调度 agent 执行；进度/结果/重试（指数退避）、可取消
+- **任务依赖**：`dependsOn` 声明前置任务，前置成功才执行（`pending`→`queued`）；前置失败/取消则标记 `blocked` 并记录原因，可在前置重试成功后自动解阻，也可手动解阻后继续执行
 - **批量执行**：`/api/batch` 一条指令对多个目录/会话批量下发
 - **事件驱动自动化**：cron 定时 + HTTP webhook 触发规则，命中即自动建任务
 - **会话归档**：`/api/archives` 把远端会话导出为 Markdown/JSON 存档
+- **智能编排决策层**：可插拔大模型（OpenAI 兼容，走 LiteLLM 网关）驱动三类能力——自然语言转规则草稿、任务结果摘要、失败自愈；不配置时自动退回纯规则引擎
 
 ### 可观测
 - **实时推送**：WebSocket 长连 + 通知分级（info/warning/critical），任务状态、上游健康心跳
@@ -53,8 +55,25 @@ go build -o opencode-backend ./cmd/opencode-backend
 | `--sqlite-path` | `OCB_SQLITE_PATH` | `opencode-backend.db` | SQLite 数据库文件 |
 | `--pg-dsn` | `OCB_PG_DSN` | — | PostgreSQL 连接串 |
 | `--default-admin-password` | `OCB_ADMIN_PASSWORD` | `admin` | 首次初始化密码（可后改） |
+| `--llm-url` | `OCB_LLM_URL` | — | OpenAI 兼容编排大模型地址（如 LiteLLM 网关），空 = 关闭智能编排 |
+| `--llm-key` | `OCB_LLM_KEY` | — | `--llm-url` 的 API key |
+| `--llm-model` | `OCB_LLM_MODEL` | — | 编排决策使用的模型名 |
 | `--version` | — | — | 打印版本号退出 |
 | `--health-check` | — | — | 检查数据库/上游连通性后退出 |
+
+> 智能编排大模型也可在运行时不重启配置：Web 配置页调用 `GET/POST /api/llm` 修改地址/密钥/模型（见 [docs/API.md](docs/API.md)），后台配置持久化后**优先于**启动 flag/环境变量。
+
+## 测试
+
+```bash
+go test ./...            # SQLite 全量
+go test -race ./...      # 并发回归（推送中枢等）
+
+# PostgreSQL 方言回归（可选，默认跳过）
+# 自建 ocb_test_<pid> 临时库，测试结束自动删除
+OCB_PG_DSN='postgres://user:pass@host/db?sslmode=disable' \
+    go test -tags pgtest -run Postgres ./internal/store/
+```
 
 ## 一键安装
 
@@ -88,11 +107,12 @@ docker compose --profile postgres up -d   # 附带 PG，可用 OCB_PG_DSN 切换
 cmd/opencode-backend  入口（--version / --health-check / serve）
 internal/
   config     flag/env 配置
-  store      SQLite/Postgres 存储抽象 + 迁移（v1-v6）
+  store      SQLite/Postgres 存储抽象 + 迁移（v1-v10）
   auth       Web 密码 + APP Token
   server     HTTP/WS 路由与 handler
   opencode   本机 OpenCode 客户端（会话/消息/导出）
-  tasks      异步任务调度器（重试/退避）
+  llm        可插拔编排大模型客户端（OpenAI 兼容，未配置时禁用）
+  tasks      异步任务调度器（重试/退避 + LLM 摘要/自愈）
   automation cron/webhook 自动化规则引擎
   push       WS 推送 Hub（severity 分级）
   webui      嵌入的配置页

@@ -77,14 +77,17 @@ queued/running ──cancel──▶ canceled
 ### 5.1 提交异步任务
 
 ```
-POST /api/tasks {prompt, directory?}
-  → store.CreateTask(status=queued)
+POST /api/tasks {prompt, directory?, dependsOn?}
+  → store.CreateTask(status=queued；有未完成前置则 pending)
   → Executor.Run 循环 ClaimNextTask
   → createSession（无 sessionId 时）→ SetTaskSession
   → POST /api/session/{id}/prompt  （V2 admitted：id 须 msg_ 前缀 + x-opencode-directory）
   → 轮询 /session/status 直到非 busy
   → GET /session/{id}/message 取最后 assistant 文本
   → CompleteTask / FailTask → WS 广播 task.event(severity)
+  → 依赖结算：前置成功 PromotePendingDependents（pending/blocked → queued，推送 queued）
+              前置失败/取消 BlockDependents（pending → blocked + reason，推送 warning）
+  → POST /api/tasks/{id} 手动解阻：UnblockTask（blocked → queued）
 ```
 
 ### 5.2 事件驱动自动化
@@ -101,6 +104,7 @@ webhook  ──/api/webhook?target=──▶ FireKind ──▶ CreateTask
 APP ──WS /api/ws?token=──▶ Server
   ← subscribed
   ← task.event {id,status}        severity: info/warning/critical
+  ← task.event {id,status,upstream,reason}  依赖被阻塞/解阻，severity=warning/info
   ← upstream.health {healthy}     每 30s
 ```
 

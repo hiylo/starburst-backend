@@ -52,6 +52,7 @@ curl "http://localhost:8080/api/tasks?status=running" -H "Authorization: Bearer 
 {"type":"subscribed"}
 {"type":"task.event","payload":{"id":"task_...","status":"running"},"severity":"info"}
 {"type":"task.event","payload":{"id":"task_...","status":"succeeded"},"severity":"info"}
+{"type":"task.event","payload":{"id":"task_...","status":"blocked","upstream":"task_...","reason":"前置任务失败"},"severity":"warning"}
 {"type":"upstream.health","payload":{"healthy":true,"time":"..."}}
 ```
 
