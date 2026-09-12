@@ -12,6 +12,22 @@ services:
       OCB_SQLITE_PATH: "/data/opencode-backend.db"
     restart: unless-stopped
 
+# ---- 流式语音识别引擎（可选）----
+  # 启用：docker compose --profile stt up -d
+  # 替代原 systemd stt-server.service；把 NAS 上的模型目录挂进容器。
+  # 模型需含 encoder/decoder/joiner int8 onnx + tokens.txt（约 197MB）。
+  stt-server:
+    build:
+      context: ./scripts/stt-server
+    container_name: stt-server
+    profiles:
+      - stt
+    ports:
+      - "18090:18090"
+    volumes:
+      - /vol1/1000/stt-server/model:/opt/stt/model:ro
+    restart: unless-stopped
+
 volumes:
   opencode-data:
 

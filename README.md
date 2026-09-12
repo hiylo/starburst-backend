@@ -73,7 +73,7 @@ go build -o opencode-backend ./cmd/opencode-backend
 
 > 智能编排大模型也可在运行时不重启配置：Web 配置页调用 `GET/POST /api/llm` 修改地址/密钥/模型（见 [docs/API.md](docs/API.md)），后台配置持久化后**优先于**启动 flag/环境变量。
 
-> 服务端语音识别：`--stt-url` 指向跑着流式识别引擎的主机（本地方案：NAS 上用 sherpa-onnx 的 zipformer 中英双语 int8 流式模型，`systemd` 常驻，模型约 197MB、加载 8s、4 线程推理）。后端只做鉴权与协议透传，不自己解码音频；手机端在端侧 MNN 模型不可用时自动回退到它，端侧可用则继续本地识别。未配置时 `/api/stt` 返回 503，App 不会显示服务端语音入口。接口细节见 [docs/API.md](docs/API.md) 的「语音识别」一节。
+> 服务端语音识别：`--stt-url` 指向跑着流式识别引擎的主机（本地方案：NAS 上用 sherpa-onnx 的 zipformer 中英双语 int8 流式模型，`docker` 常驻，模型约 197MB、加载 8s、4 线程推理）。后端只做鉴权与协议透传，不自己解码音频；手机端在端侧 MNN 模型不可用时自动回退到它，端侧可用则继续本地识别。未配置时 `/api/stt` 返回 503，App 不会显示服务端语音入口。接口细节见 [docs/API.md](docs/API.md) 的「语音识别」一节。识别引擎容器化部署见 `scripts/stt-server/Dockerfile` 与 `docker-compose.yml` 的 `stt-server` 服务（`--profile stt`）。
 
 ## 测试
 
