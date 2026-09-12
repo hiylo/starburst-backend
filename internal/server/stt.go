@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -185,7 +186,11 @@ func (s *Server) handleSTTSession(w http.ResponseWriter, r *http.Request) {
 		// the input box is already clean instead of relying on the slow LLM
 		// refine round-trip that most users won't wait for.
 		if action == "/finish" && status == http.StatusOK {
+			before := string(data)
 			data = dedupEngineTranscript(data)
+			if string(data) != before {
+				log.Printf("stt finish dedup: %q -> %q", clip(before, 300), clip(string(data), 300))
+			}
 		}
 		writeRaw(w, proxyStatus(status), data)
 		return
@@ -201,6 +206,14 @@ func (s *Server) handleSTTSession(w http.ResponseWriter, r *http.Request) {
 
 // chunkTooLarge marks an oversized audio chunk so the handler can return 413.
 type chunkTooLarge struct{ limit int }
+
+// clip shortens a string for logging, appending an ellipsis when truncated.
+func clip(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "..."
+}
 
 // dedupEngineTranscript applies local transcript cleanup to the engine's finish
 // response JSON, rewriting only the "text" field while preserving every other
