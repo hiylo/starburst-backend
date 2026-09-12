@@ -94,6 +94,7 @@ func (s *Server) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/archives", s.handleArchives)
 	mux.HandleFunc("/api/archives/", s.handleArchiveByID)
 	mux.HandleFunc("/api/stt", s.handleSTTStatus)
+	mux.HandleFunc("/api/stt/refine", s.handleSTTRefine)
 	mux.HandleFunc("/api/stt/sessions", s.handleSTTCreate)
 	mux.HandleFunc("/api/stt/sessions/", s.handleSTTSession)
 	mux.HandleFunc("/api/webhook", s.handleRuleWebhook)
