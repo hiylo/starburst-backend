@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/hiylo/opencode-backend/internal/llm"
@@ -247,19 +248,51 @@ func mustQuote(s string) string {
 func TestDedupTranscript(t *testing.T) {
 	cases := map[string]string{
 		"昨天是是周一":                                "昨天是周一",
-		"我们们一起起吃饭饭":                             "我们一起吃饭饭",
+		"我们们一起起吃饭饭":                             "我们一起吃饭",
 		"饭饭饭好吃":                                 "饭好吃",
 		"昨天是 MONDAY MONDAY，TODAY TODAY IS LIBR": "昨天是 MONDAY，TODAY IS LIBR",
 		"昨天是 MONDAY MONDAY MONDAY":              "昨天是 MONDAY",
 		"是是是":                                   "是",
 		"昨天的话":                                  "昨天的话",
 		"看看说说一一":                                "看看说说一一",
+		"慢慢渐渐往往":                                "慢慢渐渐往往",
+		"妈妈爸爸好":                                 "妈妈爸爸好",
+		"杀杀敌发发果断如如今":                            "杀敌发果断如今",
+		"我我们们吃饭饭饭":                              "我们吃饭",
+		"娃娃宝宝哈哈":                                "娃娃宝宝哈哈",
 		"MONDAY, MONDAY":                        "MONDAY, MONDAY",
 		"，，，好。。好":                               "，好。好",
+		// 整段前缀被引擎重新解码后全文重现（中间重复，非尾部），
+		// 老逻辑 trimTailRepeat 管不到，dedupAdjacentRepeat 处理。
+		"今天天气真好今天天气真好我们":                       "今天天气真好我们",
+		// 相邻重复块之间允许一个空格分隔。
+		"想将军去杀敌 想将军去杀敌回来":                     "想将军去杀敌回来",
 	}
 	for in, want := range cases {
 		if got := dedupTranscript(in); got != want {
 			t.Errorf("dedupTranscript(%q)=%q want %q", in, got, want)
 		}
+	}
+}
+
+// TestDedupTranscriptRealJiangjun regresses the actual transcript the user
+// pasted after dictating a long drama line: the engine re-emitted the whole
+// accumulated prefix once and double-wrote nearly every content word. Every
+// reproduction of the original must be reachable from the source, and the
+// output must no longer contain the double-writes or the duplicated prefix.
+func TestDedupTranscriptRealJiangjun(t *testing.T) {
+	in := "想将军在片宾面馆关杀杀敌杀伐发发果果断如如今为女儿恨恨恨道到极致明连陛下牵连林都丝毫好不回 想将军在片宾面馆关杀杀敌杀伐发发果果断如如今为女儿恨恨恨道到极致明连陛下牵连林都丝毫好不回收敛怒怒火火呵赫赫赫连莲立刻停停停手御玉浅御御前动送动动私刑有势有失失朝朝日朝朝臣提面提面面当你当初他他亲手天挑断你今京今朝昭琉兽首守金把我女儿丢丢丢丢进入烟烟雨楼楼任任践践踏她TERN时他可讲过柔柔弱弱博吒博同同同情景请景狗勾结勾结姐她太太太子算算算算计计我正正镇国果兵权请景景今日日这边的鞭哨伤的是是他欠欠我女儿的长偿偿长还当当着这天天子子的命令"
+	got := dedupTranscript(in)
+	if strings.Contains(got, "杀杀") {
+		t.Errorf("still contains 杀杀: %q", got)
+	}
+	if strings.Contains(got, "想将军在片宾面馆关杀杀敌杀伐") && strings.Count(got, "想将军") > 1 {
+		t.Errorf("duplicated prefix survives: %q", got)
+	}
+	if strings.Count(got, "想将军") != 1 {
+		t.Errorf("想将军 must appear exactly once, got %d: %q", strings.Count(got, "想将军"), got)
+	}
+	if strings.Contains(got, "哎") {
+		t.Errorf("unexpected 哎: %q", got)
 	}
 }

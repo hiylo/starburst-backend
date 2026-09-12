@@ -187,13 +187,28 @@ func (s *Server) handleSTTRefine(w http.ResponseWriter, r *http.Request) {
 
 	ctx, cancel := context.WithTimeout(r.Context(), refineTimeout)
 	defer cancel()
-	out, err := s.llm.Complete(ctx, refineSystem, original)
-	if err != nil {
-		fallbackDedup("llm failed")
-		return
+	// The deep-reasoning model occasionally returns 5xx/connection issues on the
+	// first try; a single retry drops the effective failure rate without
+	// noticeably delaying the release gesture (the app runs this in the
+	// background). Timeout budget is shared across both attempts via ctx.
+	var cleaned string
+	if out, err := s.llm.Complete(ctx, refineSystem, original); err == nil {
+		cleaned = stripFences(out)
+	} else {
+		select {
+		case <-ctx.Done():
+			fallbackDedup("llm failed")
+			return
+		case <-time.After(800 * time.Millisecond):
+		}
+		if out, err := s.llm.Complete(ctx, refineSystem, original); err != nil {
+			fallbackDedup("llm failed")
+			return
+		} else {
+			cleaned = stripFences(out)
+		}
 	}
 
-	cleaned := stripFences(out)
 	if !refinePlausible(original, cleaned) {
 		fallbackDedup("rejected")
 		return
@@ -207,10 +222,19 @@ func (s *Server) handleSTTRefine(w http.ResponseWriter, r *http.Request) {
 }
 
 // repeatedCN is a Chinese character the engine routinely duplicates: particles,
-// function words and pronouns. Content words are deliberately excluded because
-// Chinese legitimately reduplicates them (看看、说说、往往、一一), so for those a
-// run of three or more is required before deduplicating.
+// function words and pronouns. Kept for documentation; the actual decision in
+// dedupRuns is now the legalRedup allow-list below.
 const repeatedCN = "的了是在不我你他她它们也都就还再又会能要和与及把被给让使到从对为以这那很最太更起"
+
+// legalRedup lists Chinese characters that may legitimately appear as a pair
+// (叠词): 看看、慢慢、渐渐、常常、刚刚、妈妈、哈哈 ... Everything else that
+// comes out duplicated is assumed to be an engine stutter and collapsed to one,
+// because streaming ASR routinely double-writes content words (杀杀敌、发发果、
+// 失失朝朝), which far outnumbers real reduplication in dictation.
+const legalRedup = "看看吧说说见面想想问问听听读写练试试找走走玩玩尝尝拍拍坐坐聊聊慢慢渐渐往往常常刚刚天天日日年年月月夜夜" +
+	"时时刻刻每每隐隐微微轻轻紧紧偷偷悄悄默默匆匆忙忙家家户户人人条条件件种种样样星星点点滴滴谢谢见见太太娃娃宝宝一一" +
+	"爸爸妈妈哥哥姐姐弟弟妹妹爷爷奶奶叔叔姑姑舅舅姥姥" +
+	"哈哈呵呵嘿嘿嘻嘻哼哼汪汪喵喵呱呱"
 
 // dedupPunct keeps the first punctuation mark in a run and drops the rest.
 func dedupPunct(s string) string {
@@ -237,9 +261,10 @@ func dedupPunct(s string) string {
 	return string(out)
 }
 
-// dedupRuns collapses runs of identical Chinese characters: runs of three or
-// more reduce to one, and pairs of routine particles also reduce to one, while
-// legitimate two-character reduplications are preserved.
+// dedupRuns collapses runs of identical Chinese characters to one, except when
+// the character legitimately reduplicates (看看、慢慢、妈妈) and appears exactly
+// twice. Streaming ASR routinely double-writes ordinary content words (杀杀敌、
+// 发发果、失失朝朝), so a pair is only kept when the character is allow-listed.
 func dedupRuns(s string) string {
 	runes := []rune(s)
 	if len(runes) == 0 {
@@ -253,7 +278,7 @@ func dedupRuns(s string) string {
 			j++
 		}
 		keep := 1
-		if j-i == 2 && !strings.ContainsRune(repeatedCN, runes[i]) {
+		if j-i == 2 && strings.ContainsRune(legalRedup, runes[i]) {
 			keep = 2
 		}
 		for k := 0; k < keep; k++ {
@@ -264,11 +289,58 @@ func dedupRuns(s string) string {
 	return string(out)
 }
 
+// dedupAdjacentRepeat removes the first copy of the longest block that appears
+// twice in a row anywhere in the text, e.g. "AB AB C" -> "AB C" and
+// "我们一起去吃饭我们一起去吃饭" -> "我们一起去吃饭". The engine re-decodes the
+// accumulated transcript on flush, which duplicates a long prefix in the middle
+// of the text (not just at the tail), and trimTailRepeat alone cannot reach
+// that. A single optional space between the copies is ignored. Runs of a single
+// character are owned by dedupRuns, so the minimum block length is two.
+func dedupAdjacentRepeat(s string) string {
+	trimmed := strings.TrimSpace(s)
+	r := []rune(trimmed)
+	n := len(r)
+	if n < 2*2 {
+		return trimmed
+	}
+	for {
+		bestL, bestI := 0, 0
+		for l := 2; l <= n/2; l++ {
+			for i := 0; i+2*l <= n; i++ {
+				if equalRunes(r[i:i+l], r[i+l:i+2*l]) {
+					if l > bestL {
+						bestL, bestI = l, i
+					}
+				} else if r[i+l] == ' ' && i+2*l+1 <= n &&
+					equalRunes(r[i:i+l], r[i+l+1:i+2*l+1]) {
+					if l > bestL {
+						bestL, bestI = l, i
+					}
+				}
+			}
+		}
+		if bestL == 0 {
+			return trimmed
+		}
+		secondStart := bestI + bestL
+		if secondStart < n && r[secondStart] == ' ' {
+			secondStart++
+		}
+		out := make([]rune, 0, n-bestL)
+		out = append(out, r[:bestI]...)
+		out = append(out, r[secondStart:]...)
+		trimmed = strings.TrimSpace(string(out))
+		r = []rune(trimmed)
+		n = len(r)
+	}
+}
+
 // dedupTranscript collapses repeated ASCII words, repeated punctuation, and
-// repeated runs of Chinese characters, then trims a duplicated trailing phrase
-// that streaming ASR engines tend to emit on finish.
+// repeated runs of Chinese characters, drops an adjacent duplicate block
+// anywhere in the text, then trims a duplicated trailing phrase that streaming
+// ASR engines tend to emit on finish.
 func dedupTranscript(s string) string {
-	return trimTailRepeat(dedupRuns(dedupPunct(dedupWords(s))))
+	return trimTailRepeat(dedupAdjacentRepeat(dedupRuns(dedupPunct(dedupWords(s)))))
 }
 
 // trimTailRepeat removes a phrase duplicated verbatim at the end of the text,
