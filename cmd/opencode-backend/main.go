@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -30,6 +31,16 @@ func mustJSON(v any) json.RawMessage {
 	return b
 }
 
+// prepareSQLite creates the directory holding the database file so that paths
+// such as /var/lib/opencode/backend.db work out of the box.
+func prepareSQLite(path string) error {
+	dir := filepath.Dir(path)
+	if dir == "" || dir == "." {
+		return nil
+	}
+	return os.MkdirAll(dir, 0o755)
+}
+
 func main() {
 	cfg, err := config.Parse(os.Args[1:])
 	if err != nil {
@@ -51,6 +62,9 @@ func main() {
 	// Build the DSN and open the store.
 	var dsn string
 	if cfg.DBDriver == "sqlite" {
+		if err := prepareSQLite(cfg.SQLitePath); err != nil {
+			log.Fatalf("prepare sqlite dir: %v", err)
+		}
 		dsn = store.SQLiteDSN(cfg.SQLitePath)
 	} else {
 		dsn = cfg.PostgresDSN
@@ -212,6 +226,10 @@ func runHealthCheck(cfg *config.Config) int {
 
 	var dsn string
 	if cfg.DBDriver == "sqlite" {
+		if err := prepareSQLite(cfg.SQLitePath); err != nil {
+			fmt.Printf("FAIL sqlite dir %s: %v\n", cfg.SQLitePath, err)
+			return 1
+		}
 		dsn = store.SQLiteDSN(cfg.SQLitePath)
 	} else {
 		dsn = cfg.PostgresDSN
