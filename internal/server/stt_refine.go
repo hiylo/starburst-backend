@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"log"
 	"net/http"
 	"regexp"
 	"strings"
@@ -212,6 +213,7 @@ func (s *Server) handleSTTRefine(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if !refinePlausible(original, cleaned) {
+		log.Printf("refine: LLM output rejected. original=%q cleaned=%q", original, cleaned)
 		fallbackDedup("rejected")
 		return
 	}
