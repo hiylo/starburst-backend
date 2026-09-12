@@ -143,9 +143,10 @@ func (s *Server) logMiddleware(next http.Handler) http.Handler {
 		if !strings.HasPrefix(r.URL.Path, "/api/") {
 			return
 		}
-		// Audio chunks would flood the audit table: a 10s recording at 200ms
-		// per chunk is 50 rows, so recording sessions are skipped entirely.
-		if strings.HasPrefix(r.URL.Path, "/api/stt/") {
+		// STT traffic would flood the audit table: a 10s recording at 200ms
+		// per chunk is 50 rows, and the app re-probes /api/stt on every chat
+		// screen open, so the whole subtree is skipped entirely.
+		if strings.HasPrefix(r.URL.Path, "/api/stt") {
 			return
 		}
 		if rec, ok := s.tokenFromRequest(r); ok {

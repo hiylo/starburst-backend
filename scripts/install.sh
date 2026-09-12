@@ -36,6 +36,9 @@ ADMIN_PASSWORD="${OCB_ADMIN_PASSWORD:-}"
 DEFAULT_TOKEN="${OCB_DEFAULT_TOKEN:-}"
 WORKERS="${OCB_WORKERS:-4}"
 TASK_RETENTION="${OCB_TASK_RETENTION:-}"
+STT_URL="${OCB_STT_URL:-}"
+STT_TIMEOUT="${OCB_STT_TIMEOUT:-}"
+STT_MAX_CHUNK_BYTES="${OCB_STT_MAX_CHUNK_BYTES:-}"
 PREFIX="${OCB_PREFIX:-/}"
 
 while [[ $# -gt 0 ]]; do
@@ -43,9 +46,10 @@ while [[ $# -gt 0 ]]; do
   case "$opt" in
     -h|--help)
       echo "用法: $0 [--port 8080] [--db sqlite|postgres] [--pg-dsn dsn] [--admin-password pw] [--default-token tok] \\"
-      echo "       [--workers 4] [--task-retention 168h0m] [--prefix /]"
+      echo "       [--workers 4] [--task-retention 168h0m] [--prefix /] \\"
+      echo "       [--stt-url http://192.0.2.150:18090] [--stt-timeout 30s] [--stt-max-chunk-bytes 2097152]"
       exit 0 ;;
-    --port|--db|--pg-dsn|--admin-password|--default-token|--workers|--task-retention|--prefix)
+    --port|--db|--pg-dsn|--admin-password|--default-token|--workers|--task-retention|--prefix|--stt-url|--stt-timeout|--stt-max-chunk-bytes)
       if [[ $# -lt 2 ]]; then
         echo "!! 参数 $opt 需要一个值" >&2
         exit 1
@@ -59,6 +63,9 @@ while [[ $# -gt 0 ]]; do
         --workers) WORKERS="$2" ;;
         --task-retention) TASK_RETENTION="$2" ;;
         --prefix) PREFIX="$2" ;;
+        --stt-url) STT_URL="$2" ;;
+        --stt-timeout) STT_TIMEOUT="$2" ;;
+        --stt-max-chunk-bytes) STT_MAX_CHUNK_BYTES="$2" ;;
       esac
       shift 2
       ;;
@@ -106,6 +113,18 @@ if [[ "$DB" != "sqlite" && "$DB" != "postgres" ]]; then
 fi
 if [[ "$DB" == "postgres" && -z "$PG_DSN" ]]; then
   echo "!! 选择 postgres 时必须提供 --pg-dsn" >&2
+  exit 1
+fi
+if [[ -n "$STT_URL" && ! "$STT_URL" =~ ^https?://[A-Za-z0-9._-]+(:[0-9]+)?$ ]]; then
+  echo "!! --stt-url 形如 http://192.0.2.150:18090，当前: $STT_URL" >&2
+  exit 1
+fi
+if [[ -n "$STT_TIMEOUT" && ! "$STT_TIMEOUT" =~ ^[0-9]+(ns|us|ms|s|m|h)$ ]]; then
+  echo "!! --stt-timeout 为 Go duration（如 30s），当前: $STT_TIMEOUT" >&2
+  exit 1
+fi
+if [[ -n "$STT_MAX_CHUNK_BYTES" && ! "$STT_MAX_CHUNK_BYTES" =~ ^[0-9]+$ ]]; then
+  echo "!! --stt-max-chunk-bytes 必须是数字: $STT_MAX_CHUNK_BYTES" >&2
   exit 1
 fi
 
@@ -165,6 +184,9 @@ fi
 [[ -n "$ADMIN_PASSWORD" ]] && EXEC_ARGS+=(--default-admin-password "$ADMIN_PASSWORD")
 [[ -n "$DEFAULT_TOKEN" ]] && EXEC_ARGS+=(--default-token "$DEFAULT_TOKEN")
 [[ -n "$TASK_RETENTION" ]] && EXEC_ARGS+=(--task-retention "$TASK_RETENTION")
+[[ -n "$STT_URL" ]] && EXEC_ARGS+=(--stt-url "$STT_URL")
+[[ -n "$STT_TIMEOUT" ]] && EXEC_ARGS+=(--stt-timeout "$STT_TIMEOUT")
+[[ -n "$STT_MAX_CHUNK_BYTES" ]] && EXEC_ARGS+=(--stt-max-chunk-bytes "$STT_MAX_CHUNK_BYTES")
 
 # systemd 按空白切分 ExecStart 的参数，含空格的值（DSN、密码）必须用双引号包裹；
 # 值内部的双引号/反斜杠也要转义，否则会被 systemd 错误解析。
@@ -215,3 +237,15 @@ fi
 echo "  - 服务: opencode-backend (systemd, :$PORT)"
 echo "  - 数据: $DATA_DIR"
 echo "  - 日志: journalctl -u opencode-backend -f"
+if [[ -n "$STT_URL" ]]; then
+  echo "  - 语音识别: 已接入 $STT_URL"
+else
+  echo "  - 语音识别: 未配置（App 需要它在端侧模型不可用时兜底）"
+  echo "    追加: systemctl edit opencode-backend 加 OCB_STT_URL，或重跑本脚本带 --stt-url"
+fi
+# App 侧默认按 opencode 同主机 :18880 推导 backend 地址；端口不一致时必须
+# 在 App 的服务器配置里显式填 backendUrl，否则 App 找不到后端。
+if [[ "$PORT" != "18880" ]]; then
+  echo "  ! 端口是 :$PORT 而不是 18880：App 默认推导的是 :18880，请在 App"
+  echo "    服务器配置里显式填写 backend 地址，或重装时加 --port 18880"
+fi

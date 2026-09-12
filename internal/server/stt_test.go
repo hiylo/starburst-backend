@@ -283,3 +283,89 @@ func TestSTTSessionPathValidation(t *testing.T) {
 		t.Fatalf("get status %d", rec.Code)
 	}
 }
+
+// TestSTTNotAudited pins the exclusion of the whole /api/stt subtree from the
+// audit table. The app re-probes GET /api/stt every time a chat screen is
+// opened, and one 10s recording produces ~50 chunk calls, so the subtree would
+// otherwise be pure noise. A token call outside the subtree must still be
+// audited, which proves the filter is scoped rather than audit being disabled.
+func TestSTTNotAudited(t *testing.T) {
+	engine := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/health" && r.Method == http.MethodGet:
+			_, _ = w.Write([]byte(`{"status":"ok","model":"zipformer","sample_rate":16000,"sessions":1}`))
+		case r.URL.Path == "/sessions" && r.Method == http.MethodPost:
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"session_id":"abc12345abcdef67","sample_rate":16000,"channels":1,"sample_width":2}`))
+		case r.Method == http.MethodPost:
+			_, _ = w.Write([]byte(`{"session_id":"abc12345abcdef67","text":"昨天是","final":false,"bytes":6400,"seconds":0.4}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer engine.Close()
+
+	s := newTestServer(t)
+	s.SetSTT(engine.URL, 5*time.Second)
+
+	rec := s.do(t, http.MethodPost, "/api/web/session", `{"password":"admin"}`, nil)
+	var login struct {
+		Session string `json:"session"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &login); err != nil {
+		t.Fatalf("decode login: %v", err)
+	}
+	web := map[string]string{"X-Web-Session": login.Session}
+
+	rec = s.do(t, http.MethodPost, "/api/tokens", `{"name":"stt-audit"}`, web)
+	var tok struct {
+		Token string `json:"token"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &tok); err != nil {
+		t.Fatalf("decode token: %v", err)
+	}
+	th := map[string]string{"Authorization": "Bearer " + tok.Token}
+
+	if rec = s.do(t, http.MethodGet, "/api/stt", "", th); rec.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
+	}
+	if rec = s.do(t, http.MethodPost, "/api/stt/sessions", "", th); rec.Code != http.StatusCreated {
+		t.Fatalf("create status %d: %s", rec.Code, rec.Body.String())
+	}
+	for i := 0; i < 50; i++ {
+		if rec = s.do(t, http.MethodPost, "/api/stt/sessions/abc12345abcdef67/chunks", "pcm", th); rec.Code != http.StatusOK {
+			t.Fatalf("chunk %d status %d: %s", i, rec.Code, rec.Body.String())
+		}
+	}
+	if rec = s.do(t, http.MethodPost, "/api/stt/sessions/abc12345abcdef67/finish", "", th); rec.Code != http.StatusOK {
+		t.Fatalf("finish status %d", rec.Code)
+	}
+
+	if rec = s.do(t, http.MethodGet, "/api/projects", "", th); rec.Code != http.StatusOK {
+		t.Fatalf("projects status %d", rec.Code)
+	}
+
+	rec = s.do(t, http.MethodGet, "/api/audit", "", web)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("audit status %d", rec.Code)
+	}
+	var out struct {
+		Audit []struct {
+			Path string `json:"Path"`
+		} `json:"audit"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode audit: %v", err)
+	}
+	if len(out.Audit) == 0 {
+		t.Fatalf("expected audit entries")
+	}
+	if out.Audit[0].Path != "/api/projects" {
+		t.Fatalf("last audit path %q want /api/projects", out.Audit[0].Path)
+	}
+	for _, a := range out.Audit {
+		if strings.HasPrefix(a.Path, "/api/stt") {
+			t.Fatalf("stt path leaked into audit: %q", a.Path)
+		}
+	}
+}
