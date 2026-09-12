@@ -95,11 +95,13 @@ var punctRun = regexp.MustCompile(`[，。！？、；：]{2,}`)
 // dictation would still fit; a 30s recording is a few hundred bytes.
 const refineMaxInputBytes = 16 * 1024
 
-// refineTimeout bounds one correction round trip. The LLM is a deep-reasoning
-// model with a 120s client deadline, so 25s was cutting real calls short and
-// surfacing as flaky "llm failed"; 45s still never blocks the release gesture
-// because the app runs refine in the background.
-const refineTimeout = 45 * time.Second
+// refineTimeout bounds one correction round trip. The model is a deep-reasoning
+// engine that spends the first several thousand tokens thinking, so it needs
+// both a generous token budget (defaultMaxTokens) and enough wall-clock time;
+// 90s still never blocks the release gesture because the app runs refine in
+// the background (its own client timeout is ~95s and both bounds share the
+// same intent: let a long dictation get corrected instead of silently failing).
+const refineTimeout = 90 * time.Second
 
 // refineSystem tells the model to repair a streaming-ASR transcript in place
 // and to output nothing but the repaired text.
