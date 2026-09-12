@@ -95,11 +95,11 @@ var punctRun = regexp.MustCompile(`[，。！？、；：]{2,}`)
 // dictation would still fit; a 30s recording is a few hundred bytes.
 const refineMaxInputBytes = 16 * 1024
 
-// refineTimeout bounds one correction round trip. Measured latencies range from
-// about 3s for a short Chinese sentence to 12s+ for mixed Chinese/English with
-// several repeated words, so this has to be generous; the client calls it in the
-// background and never blocks the release gesture on it.
-const refineTimeout = 25 * time.Second
+// refineTimeout bounds one correction round trip. The LLM is a deep-reasoning
+// model with a 120s client deadline, so 25s was cutting real calls short and
+// surfacing as flaky "llm failed"; 45s still never blocks the release gesture
+// because the app runs refine in the background.
+const refineTimeout = 45 * time.Second
 
 // refineSystem tells the model to repair a streaming-ASR transcript in place
 // and to output nothing but the repaired text.
@@ -167,12 +167,21 @@ func (s *Server) handleSTTRefine(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	unrefined := func(reason string) {
-		writeJSON(w, http.StatusOK, sttRefineResponse{Text: original, Reason: reason})
+	// fallbackDedup returns the transcript after local rule dedup when the LLM
+	// is unavailable, fails or is not trusted. The engine is prone to trailing
+	// repeats (the last word being decoded again on flush), so even without a
+	// model we must still strip duplicates — otherwise the user sees raw text.
+	fallbackDedup := func(reason string) {
+		cleaned := dedupTranscript(original)
+		writeJSON(w, http.StatusOK, sttRefineResponse{
+			Text:    cleaned,
+			Changed: cleaned != original,
+			Reason:  reason,
+		})
 	}
 
 	if s.llm == nil || !s.llm.Enabled() {
-		unrefined("llm not configured")
+		fallbackDedup("llm not configured")
 		return
 	}
 
@@ -180,13 +189,13 @@ func (s *Server) handleSTTRefine(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	out, err := s.llm.Complete(ctx, refineSystem, original)
 	if err != nil {
-		unrefined("llm failed")
+		fallbackDedup("llm failed")
 		return
 	}
 
 	cleaned := stripFences(out)
 	if !refinePlausible(original, cleaned) {
-		unrefined("rejected")
+		fallbackDedup("rejected")
 		return
 	}
 	if cleaned == original {
@@ -256,9 +265,54 @@ func dedupRuns(s string) string {
 }
 
 // dedupTranscript collapses repeated ASCII words, repeated punctuation, and
-// repeated runs of Chinese characters.
+// repeated runs of Chinese characters, then trims a duplicated trailing phrase
+// that streaming ASR engines tend to emit on finish.
 func dedupTranscript(s string) string {
-	return dedupRuns(dedupPunct(dedupWords(s)))
+	return trimTailRepeat(dedupRuns(dedupPunct(dedupWords(s))))
+}
+
+// trimTailRepeat removes a phrase duplicated verbatim at the end of the text,
+// e.g. "今天天气怎么样 怎么样" -> "今天天气怎么样" and
+// "我们一起去吃饭我们一起去吃饭" -> "我们一起去吃饭". Streaming engines often
+// re-decode the last word/phrase once more when flushing the trailing silence,
+// so the raw transcript ends with an exact copy of its tail.
+func trimTailRepeat(s string) string {
+	trimmed := strings.TrimSpace(s)
+	if len([]rune(trimmed)) < 2 {
+		return trimmed
+	}
+
+	// Space-separated tail: compare the last two tokens directly.
+	words := strings.Fields(trimmed)
+	if len(words) >= 2 && words[len(words)-1] == words[len(words)-2] {
+		return strings.TrimSpace(strings.TrimSuffix(trimmed, words[len(words)-1]))
+	}
+
+	// Chinese tail without separators: try every phrase length of 2+ runes up
+	// to half, preferring shorter phrases ("ABAB" -> "AB"). Single-rune tails
+	// are excluded because dedupRuns already owns those (叠词 like 看看/一一
+	// must survive, and it collapses real 3+ repeats).
+	r := []rune(trimmed)
+	n := len(r)
+	for k := 2; k <= n/2; k++ {
+		if equalRunes(r[n-k:], r[n-2*k:n-k]) {
+			return strings.TrimSpace(string(r[:n-k]))
+		}
+	}
+	return trimmed
+}
+
+// equalRunes reports whether two rune slices are identical.
+func equalRunes(a, b []rune) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func stripFences(s string) string {
