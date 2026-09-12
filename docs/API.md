@@ -136,6 +136,36 @@
 ### DELETE /api/archives/{id}（需 Token）
 删除归档。→ `{"ok":true}`；404 → 不存在
 
+## 语音识别（需 Token）
+
+把音频分片代理到部署在另一台主机上的流式识别引擎（`--stt-url`）。后端不做解码，只负责鉴权、分片体积校验与协议透传；未配置 `--stt-url` 时本节端点一律返回 503，客户端应回退到端侧识别。
+
+音频格式：**16kHz / 单声道 / PCM16LE 裸字节**（无 WAV 头），`Content-Type: application/octet-stream`。
+
+### GET /api/stt（需 Token）
+引擎健康与能力探测，供客户端决定是否启用服务端识别。
+- 200 → `{"enabled":true,"maxChunkBytes":2097152,"engine":{"status":"ok","model":"...","sample_rate":16000,"sample_width":2,"channels":1,"sessions":1,"max_sessions":16}}`
+- 503 → 未配置引擎；502 → 引擎不可达或不健康
+
+### POST /api/stt/sessions（需 Token）
+新建识别会话。
+- 201 → `{"session_id":"3028de8b55454b27","sample_rate":16000,"sample_width":2,"channels":1}`
+- 503 → 引擎已达并发上限
+
+### POST /api/stt/sessions/{id}/chunks（需 Token）
+上传一个音频分片，**响应体即当前累积文本**（每次请求都会重新解码，所以边说边出字）。
+- 200 → `{"session_id":"...","text":"昨天是 MONDAY","final":false,"bytes":6400,"seconds":0.4}`
+- 400 → 空分片 / 样本数非法；413 → 超过 `--stt-max-chunk-bytes`；404 → 会话不存在（或已超时回收）
+
+### POST /api/stt/sessions/{id}/finish（需 Token）
+结束输入，引擎冲刷尾部后返回最终文本。
+- 200 → `{"session_id":"...","text":"昨天是 MONDAY TODAY IS LIBR","final":true}`
+
+### DELETE /api/stt/sessions/{id}（需 Token）
+丢弃会话（如用户取消录音）。→ `{"deleted":true,"session_id":"..."}`；404 → 不存在
+
+> 会话空闲超过 120s 由引擎自行回收；单分片上限 2 MiB。`/api/stt/**` 的调用不写审计表，避免一条 10 秒录音留下几十行噪音。
+
 ## 自动化规则（Web Session）
 
 ### GET /api/rules（需 X-Web-Session）

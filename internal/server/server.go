@@ -31,6 +31,7 @@ type Server struct {
 	hub        *push.Hub
 	automation *automation.Engine
 	llm        *llm.Client
+	stt        *sttEngine
 	httpServer *http.Server
 	hasWebUI   bool
 	webUIFS    webUIFSProvider
@@ -57,6 +58,16 @@ func (s *Server) SetAutomation(eng *automation.Engine) { s.automation = eng }
 // orchestration endpoints report they are unavailable.
 func (s *Server) SetLLM(c *llm.Client) { s.llm = c }
 
+// SetSTT wires the streaming recognition engine proxy. An empty baseURL
+// disables /api/stt so clients can fall back to on-device recognition.
+func (s *Server) SetSTT(baseURL string, timeout time.Duration) {
+	if strings.TrimSpace(baseURL) == "" {
+		s.stt = nil
+		return
+	}
+	s.stt = newSTTEngine(baseURL, timeout)
+}
+
 // Routes registers all handlers on mux and starts background goroutines.
 func (s *Server) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/health", s.handleHealth)
@@ -81,6 +92,9 @@ func (s *Server) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/stats", s.handleStats)
 	mux.HandleFunc("/api/archives", s.handleArchives)
 	mux.HandleFunc("/api/archives/", s.handleArchiveByID)
+	mux.HandleFunc("/api/stt", s.handleSTTStatus)
+	mux.HandleFunc("/api/stt/sessions", s.handleSTTCreate)
+	mux.HandleFunc("/api/stt/sessions/", s.handleSTTSession)
 	mux.HandleFunc("/api/webhook", s.handleRuleWebhook)
 	mux.HandleFunc("/", s.handleIndex)
 }
@@ -127,6 +141,11 @@ func (s *Server) logMiddleware(next http.Handler) http.Handler {
 
 		// Audit: only API calls authenticated by an APP token are recorded.
 		if !strings.HasPrefix(r.URL.Path, "/api/") {
+			return
+		}
+		// Audio chunks would flood the audit table: a 10s recording at 200ms
+		// per chunk is 50 rows, so recording sessions are skipped entirely.
+		if strings.HasPrefix(r.URL.Path, "/api/stt/") {
 			return
 		}
 		if rec, ok := s.tokenFromRequest(r); ok {

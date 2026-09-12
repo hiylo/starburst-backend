@@ -111,6 +111,14 @@ func main() {
 	}
 	srv.SetLLM(llmClient)
 
+	// Optional streaming recognition engine: the backend proxies audio chunks
+	// to it, so devices without a working on-device ASR still get streaming
+	// speech-to-text. When unset the /api/stt endpoints report unavailable.
+	srv.SetSTT(cfg.STTURL, cfg.STTTimeout)
+	if cfg.STTURL != "" {
+		log.Printf("recognition engine enabled: %s", cfg.STTURL)
+	}
+
 	// Async orchestration worker: claims queued tasks and drives the
 	// upstream OpenCode server. Runs for the lifetime of the process.
 	exec := tasks.NewExecutor(st, hub, cfg.OpenCodeURL)

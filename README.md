@@ -61,6 +61,9 @@ go build -o opencode-backend ./cmd/opencode-backend
 | `--llm-model` | `OCB_LLM_MODEL` | — | 编排决策使用的模型名 |
 | `--workers` | `OCB_WORKERS` | `4` | 并发执行的任务数（`1` = 串行） |
 | `--task-retention` | `OCB_TASK_RETENTION` | — | 已完成任务保留时长（Go duration，如 `168h0m`），不设置 = 永久保留 |
+| `--stt-url` | `OCB_STT_URL` | — | 流式语音识别引擎地址（如 `http://192.0.2.150:18090`），空 = 关闭 `/api/stt` |
+| `--stt-timeout` | `OCB_STT_TIMEOUT` | `30s` | 单次引擎往返超时 |
+| `--stt-max-chunk-bytes` | `OCB_STT_MAX_CHUNK_BYTES` | `2097152` | 单个音频分片上限（字节） |
 | `--version` | — | — | 打印版本号退出 |
 | `--health-check` | — | — | 检查数据库/上游连通性后退出 |
 
@@ -69,6 +72,8 @@ go build -o opencode-backend ./cmd/opencode-backend
 > 已完成（succeeded/failed/canceled）的任务默认永久保留。设 `--task-retention 168h0m` 后每小时清一次超期的；仍被依赖引用的前置任务不会被删（否则依赖方会指向不存在的任务），等依赖方自己被清掉后下一轮再删。
 
 > 智能编排大模型也可在运行时不重启配置：Web 配置页调用 `GET/POST /api/llm` 修改地址/密钥/模型（见 [docs/API.md](docs/API.md)），后台配置持久化后**优先于**启动 flag/环境变量。
+
+> 服务端语音识别：`--stt-url` 指向跑着流式识别引擎的主机（本地方案：NAS 上用 sherpa-onnx 的 zipformer 中英双语 int8 流式模型，`systemd` 常驻，模型约 197MB、加载 8s、4 线程推理）。后端只做鉴权与协议透传，不自己解码音频；手机端在端侧 MNN 模型不可用时自动回退到它，端侧可用则继续本地识别。未配置时 `/api/stt` 返回 503，App 不会显示服务端语音入口。接口细节见 [docs/API.md](docs/API.md) 的「语音识别」一节。
 
 ## 测试
 

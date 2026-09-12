@@ -9,6 +9,9 @@ import (
 	"time"
 )
 
+// DefaultSTTTimeout bounds one round trip to the recognition engine.
+const DefaultSTTTimeout = 30 * time.Second
+
 // Config holds all runtime configuration for opencode-backend.
 type Config struct {
 	// ListenAddr is the address the HTTP server binds to, e.g. ":8080".
@@ -41,6 +44,14 @@ type Config struct {
 	LLMKey string
 	// LLMModel is the model name to use for orchestration decisions.
 	LLMModel string
+	// STTURL is the base URL of the streaming recognition engine, e.g.
+	// "http://192.0.2.150:18090". Empty disables /api/stt entirely, so
+	// clients fall back to on-device recognition.
+	STTURL string
+	// STTTimeout bounds a single round trip to the recognition engine.
+	STTTimeout time.Duration
+	// STTMaxChunkBytes caps one audio chunk accepted from a client.
+	STTMaxChunkBytes int
 	// ShowVersion prints the version and exits when true.
 	ShowVersion bool
 	// HealthCheck runs connectivity checks and exits when true.
@@ -69,6 +80,9 @@ func Parse(args []string) (*Config, error) {
 	llmURL := fs.String("llm-url", envOr("OCB_LLM_URL", ""), "OpenAI-compatible base URL for orchestration LLM (empty = disabled)")
 	llmKey := fs.String("llm-key", os.Getenv("OCB_LLM_KEY"), "API key for --llm-url")
 	llmModel := fs.String("llm-model", envOr("OCB_LLM_MODEL", ""), "model name for orchestration decisions")
+	sttURL := fs.String("stt-url", envOr("OCB_STT_URL", ""), "streaming recognition engine base URL (empty = disabled)")
+	sttTimeout := fs.Duration("stt-timeout", envDuration("OCB_STT_TIMEOUT", DefaultSTTTimeout), "timeout for one engine round trip")
+	sttMaxChunk := fs.Int("stt-max-chunk-bytes", envInt("OCB_STT_MAX_CHUNK_BYTES", 2*1024*1024), "max bytes accepted per audio chunk")
 	showVersion := fs.Bool("version", false, "print version and exit")
 	healthCheck := fs.Bool("health-check", false, "run connectivity checks and exit")
 
@@ -98,6 +112,9 @@ func Parse(args []string) (*Config, error) {
 		LLMURL:               strings.TrimRight(*llmURL, "/"),
 		LLMKey:               *llmKey,
 		LLMModel:             *llmModel,
+		STTURL:               strings.TrimRight(*sttURL, "/"),
+		STTTimeout:           sttTimeoutOrDefault(*sttTimeout, DefaultSTTTimeout),
+		STTMaxChunkBytes:     clampInt(*sttMaxChunk, 1024, 8*1024*1024),
 		ShowVersion:          *showVersion,
 		HealthCheck:          *healthCheck,
 	}, nil
@@ -122,6 +139,14 @@ func envInt(key string, fallback int) int {
 		return fallback
 	}
 	return n
+}
+
+// sttTimeoutOrDefault returns d when it is positive, otherwise fallback.
+func sttTimeoutOrDefault(d, fallback time.Duration) time.Duration {
+	if d <= 0 {
+		return fallback
+	}
+	return d
 }
 
 // envDuration reads a Go duration environment variable ("72h", "168h0m"),
