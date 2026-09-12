@@ -179,6 +179,14 @@ func (s *Server) handleSTTSession(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusBadGateway, "stt engine unreachable")
 			return
 		}
+		// On finish the engine returns the final accumulated transcript, which
+		// often still contains trailing syllable repeats (streaming ASR flushes
+		// the last word a second time). Dedup it here so the text that reaches
+		// the input box is already clean instead of relying on the slow LLM
+		// refine round-trip that most users won't wait for.
+		if action == "/finish" && status == http.StatusOK {
+			data = dedupEngineTranscript(data)
+		}
 		writeRaw(w, proxyStatus(status), data)
 		return
 	}
@@ -193,6 +201,39 @@ func (s *Server) handleSTTSession(w http.ResponseWriter, r *http.Request) {
 
 // chunkTooLarge marks an oversized audio chunk so the handler can return 413.
 type chunkTooLarge struct{ limit int }
+
+// dedupEngineTranscript applies local transcript cleanup to the engine's finish
+// response JSON, rewriting only the "text" field while preserving every other
+// field (session_id, final, bytes, ...). It is best-effort: any parse failure
+// leaves the response untouched so the engine payload is never corrupted.
+func dedupEngineTranscript(data []byte) []byte {
+	var resp map[string]json.RawMessage
+	if err := json.Unmarshal(data, &resp); err != nil {
+		return data
+	}
+	raw, ok := resp["text"]
+	if !ok {
+		return data
+	}
+	var original string
+	if err := json.Unmarshal(raw, &original); err != nil {
+		return data
+	}
+	cleaned := dedupTranscript(original)
+	if cleaned == original {
+		return data
+	}
+	fixed, err := json.Marshal(cleaned)
+	if err != nil {
+		return data
+	}
+	resp["text"] = fixed
+	out, err := json.Marshal(resp)
+	if err != nil {
+		return data
+	}
+	return out
+}
 
 func (e chunkTooLarge) Error() string {
 	return fmt.Sprintf("chunk too large, max %d bytes", e.limit)

@@ -369,3 +369,37 @@ func TestSTTNotAudited(t *testing.T) {
 		}
 	}
 }
+
+func TestDedupEngineTranscript(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{`{"session_id":"a","text":"我们一起去吃饭我们一起去吃饭","final":true}`,
+			`{"final":true,"session_id":"a","text":"我们一起去吃饭"}`},
+		{`{"session_id":"a","text":"昨天的话","final":true}`,
+			`{"session_id":"a","text":"昨天的话","final":true}`},
+		{`{"session_id":"a","text":"选择走A选择走A","final":true}`,
+			`{"final":true,"session_id":"a","text":"选择走A"}`},
+	}
+	for _, c := range cases {
+		got := string(dedupEngineTranscript([]byte(c.in)))
+		var gi, wi map[string]interface{}
+		if err := json.Unmarshal([]byte(got), &gi); err != nil {
+			t.Fatalf("%s: out %s decode err %v", c.in, got, err)
+		}
+		if err := json.Unmarshal([]byte(c.want), &wi); err != nil {
+			t.Fatalf("want decode err %v", err)
+		}
+		if gi["text"] != wi["text"] || gi["session_id"] != wi["session_id"] || gi["final"] != wi["final"] {
+			t.Fatalf("%s -> %s want text=%v sid=%v final=%v", c.in, got, wi["text"], wi["session_id"], wi["final"])
+		}
+	}
+
+	// Invalid JSON and unparseable text must pass through untouched.
+	raw := []byte(`{"session_id":"a","text":123,"final":true}`)
+	if string(dedupEngineTranscript(raw)) != string(raw) {
+		t.Fatalf("non-string text must pass through: %s", raw)
+	}
+	raw = []byte(`not json`)
+	if string(dedupEngineTranscript(raw)) != string(raw) {
+		t.Fatalf("bad json must pass through")
+	}
+}
