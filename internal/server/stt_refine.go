@@ -194,18 +194,24 @@ func (s *Server) handleSTTRefine(w http.ResponseWriter, r *http.Request) {
 	// first try; a single retry drops the effective failure rate without
 	// noticeably delaying the release gesture (the app runs this in the
 	// background). Timeout budget is shared across both attempts via ctx.
+	refineStart := time.Now()
+	refineOutcome := "llm ok"
 	var cleaned string
 	if out, err := s.llm.Complete(ctx, refineSystem, original); err == nil {
 		cleaned = stripFences(out)
 	} else {
 		select {
 		case <-ctx.Done():
+			refineOutcome = "llm failed (timeout)"
 			fallbackDedup("llm failed")
+			log.Printf("refine: %s after %.0fs", refineOutcome, time.Since(refineStart).Seconds())
 			return
 		case <-time.After(800 * time.Millisecond):
 		}
 		if out, err := s.llm.Complete(ctx, refineSystem, original); err != nil {
+			refineOutcome = "llm failed"
 			fallbackDedup("llm failed")
+			log.Printf("refine: %s after %.0fs", refineOutcome, time.Since(refineStart).Seconds())
 			return
 		} else {
 			cleaned = stripFences(out)
@@ -213,14 +219,16 @@ func (s *Server) handleSTTRefine(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if !refinePlausible(original, cleaned) {
-		log.Printf("refine: LLM output rejected. original=%q cleaned=%q", original, cleaned)
+		log.Printf("refine: rejected after %.0fs original=%q cleaned=%q", time.Since(refineStart).Seconds(), original, cleaned)
 		fallbackDedup("rejected")
 		return
 	}
 	if cleaned == original {
 		// 模型没发现问题，退而用本地规则去重，别让用户白等这一轮往返。
+		refineOutcome = "llm unchanged"
 		cleaned = dedupTranscript(original)
 	}
+	log.Printf("refine: %s after %.0fs in=%d out=%d", refineOutcome, time.Since(refineStart).Seconds(), len([]rune(original)), len([]rune(cleaned)))
 	changed := cleaned != original
 	writeJSON(w, http.StatusOK, sttRefineResponse{Text: cleaned, Changed: changed})
 }
