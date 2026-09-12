@@ -1,0 +1,17 @@
+[Unit]
+Description=Local streaming speech recognition (sherpa-onnx zipformer bilingual zh-en int8)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=hiylo
+WorkingDirectory=/vol1/1000/stt-server
+ExecStart=/vol1/1000/stt-server/venv/bin/python /vol1/1000/stt-server/stt_server.py --host 0.0.0.0 --port 18090 --model-dir /vol1/1000/stt-server/model --num-threads 4 --max-sessions 16 --idle-timeout 120
+Restart=always
+RestartSec=5
+MemoryMax=3G
+TasksMax=256
+
+[Install]
+WantedBy=multi-user.target
