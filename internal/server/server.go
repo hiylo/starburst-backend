@@ -37,6 +37,7 @@ type Server struct {
 	webUIFS    webUIFSProvider
 	testMux    http.Handler // set only in tests
 	loginLimit *loginLimiter
+	genLimit   *loginLimiter
 }
 
 // New assembles the server with its dependencies.
