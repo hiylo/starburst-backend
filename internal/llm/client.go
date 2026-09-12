@@ -80,6 +80,11 @@ func (c *Client) Enabled() bool {
 // errDisabled is returned when the client is not configured.
 var errDisabled = errors.New("llm: not configured")
 
+// defaultMaxTokens caps the completion output length. Reasoning models burn
+// their whole budget thinking when unconstrained and return empty content;
+// a generous cap keeps them productive while bounding latency and cost.
+const defaultMaxTokens = 8000
+
 // Complete sends a system+user prompt and returns the assistant text.
 func (c *Client) Complete(ctx context.Context, system, user string) (string, error) {
 	if !c.Enabled() {
@@ -126,6 +131,7 @@ func (c *Client) chat(ctx context.Context, messages []ChatMessage, temperature f
 		"model":       model,
 		"messages":    messages,
 		"temperature": temperature,
+		"max_tokens":  defaultMaxTokens,
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {
