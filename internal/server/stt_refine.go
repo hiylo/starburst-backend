@@ -104,16 +104,16 @@ const refineMaxInputBytes = 16 * 1024
 // same intent: let a long dictation get corrected instead of silently failing).
 const refineTimeout = 90 * time.Second
 
-// refineSystem tells the model to repair a streaming-ASR transcript in place
-// and to output nothing but the repaired text.
-const refineSystem = `你是语音识别后处理校对器。下面是一段流式语音识别的原始转写文本，请就地修复其中的识别错误，只输出修复后的文本本身。
+// refineSystem tells the model to repair a streaming-ASR transcript in place,
+// fill in missing punctuation, and output nothing but the repaired text.
+const refineSystem = `你是语音识别后处理校对器。下面是一段流式语音识别的原始转写文本，请就地修复并补全标点，只输出修复后的文本本身。
 
 必须修复：
+- 标点必须补全：按语义在停顿处添加逗号、句号、问号、冒号、顿号等。只要朗读了多个短句或分句，就不允许整段没有任何标点。
 - 重复的字或词（"昨天是是周一"→"昨天是周一"，"MONDAY MONDAY"→"MONDAY"，"的的"→"的"）
 - 同音或近音字识别错（结合上下文判断，如"周未"→"周末"、"以经"→"已经"）
 - 英文单词或字母被识别成中文同音字时，按语义还原为拉丁字母（如"选择走唉"→"选择走A"、"帮我查AMC"→"帮我查A M C"；识别为"公司/爱/哎/埃/艾/啊/哦"等疑似英文发音时优先还原）
 - 中英混排的空格与大小写（英文单词之间补空格，专有名词用惯用写法）
-- 标点缺失或多余（按语义补逗号句号，删除重复或无意义的标点）
 - 语气词和口头禅的多余重复
 
 严格禁止：
