@@ -91,6 +91,7 @@ func (s *Server) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/rules/generate", s.handleRuleGenerate)
 	mux.HandleFunc("/api/llm", s.handleLLMConfig)
 	mux.HandleFunc("/api/llm/generate", s.handleLLMGenerate)
+	mux.HandleFunc("/api/llm/complete", s.handleLLMComplete)
 	mux.HandleFunc("/api/audit", s.handleAudit)
 	mux.HandleFunc("/api/stats", s.handleStats)
 	mux.HandleFunc("/api/archives", s.handleArchives)

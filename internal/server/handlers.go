@@ -128,11 +128,14 @@ func (s *Server) handleWebPassword(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
-// handleTokens lists (GET, web session) and creates (POST, web session) tokens.
+// handleTokens lists (GET) and creates (POST) tokens. Requires a web session
+// (admin) or an APP token.
 func (s *Server) handleTokens(w http.ResponseWriter, r *http.Request) {
 	if !s.requireWeb(r) {
-		writeErr(w, http.StatusUnauthorized, "web session required")
-		return
+		if _, ok := s.requireToken(r); !ok {
+			writeErr(w, http.StatusUnauthorized, "web session or APP token required")
+			return
+		}
 	}
 	switch r.Method {
 	case http.MethodGet:
@@ -165,11 +168,14 @@ func (s *Server) handleTokens(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// handleTokenByID revokes a token (DELETE, web session).
+// handleTokenByID revokes a token (DELETE). Requires a web session (admin) or
+// an APP token.
 func (s *Server) handleTokenByID(w http.ResponseWriter, r *http.Request) {
 	if !s.requireWeb(r) {
-		writeErr(w, http.StatusUnauthorized, "web session required")
-		return
+		if _, ok := s.requireToken(r); !ok {
+			writeErr(w, http.StatusUnauthorized, "web session or APP token required")
+			return
+		}
 	}
 	if r.Method != http.MethodDelete {
 		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")

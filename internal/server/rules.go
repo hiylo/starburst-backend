@@ -20,12 +20,14 @@ func secureCompare(a, b string) bool {
 	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
 }
 
-// handleRules implements rules CRUD. GET/POST require web session (admin),
-// since automation rules configure backend behaviour.
+// handleRules implements rules CRUD. GET/POST require a web session (admin)
+// or an APP token.
 func (s *Server) handleRules(w http.ResponseWriter, r *http.Request) {
 	if !s.requireWeb(r) {
-		writeErr(w, http.StatusUnauthorized, "web session required")
-		return
+		if _, ok := s.requireToken(r); !ok {
+			writeErr(w, http.StatusUnauthorized, "web session or APP token required")
+			return
+		}
 	}
 	switch r.Method {
 	case http.MethodGet:
@@ -91,8 +93,10 @@ func (s *Server) createRule(w http.ResponseWriter, r *http.Request) {
 // (GET /api/rules/{id}/executions).
 func (s *Server) handleRuleByID(w http.ResponseWriter, r *http.Request) {
 	if !s.requireWeb(r) {
-		writeErr(w, http.StatusUnauthorized, "web session required")
-		return
+		if _, ok := s.requireToken(r); !ok {
+			writeErr(w, http.StatusUnauthorized, "web session or APP token required")
+			return
+		}
 	}
 	rest := r.URL.Path[len("/api/rules/"):]
 	if rest == "" {

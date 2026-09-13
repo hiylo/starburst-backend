@@ -39,8 +39,10 @@ const generateRuleSystem = `你是一个自动化规则生成器。根据用户�
 // client must confirm it via POST /api/rules.
 func (s *Server) handleRuleGenerate(w http.ResponseWriter, r *http.Request) {
 	if !s.requireWeb(r) {
-		writeErr(w, http.StatusUnauthorized, "web session required")
-		return
+		if _, ok := s.requireToken(r); !ok {
+			writeErr(w, http.StatusUnauthorized, "web session or APP token required")
+			return
+		}
 	}
 	if r.Method != http.MethodPost {
 		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
