@@ -77,9 +77,9 @@ func TestSTTRefineFixesDuplicates(t *testing.T) {
 	}
 }
 
-// TestSTTRefineReturnsUnchangedWhenModelAgrees covers the "text is already
-// fine" path: the model echoes the input and the response must report that no
-// change was made.
+// TestSTTRefineReturnsUnchangedWhenModelAgrees covers the "model echoes the
+// input" path: the model found nothing to repair, so the local rule layer adds
+// deterministic punctuation and the response reflects that change.
 func TestSTTRefineReturnsUnchangedWhenModelAgrees(t *testing.T) {
 	raw := "昨天是周一"
 	srv, _ := fakeLLM(t, raw)
@@ -92,8 +92,9 @@ func TestSTTRefineReturnsUnchangedWhenModelAgrees(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if out.Text != raw || out.Changed {
-		t.Fatalf("out %+v want text=%q changed=false", out, raw)
+	// 模型没改动 → 本地补标点兜底：无标点文本应获得结尾句号。
+	if out.Text != "昨天是周一。" || !out.Changed {
+		t.Fatalf("out %+v want text=%q changed=true", out, "昨天是周一。")
 	}
 }
 
@@ -126,8 +127,9 @@ func TestSTTRefineRejectsUnrelatedOutput(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if out.Changed || out.Text != "昨天是 MONDAY TODAY IS THE DAY" {
-		t.Fatalf("out %+v must fall back to the original text", out)
+	// 模型乱答被拒 → 回退本地规则：去重+补结尾句号，语义不被改写。
+	if out.Text != "昨天是 MONDAY TODAY IS THE DAY。" || !out.Changed {
+		t.Fatalf("out %+v must fall back to the punctuated original text", out)
 	}
 	if out.Reason == "" {
 		t.Fatal("expected a reason when the output is rejected")
@@ -147,7 +149,8 @@ func TestSTTRefineDegradations(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if rec.Code != http.StatusOK || out.Changed || out.Text != "昨天的话" {
+	// 本地标点兜底仍生效：无标点输入获得结尾句号。
+	if rec.Code != http.StatusOK || !out.Changed || out.Text != "昨天的话。" {
 		t.Fatalf("no-llm: status %d out %+v", rec.Code, out)
 	}
 	if out.Reason != "llm not configured" {
@@ -161,7 +164,7 @@ func TestSTTRefineDegradations(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if rec.Code != http.StatusOK || out.Changed || out.Text != "昨天的话" {
+	if rec.Code != http.StatusOK || !out.Changed || out.Text != "昨天的话。" {
 		t.Fatalf("unreachable-llm: status %d out %+v", rec.Code, out)
 	}
 
@@ -172,7 +175,7 @@ func TestSTTRefineDegradations(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if rec.Code != http.StatusOK || out.Changed || out.Reason != "llm failed" {
+	if rec.Code != http.StatusOK || !out.Changed || out.Reason != "llm failed" {
 		t.Fatalf("llm-500: status %d out %+v", rec.Code, out)
 	}
 }
@@ -294,5 +297,28 @@ func TestDedupTranscriptRealJiangjun(t *testing.T) {
 	}
 	if strings.Contains(got, "哎") {
 		t.Errorf("unexpected 哎: %q", got)
+	}
+}
+
+// TestRefineWithLLMChunking verifies that long transcripts are split into
+// clause-sized chunks before hitting the LLM, and the chunks are re-joined
+// into a non-empty result.
+func TestRefineWithLLMChunking(t *testing.T) {
+	srv, _ := fakeLLM(t, "纠错后的子句")
+	s := newTestServer(t)
+	s.SetLLM(llm.New(srv.URL, "key", "test-model"))
+	long := ""
+	for i := 0; i < 30; i++ {
+		long += "然后回家做饭"
+	}
+	if len([]rune(long)) <= refineChunkRunes {
+		t.Fatalf("test input too short: %d", len([]rune(long)))
+	}
+	out, err := s.refineWithLLM(t.Context(), long)
+	if err != nil {
+		t.Fatalf("refineWithLLM: %v", err)
+	}
+	if out == "" {
+		t.Fatal("empty output")
 	}
 }

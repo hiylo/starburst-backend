@@ -174,8 +174,11 @@ func (s *Server) handleSTTRefine(w http.ResponseWriter, r *http.Request) {
 	// is unavailable, fails or is not trusted. The engine is prone to trailing
 	// repeats (the last word being decoded again on flush), so even without a
 	// model we must still strip duplicates — otherwise the user sees raw text.
+	// Local punctuation is a deterministic fallback so the result is not a wall
+	// of unsegmented text when the model can't be reached. Homophone slips are
+	// fixed from a small dictionary first so the fallback is not just dedup.
 	fallbackDedup := func(reason string) {
-		cleaned := dedupTranscript(original)
+		cleaned := localPunctuate(dedupTranscript(fixCommonMisrecognitions(original)))
 		writeJSON(w, http.StatusOK, sttRefineResponse{
 			Text:    cleaned,
 			Changed: cleaned != original,
@@ -194,28 +197,21 @@ func (s *Server) handleSTTRefine(w http.ResponseWriter, r *http.Request) {
 	// first try; a single retry drops the effective failure rate without
 	// noticeably delaying the release gesture (the app runs this in the
 	// background). Timeout budget is shared across both attempts via ctx.
+	// Fix known homophone slips locally before sending to the model so the LLM
+	// spends its budget on harder cases; the fallback path uses the same input.
+	// Very long dictations are split into clause-sized chunks so each LLM call
+	// stays short enough to avoid deep-reasoning timeouts.
+	refineInput := fixCommonMisrecognitions(original)
 	refineStart := time.Now()
 	refineOutcome := "llm ok"
 	var cleaned string
-	if out, err := s.llm.Complete(ctx, refineSystem, original); err == nil {
-		cleaned = stripFences(out)
+	if out, err := s.refineWithLLM(ctx, refineInput); err == nil {
+		cleaned = out
 	} else {
-		select {
-		case <-ctx.Done():
-			refineOutcome = "llm failed (timeout)"
-			fallbackDedup("llm failed")
-			log.Printf("refine: %s after %.0fs", refineOutcome, time.Since(refineStart).Seconds())
-			return
-		case <-time.After(800 * time.Millisecond):
-		}
-		if out, err := s.llm.Complete(ctx, refineSystem, original); err != nil {
-			refineOutcome = "llm failed"
-			fallbackDedup("llm failed")
-			log.Printf("refine: %s after %.0fs", refineOutcome, time.Since(refineStart).Seconds())
-			return
-		} else {
-			cleaned = stripFences(out)
-		}
+		refineOutcome = "llm failed"
+		fallbackDedup("llm failed")
+		log.Printf("refine: %s after %.0fs", refineOutcome, time.Since(refineStart).Seconds())
+		return
 	}
 
 	if !refinePlausible(original, cleaned) {
@@ -223,14 +219,99 @@ func (s *Server) handleSTTRefine(w http.ResponseWriter, r *http.Request) {
 		fallbackDedup("rejected")
 		return
 	}
-	if cleaned == original {
-		// 模型没发现问题，退而用本地规则去重，别让用户白等这一轮往返。
+	if cleaned == refineInput {
+		// 模型没发现问题，退而用本地规则去重补标点，别让用户白等这一轮往返。
 		refineOutcome = "llm unchanged"
-		cleaned = dedupTranscript(original)
+		cleaned = localPunctuate(dedupTranscript(refineInput))
 	}
-	log.Printf("refine: %s after %.0fs in=%d out=%d", refineOutcome, time.Since(refineStart).Seconds(), len([]rune(original)), len([]rune(cleaned)))
+	log.Printf("refine: %s after %.0fs in=%d out=%d", refineOutcome, time.Since(refineStart).Seconds(), len([]rune(refineInput)), len([]rune(cleaned)))
 	changed := cleaned != original
 	writeJSON(w, http.StatusOK, sttRefineResponse{Text: cleaned, Changed: changed})
+}
+
+// refineChunkRunes is the transcript length above which refineWithLLM splits
+// the text into clause-sized chunks for separate LLM calls, keeping each call
+// short enough that the deep-reasoning model answers within the timeout.
+const refineChunkRunes = 120
+
+// refineWithLLM sends a transcript to the LLM once (retrying once on failure)
+// and returns the cleaned text. Long inputs are split on clause connectives so
+// each call stays within the timeout budget; the chunks are then re-joined
+// with deterministic local punctuation.
+func (s *Server) refineWithLLM(ctx context.Context, text string) (string, error) {
+	if len([]rune(text)) <= refineChunkRunes {
+		out, err := s.completeWithRetry(ctx, text)
+		if err != nil {
+			return "", err
+		}
+		return stripFences(out), nil
+	}
+	// 超长：按连接词切成子句，逐块纠错后拼接。
+	chunks := splitClauses(text)
+	var builder strings.Builder
+	for i, ch := range chunks {
+		if i > 0 {
+			builder.WriteString(" ")
+		}
+		out, err := s.completeWithRetry(ctx, ch)
+		if err != nil {
+			return "", err
+		}
+		builder.WriteString(localPunctuate(stripFences(out)))
+	}
+	return builder.String(), nil
+}
+
+// completeWithRetry performs one LLM completion call and, on failure, waits a
+// short backoff and retries once. The shared ctx bounds the total budget.
+func (s *Server) completeWithRetry(ctx context.Context, text string) (string, error) {
+	out, err := s.llm.Complete(ctx, refineSystem, text)
+	if err == nil {
+		return out, nil
+	}
+	select {
+	case <-ctx.Done():
+		return "", err
+	case <-time.After(800 * time.Millisecond):
+	}
+	return s.llm.Complete(ctx, refineSystem, text)
+}
+
+// splitClauses cuts a long transcript into clause-sized pieces at connectives
+// and punctuation, never splitting inside a number. The pieces are non-empty.
+func splitClauses(s string) []string {
+	runes := []rune(s)
+	var parts []string
+	start := 0
+	for i := 1; i < len(runes); i++ {
+		if !isDigitRune(runes[i-1]) && isClauseBoundary(runes[i:]) {
+			parts = append(parts, string(runes[start:i]))
+			start = i
+		}
+	}
+	parts = append(parts, string(runes[start:]))
+	var out []string
+	for _, p := range parts {
+		if strings.TrimSpace(p) != "" {
+			out = append(out, strings.TrimSpace(p))
+		}
+	}
+	return out
+}
+
+// isClauseBoundary reports whether the runes starting at s begin a new clause
+// (a punctuation mark, or one of the clause connectives used by localPunctuate).
+func isClauseBoundary(rest []rune) bool {
+	if isPunctRune(rest[0]) {
+		return true
+	}
+	for _, c := range punctUnit {
+		cr := []rune(c)
+		if len(rest) >= len(cr) && equalRunes(rest[:len(cr)], cr) {
+			return true
+		}
+	}
+	return false
 }
 
 // repeatedCN is a Chinese character the engine routinely duplicates: particles,
@@ -353,6 +434,106 @@ func dedupAdjacentRepeat(s string) string {
 // ASR engines tend to emit on finish.
 func dedupTranscript(s string) string {
 	return trimTailRepeat(dedupAdjacentRepeat(dedupRuns(dedupPunct(dedupWords(s)))))
+}
+
+// punctUnit lists clause-leading connectives; a comma is inserted before each
+// one unless the text already has punctuation right before it.
+var punctUnit = []string{
+	"然后", "但是", "但是呢", "所以", "因为", "如果", "而且", "还有", "接着", "最后",
+	"那么", "这样", "再说", "并且", "以及", "或者", "还是", "甚至", "其实", "不过",
+	"于是", "总之", "首先", "其次", "另外", "再说呢", "随后", "结果", "反正",
+}
+
+// punctQuestion marks a trailing interrogative phrase or particle; the
+// sentence gets a question mark appended when the transcript tail matches one.
+// Longer phrases come first so "怎么办" wins over "怎么".
+var punctQuestion = []string{
+	"怎么办", "为什么", "怎么做", "怎么", "什么", "多少", "几点", "哪里",
+	"哪个", "谁", "去哪儿", "去不去", "是不是", "行不行", "可不可以",
+	"吗", "呢", "么", "吧",
+}
+
+// localPunctuate adds deterministic punctuation to a transcript with none,
+// splitting on clause connectives and ending the text with a full stop (or a
+// question mark for obvious questions). It is deliberately conservative: it
+// never removes existing punctuation and never splits mid-number, so a clean
+// transcript passes through unchanged. Best-effort — the LLM refine path is
+// still the primary quality layer; this only keeps the fallback readable.
+func localPunctuate(s string) string {
+	trimmed := strings.TrimSpace(s)
+	if trimmed == "" {
+		return trimmed
+	}
+	// 已带任何中文标点则不动（说明模型/引擎已给过标点）。
+	if strings.ContainsAny(trimmed, "，。？！、；：") {
+		return trimmed
+	}
+	r := []rune(trimmed)
+	out := make([]rune, 0, len(r)+8)
+	for i := 0; i < len(r); {
+		// 在连接词前断句（且它不在句首、前面不是数字）。
+		if i > 0 && !isPunctRune(r[i-1]) && !isDigitRune(r[i-1]) {
+			matched := false
+			for _, c := range punctUnit {
+				cr := []rune(c)
+				if i+len(cr) <= len(r) && equalRunes(r[i:i+len(cr)], cr) {
+					matched = true
+					break
+				}
+			}
+			if matched {
+				out = append(out, '，')
+			}
+		}
+		out = append(out, r[i])
+		i++
+	}
+	if isPunctRune(out[len(out)-1]) {
+		return strings.TrimSpace(string(out))
+	}
+	// 问句短语/语气词结尾 → 追加问号（保留原字）。
+	for _, q := range punctQuestion {
+		qr := []rune(q)
+		if len(out) >= len(qr) && equalRunes(out[len(out)-len(qr):], qr) {
+			out = append(out, '？')
+			return strings.TrimSpace(string(out))
+		}
+	}
+	out = append(out, '。')
+	return strings.TrimSpace(string(out))
+}
+
+// isDigitRune reports whether r is an ASCII digit.
+func isDigitRune(r rune) bool {
+	return r >= '0' && r <= '9'
+}
+
+// commonMisrecognitions maps frequent streaming-ASR homophone slips to their
+// intended words. Streaming decoders pick the acoustically-closest character
+// without semantic context, so everyday phrases routinely come out wrong
+// (以经→已经、进都→进度、周未→周末). Correcting them deterministically here
+// reduces dependence on the LLM and gives a consistent baseline the model can
+// build on. Ordered pairs are applied in order; only exact substring matches
+// are replaced.
+var commonMisrecognitions = [][2]string{
+	{"以经", "已经"},
+	{"周未", "周末"},
+	{"进都表", "进度表"},
+	{"进都", "进度"},
+	{"我门", "我们"},
+	{"你门", "你们"},
+	{"在再", "再"},
+	{"的那", "的"}, // 少见，保守保留
+	{"那那那你", "那你"},
+}
+
+// fixCommonMisrecognitions applies the deterministic homophone dictionary to a
+// transcript. Best-effort and conservative: only known slips are touched.
+func fixCommonMisrecognitions(s string) string {
+	for _, pair := range commonMisrecognitions {
+		s = strings.ReplaceAll(s, pair[0], pair[1])
+	}
+	return s
 }
 
 // trimTailRepeat removes a phrase duplicated verbatim at the end of the text,
