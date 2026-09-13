@@ -4,7 +4,7 @@
 # 用法:
 #   curl -fsSL https://<host>/install.sh | bash
 # 或本地:
-#   bash scripts/install.sh [--port 8080] [--db sqlite|postgres] [--pg-dsn "..."] [--admin-password "..."]
+#   bash scripts/install.sh [--port 18880] [--db sqlite|postgres] [--pg-dsn "..."] [--admin-password "..."]
 #
 # 安装内容:
 #   1. 下载 opencode-backend 单二进制到 /usr/local/bin
@@ -29,7 +29,7 @@
 set -euo pipefail
 
 # ---------- 参数解析 ----------
-PORT="${OCB_PORT:-8080}"
+PORT="${OCB_PORT:-18880}"
 DB="${OCB_DB:-sqlite}"
 PG_DSN="${OCB_PG_DSN:-}"
 ADMIN_PASSWORD="${OCB_ADMIN_PASSWORD:-}"
@@ -45,7 +45,7 @@ while [[ $# -gt 0 ]]; do
   opt="$1"
   case "$opt" in
     -h|--help)
-      echo "用法: $0 [--port 8080] [--db sqlite|postgres] [--pg-dsn dsn] [--admin-password pw] [--default-token tok] \\"
+      echo "用法: $0 [--port 18880] [--db sqlite|postgres] [--pg-dsn dsn] [--admin-password pw] [--default-token tok] \\"
       echo "       [--workers 4] [--task-retention 168h0m] [--prefix /] \\"
       echo "       [--stt-url http://192.0.2.150:18090] [--stt-timeout 30s] [--stt-max-chunk-bytes 2097152]"
       exit 0 ;;
