@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-// handleAudit lists recent audit entries. Requires a web session (admin).
+// handleAudit lists recent audit entries. Requires a web session (admin) or an APP token.
 // Optional query: ?tokenId=&limit=
 func (s *Server) handleAudit(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
@@ -15,8 +15,10 @@ func (s *Server) handleAudit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !s.requireWeb(r) {
-		writeErr(w, http.StatusUnauthorized, "web session required")
-		return
+		if _, ok := s.requireToken(r); !ok {
+			writeErr(w, http.StatusUnauthorized, "web session or APP token required")
+			return
+		}
 	}
 
 	q := r.URL.Query()

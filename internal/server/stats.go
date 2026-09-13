@@ -6,15 +6,18 @@ import (
 	"time"
 )
 
-// handleStats reports usage statistics. Requires a web session (admin).
+// handleStats reports usage statistics. Requires a web session (admin) or an APP token.
+// Read-only usage data is safe to expose to the App without the admin web login.
 func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
 	if !s.requireWeb(r) {
-		writeErr(w, http.StatusUnauthorized, "web session required")
-		return
+		if _, ok := s.requireToken(r); !ok {
+			writeErr(w, http.StatusUnauthorized, "web session or APP token required")
+			return
+		}
 	}
 
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
