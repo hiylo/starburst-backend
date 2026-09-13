@@ -400,12 +400,24 @@ func dedupRuns(s string) string {
 // of the text (not just at the tail), and trimTailRepeat alone cannot reach
 // that. A single optional space between the copies is ignored. Runs of a single
 // character are owned by dedupRuns, so the minimum block length is two.
+//
+// The worst case is O(n³) on highly duplicated text, so we cap the scan at
+// dedupScanRunes. Longer dictations (rare) pass through mostly unchanged
+// instead of blocking the backend for tens of seconds.
+const dedupScanRunes = 2000
+
 func dedupAdjacentRepeat(s string) string {
 	trimmed := strings.TrimSpace(s)
 	r := []rune(trimmed)
 	n := len(r)
 	if n < 2*2 {
 		return trimmed
+	}
+	if n > dedupScanRunes {
+		// 超长保护：只去重开头 dedupScanRunes 字，剩余部分原样保留（避免 O(n³) 卡死）。
+		trimmed = string(r[:dedupScanRunes])
+		r = []rune(trimmed)
+		n = len(r)
 	}
 	for {
 		bestL, bestI := 0, 0
