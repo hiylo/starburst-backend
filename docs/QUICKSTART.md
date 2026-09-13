@@ -6,10 +6,10 @@
 
 ```bash
 go build -o opencode-backend ./cmd/opencode-backend
-./opencode-backend --listen :8080 --default-admin-password admin
+./opencode-backend --listen :18880 --default-admin-password admin
 ```
 
-确认运行：`curl http://localhost:8080/api/health`
+确认运行：`curl http://localhost:18880/api/health`
 ```json
 {"status":"ok","upstream":true,"upstreamError":"","time":"..."}
 ```
@@ -17,7 +17,7 @@ go build -o opencode-backend ./cmd/opencode-backend
 
 ## 2. 打开配置页
 
-浏览器访问 `http://<主机IP>:8080/`，用默认密码 `admin` 登录。
+浏览器访问 `http://<主机IP>:18880/`，用默认密码 `admin` 登录。
 
 配置页支持：
 - **修改管理密码**
@@ -33,20 +33,20 @@ go build -o opencode-backend ./cmd/opencode-backend
 TOKEN=ocb_xxxxxx
 
 # 查看本机会话
-curl http://localhost:8080/api/projects -H "Authorization: Bearer $TOKEN"
+curl http://localhost:18880/api/projects -H "Authorization: Bearer $TOKEN"
 
 # 提交一个后台任务（熄屏也会跑）
-curl -X POST http://localhost:8080/api/tasks \
+curl -X POST http://localhost:18880/api/tasks \
   -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
   -d '{"prompt":"检查当前 git 仓库状态并总结","directory":"/workspaces/opencode"}'
 
 # 查看任务
-curl "http://localhost:8080/api/tasks?status=running" -H "Authorization: Bearer $TOKEN"
+curl "http://localhost:18880/api/tasks?status=running" -H "Authorization: Bearer $TOKEN"
 ```
 
 ## 4. 接收推送
 
-任何 WebSocket 客户端订阅 `ws://<主机>:8080/api/ws?token=<TOKEN>` 即可实时收到：
+任何 WebSocket 客户端订阅 `ws://<主机>:18880/api/ws?token=<TOKEN>` 即可实时收到：
 
 ```json
 {"type":"subscribed"}
@@ -62,7 +62,7 @@ pip install websockets
 python3 -c "
 import asyncio, websockets, sys
 async def m():
-    async with websockets.connect('ws://localhost:8080/api/ws?token=$TOKEN') as ws:
+    async with websockets.connect('ws://localhost:18880/api/ws?token=$TOKEN') as ws:
         async for msg in ws:
             print(msg)
 asyncio.run(m())
@@ -75,7 +75,7 @@ asyncio.run(m())
 
 ```bash
 # 每晚 23:00 跑一次构建检查（cron 秒级：分 时 日 月 周）
-curl -X POST http://localhost:8080/api/rules \
+curl -X POST http://localhost:18880/api/rules \
   -H "X-Web-Session: <sid>" -H "Content-Type: application/json" \
   -d '{"name":"每晚构建","kind":"cron","schedule":"0 23 * * * *","directory":"/workspaces/opencode","prompt":"跑构建并汇报结果","enabled":true}'
 ```
@@ -83,7 +83,7 @@ curl -X POST http://localhost:8080/api/rules \
 ## 6. 批量执行
 
 ```bash
-curl -X POST http://localhost:8080/api/batch \
+curl -X POST http://localhost:18880/api/batch \
   -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
   -d '{"prompt":"为所有 handler 添加日志","targets":[{"directory":"/repo-a"},{"directory":"/repo-b"}]}'
 # → {"created":["task_..."],"count":2}

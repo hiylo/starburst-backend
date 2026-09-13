@@ -1,6 +1,6 @@
 # OpenCode Backend API 契约
 
-> 供客户端（Android / Web）与后端并行开发的接口规范。Base URL 形如 `http://<host>:8080`。
+> 供客户端（Android / Web）与后端并行开发的接口规范。Base URL 形如 `http://<host>:18880`。
 
 ## 鉴权模型
 

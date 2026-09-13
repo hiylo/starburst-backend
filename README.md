@@ -39,17 +39,17 @@ go build -o opencode-backend ./cmd/opencode-backend
 
 ```bash
 # SQLite（默认）
-./opencode-backend --listen :8080 --default-admin-password admin
+./opencode-backend --listen :18880 --default-admin-password admin
 
 # PostgreSQL
-./opencode-backend --listen :8080 --db postgres --pg-dsn "postgres://user:pass@host/db"
+./opencode-backend --listen :18880 --db postgres --pg-dsn "postgres://user:pass@host/db"
 ```
 
 配置项支持命令行 flag 与环境变量（环境变量优先）：
 
 | flag | 环境变量 | 默认 | 说明 |
 |------|---------|------|------|
-| `--listen` | `OCB_LISTEN` | `:8080` | HTTP 监听地址 |
+| `--listen` | `OCB_LISTEN` | `:18880` | HTTP 监听地址 |
 | `--opencode-url` | `OCB_OPENCODE_URL` | `http://127.0.0.1:4096` | 本机 OpenCode 地址 |
 | `--db` | `OCB_DB` | `sqlite` | `sqlite` 或 `postgres` |
 | `--sqlite-path` | `OCB_SQLITE_PATH` | `opencode-backend.db` | SQLite 数据库文件 |
