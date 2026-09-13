@@ -49,6 +49,7 @@ func New(cfg *config.Config, st store.Store, am *auth.Manager, oc *opencode.Clie
 		openCode:   oc,
 		hub:        hub,
 		loginLimit: newLoginLimiter(5, 5*time.Minute),
+		genLimit:   newLoginLimiter(20, time.Minute),
 	}
 }
 
@@ -89,6 +90,7 @@ func (s *Server) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/rules/", s.handleRuleByID)
 	mux.HandleFunc("/api/rules/generate", s.handleRuleGenerate)
 	mux.HandleFunc("/api/llm", s.handleLLMConfig)
+	mux.HandleFunc("/api/llm/generate", s.handleLLMGenerate)
 	mux.HandleFunc("/api/audit", s.handleAudit)
 	mux.HandleFunc("/api/stats", s.handleStats)
 	mux.HandleFunc("/api/archives", s.handleArchives)
