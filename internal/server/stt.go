@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -180,17 +179,13 @@ func (s *Server) handleSTTSession(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusBadGateway, "stt engine unreachable")
 			return
 		}
-		// On finish the engine returns the final accumulated transcript, which
-		// often still contains trailing syllable repeats (streaming ASR flushes
-		// the last word a second time). Dedup it here so the text that reaches
-		// the input box is already clean instead of relying on the slow LLM
-		// refine round-trip that most users won't wait for.
-		if action == "/finish" && status == http.StatusOK {
-			before := string(data)
+		// Every transcript the engine returns — streaming partials and the final
+		// finish payload alike — still carries the stutter/duplicate characters
+		// the streaming decoder produces. Dedup it in place so the text shown in
+		// the input box is clean even while the user is still holding the mic,
+		// not only after the release gesture triggers finish.
+		if (action == "/chunks" || action == "/finish") && status == http.StatusOK {
 			data = dedupEngineTranscript(data)
-			if string(data) != before {
-				log.Printf("stt finish dedup: %q -> %q", clip(before, 300), clip(string(data), 300))
-			}
 		}
 		writeRaw(w, proxyStatus(status), data)
 		return
@@ -206,14 +201,6 @@ func (s *Server) handleSTTSession(w http.ResponseWriter, r *http.Request) {
 
 // chunkTooLarge marks an oversized audio chunk so the handler can return 413.
 type chunkTooLarge struct{ limit int }
-
-// clip shortens a string for logging, appending an ellipsis when truncated.
-func clip(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	return s[:n] + "..."
-}
 
 // dedupEngineTranscript applies local transcript cleanup to the engine's finish
 // response JSON, rewriting only the "text" field while preserving every other
