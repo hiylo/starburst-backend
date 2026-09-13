@@ -230,14 +230,17 @@ func (s *Server) handleSTTRefine(w http.ResponseWriter, r *http.Request) {
 }
 
 // refineChunkRunes is the transcript length above which refineWithLLM splits
-// the text into clause-sized chunks for separate LLM calls, keeping each call
-// short enough that the deep-reasoning model answers within the timeout.
-const refineChunkRunes = 120
+// the text into clause-sized chunks for separate LLM calls. Measured on the
+// deep-reasoning model: up to ~170 runes answers in a couple of seconds, while
+// 255 runes starts spending ~30s thinking and becoming unreliable. 200 keeps
+// single-call latency predictable while covering normal dictation lengths.
+const refineChunkRunes = 200
 
 // refineWithLLM sends a transcript to the LLM once (retrying once on failure)
 // and returns the cleaned text. Long inputs are split on clause connectives so
-// each call stays within the timeout budget; the chunks are then re-joined
-// with deterministic local punctuation.
+// each call stays within the timeout budget; a chunk that the model can't
+// answer is replaced by the local rule layer instead of failing the whole
+// request, and the pieces are re-joined with deterministic punctuation.
 func (s *Server) refineWithLLM(ctx context.Context, text string) (string, error) {
 	if len([]rune(text)) <= refineChunkRunes {
 		out, err := s.completeWithRetry(ctx, text)
@@ -246,7 +249,7 @@ func (s *Server) refineWithLLM(ctx context.Context, text string) (string, error)
 		}
 		return stripFences(out), nil
 	}
-	// 超长：按连接词切成子句，逐块纠错后拼接。
+	// 超长：按连接词切成子句，逐块纠错后拼接；失败块本地兜底。
 	chunks := splitClauses(text)
 	var builder strings.Builder
 	for i, ch := range chunks {
@@ -255,9 +258,10 @@ func (s *Server) refineWithLLM(ctx context.Context, text string) (string, error)
 		}
 		out, err := s.completeWithRetry(ctx, ch)
 		if err != nil {
-			return "", err
+			// 该块 LLM 不可用，本地兜底（去重+错字+标点），不拖垮整体。
+			out = localPunctuate(dedupTranscript(fixCommonMisrecognitions(ch)))
 		}
-		builder.WriteString(localPunctuate(stripFences(out)))
+		builder.WriteString(stripFences(out))
 	}
 	return builder.String(), nil
 }
@@ -278,15 +282,22 @@ func (s *Server) completeWithRetry(ctx context.Context, text string) (string, er
 }
 
 // splitClauses cuts a long transcript into clause-sized pieces at connectives
-// and punctuation, never splitting inside a number. The pieces are non-empty.
+// and punctuation, never splitting inside a number. Pieces smaller than
+// minClauseRunes are greedily merged into the previous one so short clauses
+// (repeated connectives, terse dictation) don't spawn a flood of tiny LLM
+// calls. The pieces are non-empty.
+const minClauseRunes = 40
+
 func splitClauses(s string) []string {
 	runes := []rune(s)
 	var parts []string
 	start := 0
 	for i := 1; i < len(runes); i++ {
 		if !isDigitRune(runes[i-1]) && isClauseBoundary(runes[i:]) {
-			parts = append(parts, string(runes[start:i]))
-			start = i
+			if i-start >= minClauseRunes {
+				parts = append(parts, string(runes[start:i]))
+				start = i
+			}
 		}
 	}
 	parts = append(parts, string(runes[start:]))

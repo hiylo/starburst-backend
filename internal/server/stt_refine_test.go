@@ -308,7 +308,7 @@ func TestRefineWithLLMChunking(t *testing.T) {
 	s := newTestServer(t)
 	s.SetLLM(llm.New(srv.URL, "key", "test-model"))
 	long := ""
-	for i := 0; i < 30; i++ {
+	for i := 0; i < 40; i++ {
 		long += "然后回家做饭"
 	}
 	if len([]rune(long)) <= refineChunkRunes {
@@ -320,5 +320,30 @@ func TestRefineWithLLMChunking(t *testing.T) {
 	}
 	if out == "" {
 		t.Fatal("empty output")
+	}
+}
+
+// TestRefineWithLLMChunkFallback verifies that a chunk the LLM can't answer
+// falls back to local rules instead of failing the whole long request.
+func TestRefineWithLLMChunkFallback(t *testing.T) {
+	s := newTestServer(t)
+	s.SetLLM(llm.New("http://127.0.0.1:1", "key", "test-model"))
+	// 两段连接词拼接：长度过阈值且能分成至少两块，chunk 失败走本地兜底。
+	long := ""
+	for i := 0; i < 34; i++ {
+		long += "然后回家做饭"
+	}
+	if len([]rune(long)) <= refineChunkRunes {
+		t.Fatalf("test input too short: %d", len([]rune(long)))
+	}
+	out, err := s.refineWithLLM(t.Context(), long)
+	if err != nil {
+		t.Fatalf("refineWithLLM with unreachable LLM: %v", err)
+	}
+	if out == "" {
+		t.Fatal("empty output on chunk fallback")
+	}
+	if len([]rune(out)) < 10 {
+		t.Fatalf("fallback output too short: %q", out)
 	}
 }

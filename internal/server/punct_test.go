@@ -23,16 +23,28 @@ func TestLocalPunctuate(t *testing.T) {
 }
 
 func TestSplitClauses(t *testing.T) {
-	s := "我今天去超市买东西然后回家做饭最后洗碗然后再去看电影"
-	parts := splitClauses(s)
+	// 短文本低于 minClauseRunes 不切分。
+	short := "我今天去超市买东西然后回家做饭"
+	if parts := splitClauses(short); len(parts) != 1 {
+		t.Fatalf("short splitClauses = %v, want 1 part", parts)
+	}
+	// 长文本按连接词切成多块，且所有块拼回等于原文。
+	long := ""
+	for i := 0; i < 12; i++ {
+		long += "我今天去超市买东西然后回家做饭最后洗碗"
+	}
+	parts := splitClauses(long)
 	if len(parts) < 3 {
-		t.Fatalf("splitClauses parts = %v, want >=3", parts)
+		t.Fatalf("long splitClauses parts = %d, want >=3", len(parts))
 	}
 	joined := ""
 	for _, p := range parts {
+		if len([]rune(p)) < minClauseRunes {
+			t.Fatalf("found undersized part len=%d: %q", len([]rune(p)), p)
+		}
 		joined += p
 	}
-	if joined != s {
-		t.Fatalf("joined %q != input %q", joined, s)
+	if joined != long {
+		t.Fatalf("joined %q != input %q", joined, long)
 	}
 }
