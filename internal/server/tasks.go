@@ -16,8 +16,8 @@ import (
 	"github.com/hiylo/opencode-backend/internal/store"
 )
 
-// handleTasks lists (GET) and creates (POST) orchestration tasks.
-// Both require a valid APP token.
+// handleTasks lists (GET), creates (POST) and purges finished (DELETE)
+// orchestration tasks. All require a valid APP token.
 func (s *Server) handleTasks(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.requireToken(r); !ok {
 		writeErr(w, http.StatusUnauthorized, "invalid token")
@@ -28,9 +28,31 @@ func (s *Server) handleTasks(w http.ResponseWriter, r *http.Request) {
 		s.listTasks(w, r)
 	case http.MethodPost:
 		s.createTask(w, r)
+	case http.MethodDelete:
+		s.purgeFinishedTasks(w, r)
 	default:
 		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
 	}
+}
+
+// purgeFinishedTasks deletes terminal tasks (succeeded/failed/canceled) older
+// than ?olderThan= seconds (default 0 = all finished). A finished task still
+// referenced by a dependent is kept. Returns {"deleted", "kept"}.
+func (s *Server) purgeFinishedTasks(w http.ResponseWriter, r *http.Request) {
+	olderThan := 0 * time.Second
+	if v := r.URL.Query().Get("olderThan"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			olderThan = time.Duration(n) * time.Second
+		}
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+	deleted, kept, err := s.store.PurgeFinishedTasks(ctx, olderThan, 0)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "purge finished tasks failed")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"deleted": deleted, "kept": kept})
 }
 
 // handleTasksStatus lists tasks filtered by ?status=.

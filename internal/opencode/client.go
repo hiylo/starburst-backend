@@ -216,7 +216,7 @@ func (c *Client) FetchSessionMessages(ctx context.Context, sessionID string) ([]
 	if err != nil {
 		return nil, fmt.Errorf("fetch messages: %w", err)
 	}
-	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 16<<20))
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 256<<20))
 	resp.Body.Close()
 	if resp.StatusCode >= 300 {
 		return nil, fmt.Errorf("fetch messages: %s", resp.Status)

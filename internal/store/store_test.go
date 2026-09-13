@@ -592,9 +592,9 @@ func assertRetentionPurge(t *testing.T, st Store) {
 		t.Fatalf("drain pass: deleted=%d err=%v, want 1", deleted, err)
 	}
 
-	// Reference protection is dynamic. The protection is evaluated against the
-	// pre-delete snapshot, so the pass that removes the dependent only clears
-	// the dependent and the next pass picks up the formerly protected upstream.
+	// Reference protection is dynamic. Once the dependent is itself terminal
+	// (canceled here), it no longer protects its upstream, so a single pass
+	// clears both the dependent and the formerly-referenced terminal upstream.
 	if ok, err := st.CancelTask(ctx, "dep"); err != nil || !ok {
 		t.Fatalf("cancel dependent: ok=%v err=%v", ok, err)
 	}
@@ -603,21 +603,14 @@ func assertRetentionPurge(t *testing.T, st Store) {
 	if err != nil {
 		t.Fatalf("final purge: %v", err)
 	}
-	if deleted != 1 || kept != 0 {
-		t.Fatalf("final pass: deleted=%d kept=%d, want 1/0", deleted, kept)
+	if deleted != 2 || kept != 0 {
+		t.Fatalf("final pass: deleted=%d kept=%d, want 2/0", deleted, kept)
 	}
 	if taskExists(t, st, "dep") {
 		t.Fatalf("dep survived its own purge")
 	}
-	if !taskExists(t, st, "fail-old") {
-		t.Fatalf("fail-old purged while the dependent still existed")
-	}
-	deleted, kept, err = st.PurgeFinishedTasks(ctx, time.Hour, 100)
-	if err != nil || deleted != 1 || kept != 0 {
-		t.Fatalf("drain upstream: deleted=%d kept=%d err=%v, want 1/0", deleted, kept, err)
-	}
 	if taskExists(t, st, "fail-old") {
-		t.Fatalf("fail-old survived after its dependent was gone")
+		t.Fatalf("fail-old survived once its terminal dependent was purged")
 	}
 	if !taskExists(t, st, "done-new") {
 		t.Fatalf("fresh terminal task was purged")

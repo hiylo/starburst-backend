@@ -427,10 +427,12 @@ func scanTasks(rows *sql.Rows) ([]*Task, error) {
 }
 
 // PurgeFinishedTasks deletes succeeded/failed/canceled tasks whose updated_at is
-// older than olderThan, bounded by limit rows per pass. A finished task that a
-// dependent still references is kept so no dependent points at a missing
-// upstream; those are reported in the second return value so the caller can
-// log that retention cannot catch up. Non-terminal tasks are never touched.
+// older than olderThan, bounded by limit rows per pass. A finished task that is
+// still referenced by an ACTIVE (non-terminal) dependent is kept so no live
+// dependent points at a missing upstream; a task referenced only by other
+// terminal tasks is deleted alongside them. Non-terminal tasks are never
+// touched. The second return value reports how many terminal tasks were kept
+// because an active dependent still references them.
 func (s *sqlStore) PurgeFinishedTasks(ctx context.Context, olderThan time.Duration, limit int) (int, int, error) {
 	if limit <= 0 {
 		limit = 500
@@ -444,7 +446,13 @@ func (s *sqlStore) PurgeFinishedTasks(ctx context.Context, olderThan time.Durati
 	} else {
 		cutoff = "updated_at < datetime('now', '-' || ? || ' seconds')"
 	}
+	// activeStatuses lists statuses that still need their upstream to exist.
+	activeStatuses := []any{TaskQueued, TaskRunning, TaskPending, TaskBlocked, TaskScheduled}
 	statuses := []any{TaskSucceeded, TaskFailed, TaskCanceled}
+	activeSet := "?, ?, ?, ?, ?"
+	args := make([]any, 0, 9)
+	args = append(args, statuses[0], statuses[1], statuses[2], itoa(secs))
+	args = append(args, activeStatuses...)
 	// The limit lives in the inner select: SQLite refuses DELETE ... LIMIT. The
 	// seconds are bound as text (pgx cannot encode an int where || expects
 	// text) and the limit is inlined like the other paged queries.
@@ -453,11 +461,10 @@ func (s *sqlStore) PurgeFinishedTasks(ctx context.Context, olderThan time.Durati
 		WHERE id IN (
 			SELECT id FROM tasks
 			WHERE status IN (?, ?, ?) AND `+cutoff+`
-			  AND id NOT IN (SELECT depends_on FROM tasks WHERE depends_on <> '')
+			  AND id NOT IN (SELECT depends_on FROM tasks WHERE depends_on <> '' AND status IN (`+activeSet+`))
 			ORDER BY updated_at ASC
 			LIMIT `+itoa(limit)+`
-		)`),
-		statuses[0], statuses[1], statuses[2], itoa(secs))
+		)`), args...)
 	if err != nil {
 		return 0, 0, err
 	}
@@ -467,8 +474,8 @@ func (s *sqlStore) PurgeFinishedTasks(ctx context.Context, olderThan time.Durati
 	if err := s.db.QueryRowContext(ctx, s.q(`
 		SELECT COUNT(*) FROM tasks
 		WHERE status IN (?, ?, ?) AND `+cutoff+`
-		  AND id IN (SELECT depends_on FROM tasks WHERE depends_on <> '')`),
-		statuses[0], statuses[1], statuses[2], itoa(secs)).Scan(&kept); err != nil {
+		  AND id IN (SELECT depends_on FROM tasks WHERE depends_on <> '' AND status IN (`+activeSet+`))`),
+		args...).Scan(&kept); err != nil {
 		return 0, 0, err
 	}
 	return int(deleted), kept, nil

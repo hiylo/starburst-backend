@@ -9,6 +9,7 @@
 package llm
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -114,6 +115,11 @@ func (c *Client) CompleteJSON(ctx context.Context, system, user string, v any) e
 	if err != nil {
 		return err
 	}
+	return DecodeJSON(text, v)
+}
+
+// DecodeJSON extracts a JSON object from model text and decodes it into v.
+func DecodeJSON(text string, v any) error {
 	raw := extractJSON(text)
 	if raw == "" {
 		return fmt.Errorf("llm: empty JSON output")
@@ -122,6 +128,99 @@ func (c *Client) CompleteJSON(ctx context.Context, system, user string, v any) e
 		return fmt.Errorf("llm: invalid JSON output: %w", err)
 	}
 	return nil
+}
+
+// CompleteJSONStream streams the model's raw output through onDelta as it is
+// generated, then returns the accumulated full text. The caller is responsible
+// for extracting/decoding JSON from the returned text. It uses the
+// OpenAI-compatible streaming protocol (stream=true + SSE data chunks).
+func (c *Client) CompleteJSONStream(ctx context.Context, system, user string, onDelta func(string) error) (string, error) {
+	if !c.Enabled() {
+		return "", errDisabled
+	}
+	messages := []ChatMessage{}
+	if system != "" {
+		messages = append(messages, ChatMessage{Role: "system", Content: system})
+	}
+	messages = append(messages, ChatMessage{Role: "user", Content: user})
+	return c.chatStream(ctx, messages, 0.1, onDelta)
+}
+
+// chatStream performs a streaming completion request. It accumulates content
+// deltas into a full response and invokes onDelta for each chunk.
+func (c *Client) chatStream(ctx context.Context, messages []ChatMessage, temperature float64, onDelta func(string) error) (string, error) {
+	baseURL, apiKey, model := c.Snapshot()
+	payload := map[string]any{
+		"model":       model,
+		"messages":    messages,
+		"temperature": temperature,
+		"max_tokens":  defaultMaxTokens,
+		"stream":      true,
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return "", err
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+"/chat/completions", bytes.NewReader(body))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("llm: request: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4*1024))
+		return "", fmt.Errorf("llm: %s: %s", resp.Status, truncate(string(raw), 500))
+	}
+
+	// Parse the OpenAI-compatible SSE stream. Each "data:" line carries a JSON
+	// chunk; the stream ends with "data: [DONE]".
+	scanner := bufio.NewScanner(resp.Body)
+	scanner.Buffer(make([]byte, 0, 64*1024), 2*1024*1024)
+	var full strings.Builder
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if !strings.HasPrefix(line, "data:") {
+			continue
+		}
+		data := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		if data == "[DONE]" {
+			break
+		}
+		var chunk struct {
+			Choices []struct {
+				Delta struct {
+					Content string `json:"content"`
+				} `json:"delta"`
+			} `json:"choices"`
+		}
+		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
+			continue
+		}
+		if len(chunk.Choices) == 0 {
+			continue
+		}
+		delta := chunk.Choices[0].Delta.Content
+		if delta == "" {
+			continue
+		}
+		full.WriteString(delta)
+		if onDelta != nil {
+			if err := onDelta(delta); err != nil {
+				return "", err
+			}
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return "", fmt.Errorf("llm: read stream: %w", err)
+	}
+	return strings.TrimSpace(full.String()), nil
 }
 
 // chat performs the low-level completion request and returns content text.
