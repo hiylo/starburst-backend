@@ -978,15 +978,18 @@ function appendStreamLine(text) {
 }
 function ensureStream(force) {
   const t = localStorage.getItem(APP_TOKEN_KEY) || "";
-  if (!t) {
+  if (!t && !session) {
     streamState("未连接");
-    show(document.getElementById("streamMsg"), "先在右上角填入 APP Token 并保存，再打开事件流");
+    show(document.getElementById("streamMsg"), "先登录，或在右上角填入 APP Token 并保存，再打开事件流");
     return;
   }
   if (streamES && !force) return;
   if (streamES) { streamES.close(); streamES = null; }
   document.getElementById("streamToggle").textContent = "停止";
-  const es = new EventSource("/api/stream?token=" + encodeURIComponent(t));
+  // EventSource 不能自定义请求头：有 APP token 用 token，否则用登录会话
+  // 通过 ?session= 连接（后端已接受）。
+  const cred = t ? "token=" + encodeURIComponent(t) : "session=" + encodeURIComponent(session);
+  const es = new EventSource("/api/stream?" + cred);
   streamES = es;
   streamState("连接中…");
   show(document.getElementById("streamMsg"), "");

@@ -20,9 +20,18 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
-	if _, ok := s.tokenFromRequest(r); !ok {
+	// EventSource cannot set custom headers, so the web UI passes its admin
+	// session via ?session= when no APP token is configured. Accept either a
+	// Bearer/query token or a web session, mirroring the other web endpoints.
+	if _, ok := s.tokenFromRequest(r); !ok && !s.requireWeb(r) && r.URL.Query().Get("session") == "" {
 		writeErr(w, http.StatusUnauthorized, "invalid token")
 		return
+	}
+	if r.URL.Query().Get("session") != "" {
+		if _, err := s.store.GetWebSession(r.Context(), r.URL.Query().Get("session")); err != nil {
+			writeErr(w, http.StatusUnauthorized, "invalid session")
+			return
+		}
 	}
 
 	fl, ok := w.(http.Flusher)
