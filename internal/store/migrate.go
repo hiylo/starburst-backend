@@ -187,6 +187,24 @@ func migrationArchives(ctx context.Context, driver string, db *sql.DB) error {
 			return err
 		}
 	}
+	// 恢复支持：raw_messages 保存会话的完整结构化消息 JSON（含 parts）。
+	// 旧库需补列；SQLite 驱动不支持 ADD COLUMN IF NOT EXISTS，先查列存在性。
+	switch driver {
+	case "postgres":
+		if _, err := db.ExecContext(ctx, `ALTER TABLE archives ADD COLUMN IF NOT EXISTS raw_messages TEXT NOT NULL DEFAULT ''`); err != nil {
+			return err
+		}
+	default: // sqlite
+		var n int
+		if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info('archives') WHERE name='raw_messages'`).Scan(&n); err != nil {
+			return err
+		}
+		if n == 0 {
+			if _, err := db.ExecContext(ctx, `ALTER TABLE archives ADD COLUMN raw_messages TEXT NOT NULL DEFAULT ''`); err != nil {
+				return err
+			}
+		}
+	}
 	return nil
 }
 

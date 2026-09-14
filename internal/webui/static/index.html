@@ -836,10 +836,15 @@ async function loadArchives() {
       <td>${escapeHtml(a.format)}</td>
       <td>${a.size}</td>
       <td>${fmtDate(a.createdAt)}</td>
-      <td><button class="danger sm" data-del-archive="${escapeHtml(a.id)}">删除</button></td>
+      <td>
+        <button class="ghost sm" data-restore="${escapeHtml(a.id)}">恢复</button>
+        <button class="danger sm" data-del-archive="${escapeHtml(a.id)}">删除</button>
+      </td>
     </tr>`);
   }
   tb.onclick = (e) => {
+    const rb = e.target.closest("button[data-restore]");
+    if (rb) { restoreArchive(rb.dataset.restore); return; }
     const btn = e.target.closest("button[data-del-archive]");
     if (btn) deleteArchive(btn.dataset.delArchive);
   };
@@ -847,6 +852,19 @@ async function loadArchives() {
 async function deleteArchive(id) {
   await api("/api/archives/" + encodeURIComponent(id), { method: "DELETE", headers: appHeaders() });
   loadArchives();
+}
+// restoreArchive 把归档会话完整还原成一个新的 opencode 会话（新建会话 +
+// 注入历史消息），返回新会话 ID。
+async function restoreArchive(id) {
+  if (!confirm("把该归档会话恢复到 opencode 中？（将新建一个会话并注入全部历史消息）")) return;
+  show(document.getElementById("archiveMsg"), "恢复中…");
+  const res = await api("/api/archives/" + encodeURIComponent(id) + "/restore", { method: "POST", headers: appHeaders() });
+  const data = await res.json();
+  if (!res.ok) {
+    show(document.getElementById("archiveMsg"), data.error || "恢复失败");
+    return;
+  }
+  show(document.getElementById("archiveMsg"), `已恢复为新会话 ${data.id}（${data.restored} 条消息）`, true);
 }
 
 /* ---------- 审计 ---------- */
