@@ -88,6 +88,31 @@ var migrations = []migration{
 	{name: "tasks_depends_on", apply: migrationTasksDependsOn},
 	{name: "tasks_schedule", apply: migrationTasksSchedule},
 	{name: "session_events", apply: migrationSessionEvents},
+	{name: "archives_raw_messages", apply: migrationArchivesRawMessages},
+}
+
+// migrationArchivesRawMessages adds the raw_messages column storing an
+// archive's complete structured message JSON (with parts) so archived sessions
+// can be restored byte-for-byte into a new OpenCode session. Older archives
+// have the column empty (''). Kept as its own migration because archives was
+// already applied on existing databases.
+func migrationArchivesRawMessages(ctx context.Context, driver string, db *sql.DB) error {
+	switch driver {
+	case "postgres":
+		_, err := db.ExecContext(ctx, `ALTER TABLE archives ADD COLUMN IF NOT EXISTS raw_messages TEXT NOT NULL DEFAULT ''`)
+		return err
+	default: // sqlite (no ADD COLUMN IF NOT EXISTS support)
+		var n int
+		if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info('archives') WHERE name='raw_messages'`).Scan(&n); err != nil {
+			return err
+		}
+		if n == 0 {
+			if _, err := db.ExecContext(ctx, `ALTER TABLE archives ADD COLUMN raw_messages TEXT NOT NULL DEFAULT ''`); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
 }
 
 // migrationTasksDependsOn adds the depends_on column holding the id of the
@@ -185,24 +210,6 @@ func migrationArchives(ctx context.Context, driver string, db *sql.DB) error {
 	for _, s := range stmts {
 		if _, err := db.ExecContext(ctx, s); err != nil {
 			return err
-		}
-	}
-	// 恢复支持：raw_messages 保存会话的完整结构化消息 JSON（含 parts）。
-	// 旧库需补列；SQLite 驱动不支持 ADD COLUMN IF NOT EXISTS，先查列存在性。
-	switch driver {
-	case "postgres":
-		if _, err := db.ExecContext(ctx, `ALTER TABLE archives ADD COLUMN IF NOT EXISTS raw_messages TEXT NOT NULL DEFAULT ''`); err != nil {
-			return err
-		}
-	default: // sqlite
-		var n int
-		if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info('archives') WHERE name='raw_messages'`).Scan(&n); err != nil {
-			return err
-		}
-		if n == 0 {
-			if _, err := db.ExecContext(ctx, `ALTER TABLE archives ADD COLUMN raw_messages TEXT NOT NULL DEFAULT ''`); err != nil {
-				return err
-			}
 		}
 	}
 	return nil
