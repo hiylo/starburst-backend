@@ -837,14 +837,17 @@ async function loadArchives() {
       <td>${a.size}</td>
       <td>${fmtDate(a.createdAt)}</td>
       <td>
-        <button class="ghost sm" data-restore="${escapeHtml(a.id)}">恢复</button>
+        <button class="ghost sm" data-view-archive="${escapeHtml(a.id)}">查看</button>
+        <button class="ghost sm" data-download-archive="${escapeHtml(a.id)}" data-fmt="${escapeHtml(a.format)}">下载</button>
         <button class="danger sm" data-del-archive="${escapeHtml(a.id)}">删除</button>
       </td>
     </tr>`);
   }
   tb.onclick = (e) => {
-    const rb = e.target.closest("button[data-restore]");
-    if (rb) { restoreArchive(rb.dataset.restore); return; }
+    const vw = e.target.closest("button[data-view-archive]");
+    if (vw) { viewArchive(vw.dataset.viewArchive); return; }
+    const dl = e.target.closest("button[data-download-archive]");
+    if (dl) { downloadArchive(dl.dataset.downloadArchive, dl.dataset.fmt); return; }
     const btn = e.target.closest("button[data-del-archive]");
     if (btn) deleteArchive(btn.dataset.delArchive);
   };
@@ -853,18 +856,30 @@ async function deleteArchive(id) {
   await api("/api/archives/" + encodeURIComponent(id), { method: "DELETE", headers: appHeaders() });
   loadArchives();
 }
-// restoreArchive 把归档会话完整还原成一个新的 opencode 会话（新建会话 +
-// 注入历史消息），返回新会话 ID。
-async function restoreArchive(id) {
-  if (!confirm("把该归档会话恢复到 opencode 中？（将新建一个会话并注入全部历史消息）")) return;
-  show(document.getElementById("archiveMsg"), "恢复中…");
-  const res = await api("/api/archives/" + encodeURIComponent(id) + "/restore", { method: "POST", headers: appHeaders() });
+// viewArchive 在新标签页展示归档全文。
+async function viewArchive(id) {
+  const res = await api("/api/archives/" + encodeURIComponent(id), { headers: appHeaders() });
   const data = await res.json();
-  if (!res.ok) {
-    show(document.getElementById("archiveMsg"), data.error || "恢复失败");
-    return;
-  }
-  show(document.getElementById("archiveMsg"), `已恢复为新会话 ${data.id}（${data.restored} 条消息）`, true);
+  if (!res.ok) { show(document.getElementById("archiveMsg"), data.error || "加载失败"); return; }
+  const win = window.open("", "_blank");
+  if (!win) { show(document.getElementById("archiveMsg"), "浏览器拦截了新窗口，请允许弹窗"); return; }
+  const isJson = data.format === "json";
+  win.document.write("<!DOCTYPE html><html><head><meta charset=utf-8><title>" + escapeHtml(data.title || data.id) + "</title></head><body><pre style='white-space:pre-wrap'>" + (isJson ? escapeHtml(JSON.stringify(JSON.parse(data.content || "[]"), null, 2)) : escapeHtml(data.content || "")) + "</pre></body></html>");
+  win.document.close();
+}
+// downloadArchive 把归档全文下载为本地文件。
+async function downloadArchive(id, fmt) {
+  const res = await api("/api/archives/" + encodeURIComponent(id), { headers: appHeaders() });
+  const data = await res.json();
+  if (!res.ok) { show(document.getElementById("archiveMsg"), data.error || "下载失败"); return; }
+  const ext = fmt === "json" ? "json" : "md";
+  const blob = new Blob([data.content || ""], { type: fmt === "json" ? "application/json" : "text/markdown" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = (data.id || "archive") + "." + ext;
+  a.click();
+  URL.revokeObjectURL(url);
 }
 
 /* ---------- 审计 ---------- */

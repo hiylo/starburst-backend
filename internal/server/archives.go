@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"regexp"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/hiylo/startburst-backend/internal/opencode"
@@ -103,21 +102,13 @@ func (s *Server) archiveSession(w http.ResponseWriter, r *http.Request) {
 		content = opencode.ExportMarkdown(req.SessionID, msgs)
 	}
 
-	// 同时保存完整结构化消息（含 parts），用于把归档原样恢复成新会话。
-	// 拉取失败不影响归档完成（只是该归档暂不支持恢复）。
-	var raw string
-	if rawJSON, err := s.openCode.FetchSessionMessagesRaw(ctx, req.SessionID); err == nil && len(rawJSON) > 0 {
-		raw = string(rawJSON)
-	}
-
 	arch := &store.Archive{
-		ID:          newArchiveID(),
-		SessionID:   req.SessionID,
-		Title:       "Session " + req.SessionID,
-		Format:      req.Format,
-		Content:     content,
-		RawMessages: raw,
-		Size:        len(content),
+		ID:        newArchiveID(),
+		SessionID: req.SessionID,
+		Title:     "Session " + req.SessionID,
+		Format:    req.Format,
+		Content:   content,
+		Size:      len(content),
 	}
 	if err := s.store.CreateArchive(ctx, arch); err != nil {
 		writeErr(w, http.StatusInternalServerError, "create archive failed")
@@ -128,8 +119,7 @@ func (s *Server) archiveSession(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleArchiveByID gets (GET) or deletes (DELETE) a single archive, and
-// restores it to a new OpenCode session via POST /api/archives/{id}/restore.
+// handleArchiveByID gets (GET) or deletes (DELETE) a single archive.
 func (s *Server) handleArchiveByID(w http.ResponseWriter, r *http.Request) {
 	if !s.requireWeb(r) {
 		if _, ok := s.requireToken(r); !ok {
@@ -137,28 +127,20 @@ func (s *Server) handleArchiveByID(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	rest := r.URL.Path[len("/api/archives/"):]
-	restore := false
-	id := rest
-	if i := strings.Index(rest, "/"); i >= 0 {
-		id = rest[:i]
-		restore = rest[i+1:] == "restore"
-	}
+	id := r.URL.Path[len("/api/archives/"):]
 	if id == "" {
 		writeErr(w, http.StatusBadRequest, "missing archive id")
 		return
 	}
-	switch {
-	case restore:
-		s.restoreArchive(w, r, id)
-	case r.Method == http.MethodGet:
+	switch r.Method {
+	case http.MethodGet:
 		a, err := s.store.GetArchive(r.Context(), id)
 		if err != nil {
 			writeErr(w, http.StatusNotFound, "archive not found")
 			return
 		}
 		writeJSON(w, http.StatusOK, a)
-	case r.Method == http.MethodDelete:
+	case http.MethodDelete:
 		if err := s.store.DeleteArchive(r.Context(), id); err != nil {
 			writeErr(w, http.StatusNotFound, "archive not found")
 			return
@@ -168,111 +150,8 @@ func (s *Server) handleArchiveByID(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
 	}
 }
-
-// restoreArchive replays an archived session's raw structured messages into a
-// freshly created OpenCode session, reproducing the original conversation
-// history so work can continue. Archives created before raw message capture
-// (raw_messages empty) cannot be restored and get a 422. Returns the new
-// session id.
-func (s *Server) restoreArchive(w http.ResponseWriter, r *http.Request, id string) {
-	if r.Method != http.MethodPost {
-		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
-	}
-	a, err := s.store.GetArchive(r.Context(), id)
-	if err != nil {
-		writeErr(w, http.StatusNotFound, "archive not found")
-		return
-	}
-	if strings.TrimSpace(a.RawMessages) == "" {
-		writeErr(w, http.StatusUnprocessableEntity, "this archive has no raw messages and cannot be restored")
-		return
-	}
-	var msgs []json.RawMessage
-	if err := json.Unmarshal([]byte(a.RawMessages), &msgs); err != nil {
-		writeErr(w, http.StatusUnprocessableEntity, "archive raw messages are corrupted")
-		return
-	}
-	if len(msgs) == 0 {
-		writeErr(w, http.StatusUnprocessableEntity, "archive has no messages to restore")
-		return
-	}
-
-	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Minute)
-	defer cancel()
-
-	// 新建会话，目录沿用归档来源目录（取不到则用工作区根）。
-	dir := "/workspaces"
-	created, err := s.openCode.CreateSession(ctx, a.Title, "", dir)
-	if err != nil {
-		writeErr(w, http.StatusBadGateway, "create session failed: "+err.Error())
-		return
-	}
-	var createdInfo struct {
-		ID string `json:"id"`
-	}
-	if b, err := json.Marshal(created); err == nil {
-		_ = json.Unmarshal(b, &createdInfo)
-	}
-	newID := createdInfo.ID
-	if newID == "" {
-		writeErr(w, http.StatusBadGateway, "create session returned no id")
-		return
-	}
-
-	// 逐条注入历史消息。opencode 拒绝 step-start/reasoning/tool/step-finish
-	// 等执行过程部件，只接受 text（和 file）part，所以恢复时按"用户消息
-	// 原样 + assistant 仅保留 text 回复"重放，形成可继续对话的历史。
-	type replayMsg struct {
-		Role  string           `json:"role"`
-		Parts []map[string]any `json:"parts"`
-	}
-	replay := make([]replayMsg, 0, len(msgs))
-	for _, rawMsg := range msgs {
-		var m struct {
-			Info struct {
-				Role string `json:"role"`
-			} `json:"info"`
-			Parts []map[string]any `json:"parts"`
-		}
-		if err := json.Unmarshal(rawMsg, &m); err != nil {
-			continue
-		}
-		var keep []map[string]any
-		for _, p := range m.Parts {
-			pt, _ := p["type"].(string)
-			if pt == "text" || pt == "file" {
-				keep = append(keep, p)
-			}
-		}
-		if len(keep) == 0 {
-			continue
-		}
-		replay = append(replay, replayMsg{Role: m.Info.Role, Parts: keep})
-	}
-	if len(replay) == 0 {
-		writeErr(w, http.StatusUnprocessableEntity, "archive has no replayable text messages")
-		return
-	}
-
-	for i, rp := range replay {
-		body, err := json.Marshal(rp)
-		if err != nil {
-			writeErr(w, http.StatusInternalServerError, "marshal replay message failed")
-			return
-		}
-		if err := s.openCode.InjectMessage(ctx, newID, body); err != nil {
-			writeErr(w, http.StatusBadGateway, fmt.Sprintf("restore message %d/%d failed: %v", i+1, len(replay), err))
-			return
-		}
-	}
-
-	writeJSON(w, http.StatusOK, map[string]any{
-		"id": newID, "title": a.Title, "restored": len(replay),
-	})
-}
-
 func marshalMessagesJSON(msgs []opencode.Message) (string, error) {
+
 	type m struct {
 		Role    string `json:"role"`
 		Content string `json:"content"`

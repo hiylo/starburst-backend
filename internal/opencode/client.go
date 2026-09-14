@@ -443,42 +443,6 @@ func (c *Client) FetchSessionMessages(ctx context.Context, sessionID string) ([]
 	return out, nil
 }
 
-// FetchSessionMessagesRaw retrieves the raw structured message list of a
-// session (GET /session/{id}/message) without flattening parts, preserving
-// every part type (text/reasoning/tool/step-start/step-finish) so an archive
-// can be restored byte-for-byte into a new session. Stream-decoded to bound
-// memory. Returns nil body with no error when the response is empty.
-func (c *Client) FetchSessionMessagesRaw(ctx context.Context, sessionID string) (json.RawMessage, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/session/"+sessionID+"/message", nil)
-	if err != nil {
-		return nil, err
-	}
-	c.applyAuth(req)
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("fetch messages raw: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode >= 300 {
-		snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 4*1024))
-		return nil, fmt.Errorf("fetch messages raw: %s: %s", resp.Status, strings.TrimSpace(string(snippet)))
-	}
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxMessagesBody))
-	if err != nil {
-		return nil, fmt.Errorf("read messages raw: %w", err)
-	}
-	if len(body) == 0 {
-		return nil, nil
-	}
-	// 校验是合法 JSON 数组，避免把脏数据存进归档。
-	var arr []json.RawMessage
-	if err := json.Unmarshal(body, &arr); err != nil {
-		return nil, fmt.Errorf("parse messages raw: %w", err)
-	}
-	return body, nil
-}
-
-// ExportMarkdown renders a session message list as a Markdown transcript.
 func ExportMarkdown(sessionID string, msgs []Message) string {
 	var sb strings.Builder
 	sb.WriteString("# Session " + sessionID + "\n\n")
@@ -722,16 +686,6 @@ func (c *Client) ExecuteCommand(ctx context.Context, sessionID, command, argumen
 func (c *Client) RunShellCommand(ctx context.Context, sessionID, agent, command string, model map[string]any) error {
 	body := map[string]any{"agent": agent, "command": command, "model": model}
 	return c.request(ctx, http.MethodPost, "/session/"+sessionID+"/shell", nil, body, nil)
-}
-
-// InjectMessage writes a raw structured message (role + parts array) into a
-// session via POST /session/{id}/message. It is the primitive for restoring an
-// archived session: archives store the exact JSON payloads that were read back
-// from this endpoint, so replaying them reproduces the original conversation
-// history byte-for-byte. `raw` should be an object like
-// {"role":"user","parts":[{"type":"text","text":"..."}]}
-func (c *Client) InjectMessage(ctx context.Context, sessionID string, raw json.RawMessage) error {
-	return c.request(ctx, http.MethodPost, "/session/"+sessionID+"/message", nil, raw, nil)
 }
 
 // PromptPart is one attachment of a prompt (text / file / url).
