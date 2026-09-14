@@ -448,9 +448,16 @@ function switchPage(name) {
   document.getElementById("page-" + name).classList.add("active");
   document.querySelectorAll("#nav button").forEach(b => b.classList.toggle("active", b.dataset.page === name));
   document.getElementById("pageTitle").textContent = TITLES[name] || name;
-  if (name === "settings") loadLLMConfig();
-  if (name === "stream") ensureStream();
-  if (name === "archives") loadArchiveSessions();
+  // 每个页面切到时自动加载数据，避免打开就是空的、还得手动点"刷新"。
+  if (name === "overview") loadOverview();
+  else if (name === "tasks") loadTasks();
+  else if (name === "projects") loadProjects();
+  else if (name === "rules") loadRules();
+  else if (name === "archives") { loadArchives(); loadArchiveSessions(); }
+  else if (name === "audit") loadAudit();
+  else if (name === "tokens") loadTokens();
+  else if (name === "settings") loadLLMConfig();
+  else if (name === "stream") ensureStream();
 }
 document.querySelectorAll("#nav button").forEach(b => {
   b.addEventListener("click", () => switchPage(b.dataset.page));
