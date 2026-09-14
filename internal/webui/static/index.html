@@ -144,6 +144,7 @@
         <h2>系统信息</h2>
         <div id="sysInfo" class="muted">加载中…</div>
         <div id="healthInfo" class="muted" style="margin-top:6px"></div>
+        <div id="uiVersion" class="muted" style="margin-top:6px"></div>
       </div>
       <div class="card">
         <h2>Token 使用排行</h2>
@@ -388,6 +389,9 @@ function appHeaders() {
   const t = localStorage.getItem(APP_TOKEN_KEY) || "";
   const h = {};
   if (t) h["Authorization"] = "Bearer " + t;
+  // 同时带 web session：这些端点后端接受 'web session 或 APP token'，未配置
+  // APP token 的浏览器用户也能查看任务/项目/归档（否则无 token 请求 401）。
+  if (session) h["X-Web-Session"] = session;
   return h;
 }
 function show(el, msg, ok) {
@@ -501,6 +505,7 @@ async function loadOverview() {
   const up = health.upstream ? "可达 ✓" : "不可达 ✗";
   document.getElementById("healthInfo").textContent =
     `后端: ${health.status || "?"} · 上游 OpenCode: ${up}`;
+  document.getElementById("uiVersion").textContent = "前端 v2 (auth-fix) · 如非此标识请硬刷新 (Ctrl+Shift+R)";
 
   try {
     const st = await (await api("/api/stats", { headers: hdr() })).json();

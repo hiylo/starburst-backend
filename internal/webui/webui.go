@@ -44,6 +44,12 @@ func (f *FS) Serve(w http.ResponseWriter, r *http.Request, p string) {
 		return
 	}
 	w.Header().Set("Content-Type", contentType(name))
+	// 禁止缓存：前端 JS 与 HTML 随后端版本更新，浏览器缓存的旧资产会导致
+	// 登录/鉴权行为与新后端不一致（例如旧的 api() 会在任意 401 时清会话）。
+	// 资产总量很小，no-cache 无性能负担。
+	w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+	w.Header().Set("Pragma", "no-cache")
+	w.Header().Set("Expires", "0")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(data)
 }
