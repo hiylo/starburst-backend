@@ -290,7 +290,7 @@
       <div class="card">
         <h2>归档会话</h2>
         <label>会话 ID</label>
-        <input type="text" id="archiveSessionId" placeholder="ses_...">
+        <select id="archiveSessionId" style="width:100%"></select>
         <label>格式</label>
         <select id="archiveFormat" style="width:auto">
           <option value="markdown">Markdown</option>
@@ -450,6 +450,7 @@ function switchPage(name) {
   document.getElementById("pageTitle").textContent = TITLES[name] || name;
   if (name === "settings") loadLLMConfig();
   if (name === "stream") ensureStream();
+  if (name === "archives") loadArchiveSessions();
 }
 document.querySelectorAll("#nav button").forEach(b => {
   b.addEventListener("click", () => switchPage(b.dataset.page));
@@ -777,6 +778,30 @@ async function deleteRule(id) {
 }
 
 /* ---------- 归档 ---------- */
+// 加载本机 OpenCode 会话列表到归档下拉框（按标题+ID 展示，便于选择）。
+async function loadArchiveSessions() {
+  const sel = document.getElementById("archiveSessionId");
+  if (!sel || sel.dataset.loaded) return;
+  sel.dataset.loaded = "1";
+  sel.innerHTML = '<option value="">加载中…</option>';
+  try {
+    const res = await api("/api/opencode/session", { headers: appHeaders() });
+    const data = await res.json();
+    const items = (Array.isArray(data) ? data : (data.sessions || data.data || [])).slice(0, 200);
+    sel.innerHTML = "";
+    if (!items.length) {
+      sel.innerHTML = '<option value="">无可用会话</option>';
+      return;
+    }
+    for (const it of items) {
+      const id = it.id || "";
+      const label = (it.title || it.slug || id).toString().slice(0, 60);
+      sel.add(new Option(label + "  ·  " + id.slice(0, 20), id));
+    }
+  } catch (_) {
+    sel.innerHTML = '<option value="">会话列表加载失败</option>';
+  }
+}
 async function createArchive() {
   const sessionId = document.getElementById("archiveSessionId").value.trim();
   const format = document.getElementById("archiveFormat").value;
