@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/hiylo/startburst-backend/internal/config"
 	"github.com/hiylo/startburst-backend/internal/push"
 )
 
@@ -52,6 +53,7 @@ func (s *Server) handleSystem(w http.ResponseWriter, r *http.Request) {
 	version, _ := s.openCode.GetVersion(ctx)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"backend":         "startburst-backend",
+		"version":         config.Version,
 		"opencodeURL":     s.cfg.OpenCodeURL,
 		"opencodeVersion": version,
 		"db":              s.cfg.DBDriver,
