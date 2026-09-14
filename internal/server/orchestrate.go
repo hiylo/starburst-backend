@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
-	"path"
 	"strings"
 	"time"
 
@@ -56,10 +55,12 @@ func sessionDir(it opencode.SessionInfo) string {
 	return it.Path
 }
 
-// handleProjects lists OpenCode sessions grouped by working directory. Each
-// project carries its directory as id plus its session count, so clients can
-// drill down via /api/projects/{id}/sessions. Requires a web session or APP
-// token.
+// handleProjects lists OpenCode sessions grouped by real working directory.
+// The plain /session endpoint normalizes every session to projectID 'global'
+// and a flat root directory (/workspaces), so grouping by it yields one group.
+// /experimental/session returns each session's real directory; we group on that
+// and then merge in the /project worktrees that have no sessions so empty
+// projects are still visible. Requires a web session or APP token.
 func (s *Server) handleProjects(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -74,92 +75,69 @@ func (s *Server) handleProjects(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
 
-	// 会话元数据的 directory 字段统一是工作区根（/workspaces，projectID 全为
-	// 'global'），按它分组只能得到一个目录。项目列表改用上游 project 集合——
-	// 每个项目带真实 worktree 子目录，这与用户对"不同项目在不同目录"的认知
-	// 一致。会话数按会话 title 与 worktree 叶目录名的关联统计（尽力而为）。
-	rawProjects, err := s.openCode.ListProjects(ctx)
+	// 1) 全量详细会话（每个带真实 directory）。
+	raw, err := s.openCode.ListAllSessionsDetailed(ctx, "")
 	if err != nil {
 		writeErr(w, http.StatusBadGateway, "opencode: "+err.Error())
 		return
 	}
-	projectsRaw := struct {
-		Projects []struct {
-			ID       string `json:"id"`
-			Worktree string `json:"worktree"`
-		} `json:"projects"`
-	}{}
-	if b, err := json.Marshal(rawProjects); err == nil {
-		_ = json.Unmarshal(b, &projectsRaw)
+	var sessions []opencode.SessionInfo
+	if b, err := json.Marshal(raw); err == nil {
+		_ = json.Unmarshal(b, &sessions)
 	}
-	upstreamProjects := projectsRaw.Projects
-	// 上游可能直接返回数组（而非 {projects: [...]}）。
-	if len(upstreamProjects) == 0 {
-		var arr []struct {
+
+	// 2) 按真实目录统计会话数。
+	order := make([]string, 0, len(sessions))
+	counts := make(map[string]int)
+	for _, it := range sessions {
+		dir := strings.TrimRight(sessionDir(it), "/")
+		if dir == "" {
+			continue
+		}
+		if _, ok := counts[dir]; !ok {
+			order = append(order, dir)
+		}
+		counts[dir]++
+	}
+
+	// 3) 合并 /project worktree（无会话的项目也显示，目录导航价值）。
+	seen := make(map[string]bool, len(order))
+	for _, d := range order {
+		seen[d] = true
+	}
+	if rawProjects, err := s.openCode.ListProjects(ctx); err == nil {
+		var upstream []struct {
 			ID       string `json:"id"`
 			Worktree string `json:"worktree"`
 		}
 		if b, err := json.Marshal(rawProjects); err == nil {
-			if err := json.Unmarshal(b, &arr); err == nil {
-				upstreamProjects = arr
+			if err := json.Unmarshal(b, &upstream); err != nil {
+				upstream = nil
 			}
 		}
-	}
-
-	items, err := s.openCode.ListSessions(ctx)
-	if err != nil {
-		writeErr(w, http.StatusBadGateway, "opencode: "+err.Error())
-		return
-	}
-	titlesByDir := sessionsByWorktreeLeaf(items)
-
-	projects := make([]projectSummary, 0, len(upstreamProjects))
-	for _, p := range upstreamProjects {
-		wt := strings.TrimRight(p.Worktree, "/")
-		if wt == "" || wt == "/" {
-			continue // 跳过 global 根项目，只列真实子目录
-		}
-		leaf := path.Base(wt)
-		projects = append(projects, projectSummary{
-			ID:           wt,
-			Directory:    wt,
-			Title:        p.ID,
-			SessionCount: titlesByDir[leaf],
-		})
-	}
-	if len(projects) == 0 {
-		// 上游没有 project 元数据时退回按会话目录分组。
-		seen := make(map[string]int)
-		for _, it := range items {
-			dir := sessionDir(it)
-			if i, ok := seen[dir]; ok {
-				projects[i].SessionCount++
+		for _, p := range upstream {
+			wt := strings.TrimRight(p.Worktree, "/")
+			if wt == "" || wt == "/" || seen[wt] {
 				continue
 			}
-			seen[dir] = len(projects)
-			projects = append(projects, projectSummary{ID: dir, Directory: dir, SessionCount: 1})
+			seen[wt] = true
+			order = append(order, wt)
 		}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"projects": projects})
-}
 
-// sessionsByWorktreeLeaf buckets session titles by the leaf path segment of
-// their directory (/workspaces/components → "components"). Title may or may not
-// mention the project; counting sessions whose title contains the leaf name
-// is a best-effort association and only affects the displayed count.
-func sessionsByWorktreeLeaf(items []opencode.SessionInfo) map[string]int {
-	out := make(map[string]int)
-	for _, it := range items {
-		leaf := path.Base(strings.TrimRight(sessionDir(it), "/"))
-		out[leaf]++
-		// title 也做一次软匹配，提高命中率。
-		if it.Title != "" {
-			if s := path.Base(strings.TrimRight(it.Title, "/")); s != "" && s != leaf {
-				out[s]++
-			}
+	// 4) 组装输出。带会话的目录排前面。
+	projects := make([]projectSummary, 0, len(order))
+	noSession := make([]projectSummary, 0)
+	for _, d := range order {
+		ps := projectSummary{ID: d, Directory: d, SessionCount: counts[d]}
+		if counts[d] > 0 {
+			projects = append(projects, ps)
+		} else {
+			noSession = append(noSession, ps)
 		}
 	}
-	return out
+	projects = append(projects, noSession...)
+	writeJSON(w, http.StatusOK, map[string]any{"projects": projects})
 }
 
 // projectSummary groups the sessions of one working directory.
@@ -170,12 +148,10 @@ type projectSummary struct {
 	SessionCount int    `json:"sessionCount"`
 }
 
-// handleProjectSessions returns the sessions for a project's working directory.
-// OpenCode tags every session with projectID 'global' and a flat root directory
-// (/workspaces), so a directory-exact filter would always come up empty. The
-// pragmatic contract is therefore: the selected directory is used for display
-// context, and the full session list is returned so the user can identify each
-// session by its title and directory. Requires a web session or APP token.
+// handleProjectSessions returns the sessions whose real working directory
+// equals the selected project directory, scoped via /experimental/session
+// which (unlike the plain /session endpoint) preserves each session's true
+// directory. Requires a web session or APP token.
 func (s *Server) handleProjectSessions(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -196,14 +172,18 @@ func (s *Server) handleProjectSessions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	items, err := s.openCode.ListSessions(ctx)
+	raw, err := s.openCode.ListAllSessionsDetailed(ctx, id)
 	if err != nil {
 		writeErr(w, http.StatusBadGateway, "opencode: "+err.Error())
 		return
 	}
+	var sessions []opencode.SessionInfo
+	if b, err := json.Marshal(raw); err == nil {
+		_ = json.Unmarshal(b, &sessions)
+	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"directory": id,
-		"sessions":  items,
+		"sessions":  sessions,
 	})
 }

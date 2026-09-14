@@ -584,6 +584,20 @@ func (c *Client) ListAllSessions(ctx context.Context, directory string) (json.Ra
 	return c.getRaw(ctx, "/experimental/session", q)
 }
 
+// ListAllSessionsDetailed lists every session across all projects WITHOUT the
+// roots filter (GET /experimental/session, no params). Unlike /session — which
+// normalizes every session to projectID 'global' and a flat root directory —
+// this endpoint returns each session's real directory and projectID, so it is
+// the reliable source for grouping the dashboard by working directory. When
+// directory is non-empty it scopes the result to that directory.
+func (c *Client) ListAllSessionsDetailed(ctx context.Context, directory string) (json.RawMessage, error) {
+	var q url.Values
+	if directory != "" {
+		q = url.Values{"directory": {directory}}
+	}
+	return c.getRaw(ctx, "/experimental/session", q)
+}
+
 // GetSession fetches a single session (GET /session/{id}).
 func (c *Client) GetSession(ctx context.Context, sessionID string) (json.RawMessage, error) {
 	return c.getRaw(ctx, "/session/"+sessionID, nil)

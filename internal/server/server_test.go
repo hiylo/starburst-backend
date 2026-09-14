@@ -47,6 +47,25 @@ func newTestServer(t *testing.T) *Server {
 			// 无真实 project 元数据时返回空数组，handleProjects 应回退到
 			// 按会话目录分组（测试断言依赖该回退路径）。
 			_, _ = w.Write([]byte(`[]`))
+		case "/experimental/session":
+			// 带真实目录的会话列表（/session 会把目录归一成根目录，这里是
+			// handleProjects/handleProjectSessions 的真实数据源）。
+			dir := r.URL.Query().Get("directory")
+			all := []string{
+				`{"id":"ses_a","title":"Alpha","directory":"/w","path":"w","agent":"build"}`,
+				`{"id":"ses_b","title":"Beta","directory":"/other","path":"other","agent":"build"}`,
+			}
+			if dir != "" {
+				filtered := make([]string, 0)
+				for _, s := range all {
+					if strings.Contains(s, `"directory":"`+dir+`"`) {
+						filtered = append(filtered, s)
+					}
+				}
+				_, _ = w.Write([]byte("[" + strings.Join(filtered, ",") + "]"))
+			} else {
+				_, _ = w.Write([]byte("[" + strings.Join(all, ",") + "]"))
+			}
 		case "/session/status":
 			_, _ = w.Write([]byte(`{"ses_a":{"type":"busy"}}`))
 		case "/config":
@@ -178,8 +197,8 @@ func TestTokenAuthFlow(t *testing.T) {
 		Projects []map[string]any `json:"projects"`
 	}
 	_ = json.Unmarshal(rec.Body.Bytes(), &proj)
-	if len(proj.Projects) != 1 {
-		t.Fatalf("expected 1 project, got %d", len(proj.Projects))
+	if len(proj.Projects) == 0 {
+		t.Fatalf("expected projects, got none")
 	}
 
 	// Projects without token -> 401.
@@ -531,7 +550,7 @@ func TestProjectsGroupAndFilter(t *testing.T) {
 	_ = json.Unmarshal(rec.Body.Bytes(), &tok)
 	th := map[string]string{"Authorization": "Bearer " + tok.Token}
 
-	// Projects are grouped by directory, not raw sessions.
+	// Projects are grouped by real working directory from /experimental/session.
 	rec = s.do(t, http.MethodGet, "/api/projects", "", th)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("projects: %d", rec.Code)
@@ -544,13 +563,11 @@ func TestProjectsGroupAndFilter(t *testing.T) {
 		} `json:"projects"`
 	}
 	_ = json.Unmarshal(rec.Body.Bytes(), &proj)
-	if len(proj.Projects) != 1 || proj.Projects[0].ID != "/w" || proj.Projects[0].SessionCount != 1 {
-		t.Fatalf("projects = %+v, want one group for /w", proj.Projects)
+	if len(proj.Projects) != 2 || proj.Projects[0].ID != "/w" || proj.Projects[0].SessionCount != 1 {
+		t.Fatalf("projects = %+v, want two groups /w and /other each with 1", proj.Projects)
 	}
 
-	// The drill-down returns the full session list for the selected directory
-	// (OpenCode tags every session 'global' with a flat root directory, so a
-	// directory-exact filter would always be empty).
+	// The drill-down filters sessions by the selected real directory.
 	rec = s.do(t, http.MethodGet, "/api/projects/%2Fw", "", th)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("project sessions: %d %s", rec.Code, rec.Body.String())
@@ -569,15 +586,14 @@ func TestProjectsGroupAndFilter(t *testing.T) {
 		t.Fatalf("sessions = %+v, want ses_a", sess.Sessions)
 	}
 
-	// An unknown directory still returns the full list (no directory-exact
-	// filtering) but echoes the requested directory.
+	// Another directory exact-filters to its own session.
 	rec = s.do(t, http.MethodGet, "/api/projects/%2Fother", "", th)
 	if rec.Code != http.StatusOK {
-		t.Fatalf("unknown dir: %d", rec.Code)
+		t.Fatalf("other dir: %d", rec.Code)
 	}
 	_ = json.Unmarshal(rec.Body.Bytes(), &sess)
-	if sess.Directory != "/other" || len(sess.Sessions) != 1 {
-		t.Fatalf("unknown dir: directory=%q sessions=%d", sess.Directory, len(sess.Sessions))
+	if sess.Directory != "/other" || len(sess.Sessions) != 1 || sess.Sessions[0].ID != "ses_b" {
+		t.Fatalf("other dir: directory=%q sessions=%+v", sess.Directory, sess.Sessions)
 	}
 
 	// A missing id is a client error.
