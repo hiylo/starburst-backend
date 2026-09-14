@@ -97,22 +97,21 @@ var migrations = []migration{
 // have the column empty (''). Kept as its own migration because archives was
 // already applied on existing databases.
 func migrationArchivesRawMessages(ctx context.Context, driver string, db *sql.DB) error {
-	switch driver {
-	case "postgres":
+	if isPostgres(driver) {
 		_, err := db.ExecContext(ctx, `ALTER TABLE archives ADD COLUMN IF NOT EXISTS raw_messages TEXT NOT NULL DEFAULT ''`)
 		return err
-	default: // sqlite (no ADD COLUMN IF NOT EXISTS support)
-		var n int
-		if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info('archives') WHERE name='raw_messages'`).Scan(&n); err != nil {
+	}
+	// sqlite：无 ADD COLUMN IF NOT EXISTS，先查列存在性。
+	var n int
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info('archives') WHERE name='raw_messages'`).Scan(&n); err != nil {
+		return err
+	}
+	if n == 0 {
+		if _, err := db.ExecContext(ctx, `ALTER TABLE archives ADD COLUMN raw_messages TEXT NOT NULL DEFAULT ''`); err != nil {
 			return err
 		}
-		if n == 0 {
-			if _, err := db.ExecContext(ctx, `ALTER TABLE archives ADD COLUMN raw_messages TEXT NOT NULL DEFAULT ''`); err != nil {
-				return err
-			}
-		}
-		return nil
 	}
+	return nil
 }
 
 // migrationTasksDependsOn adds the depends_on column holding the id of the
