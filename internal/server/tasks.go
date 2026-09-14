@@ -11,9 +11,9 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/hiylo/opencode-backend/internal/automation"
-	"github.com/hiylo/opencode-backend/internal/push"
-	"github.com/hiylo/opencode-backend/internal/store"
+	"github.com/hiylo/startburst-backend/internal/automation"
+	"github.com/hiylo/startburst-backend/internal/push"
+	"github.com/hiylo/startburst-backend/internal/store"
 )
 
 // handleTasks lists (GET), creates (POST) and purges finished (DELETE)

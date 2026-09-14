@@ -5,7 +5,7 @@
 两种模式
   直连引擎（无 token）
     python3 smoke_test.py http://127.0.0.1:18090 sample.wav
-  经 opencode-backend（带 token）
+  经 startburst-backend（带 token）
     python3 smoke_test.py http://192.0.2.150:18880 sample.wav --token ocb_xxx
 
 只依赖标准库。RTF = 处理耗时 / 音频时长，越小越快（<1 表示快于实时）。
@@ -53,7 +53,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("base", help="引擎或后端地址，如 http://127.0.0.1:18090")
     parser.add_argument("wav", help="待识别的 16k/16bit/mono WAV")
-    parser.add_argument("--token", help="给了就走 opencode-backend 的 /api/stt 端点")
+    parser.add_argument("--token", help="给了就走 startburst-backend 的 /api/stt 端点")
     args = parser.parse_args()
 
     base = args.base.rstrip("/")

@@ -5,8 +5,8 @@
 ## 1. 启动
 
 ```bash
-go build -o opencode-backend ./cmd/opencode-backend
-./opencode-backend --listen :18880 --default-admin-password admin
+go build -o startburst-backend ./cmd/startburst-backend
+./startburst-backend --listen :18880 --default-admin-password admin
 ```
 
 确认运行：`curl http://localhost:18880/api/health`

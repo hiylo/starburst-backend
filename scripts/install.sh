@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# opencode-backend 一键安装脚本
+# startburst-backend 一键安装脚本
 #
 # 用法:
 #   curl -fsSL https://<host>/install.sh | bash
@@ -7,9 +7,9 @@
 #   bash scripts/install.sh [--port 18880] [--db sqlite|postgres] [--pg-dsn "..."] [--admin-password "..."]
 #
 # 安装内容:
-#   1. 下载 opencode-backend 单二进制到 /usr/local/bin
-#   2. 写入 systemd 服务 (/etc/systemd/system/opencode-backend.service)
-#   3. 生成默认配置 (/etc/opencode-backend/)
+#   1. 下载 startburst-backend 单二进制到 /usr/local/bin
+#   2. 写入 systemd 服务 (/etc/systemd/system/startburst-backend.service)
+#   3. 生成默认配置 (/etc/startburst-backend/)
 #   4. 启动并开机自启
 #
 #   通过环境变量/参数覆盖默认值:
@@ -129,7 +129,7 @@ if [[ -n "$STT_MAX_CHUNK_BYTES" && ! "$STT_MAX_CHUNK_BYTES" =~ ^[0-9]+$ ]]; then
 fi
 
 # ---------- 二进制下载 ----------
-# GitHub Release 产物命名: opencode-backend-{os}-{arch}
+# GitHub Release 产物命名: startburst-backend-{os}-{arch}
 #   os ∈ linux|darwin，arch ∈ amd64|arm64|arm
 # uname 输出与产物命名不同（x86_64→amd64、aarch64→arm64、armv7l→arm），需要显式映射
 OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
@@ -146,20 +146,20 @@ case "$ARCH" in
   *) echo "!! 不支持的架构: $ARCH" >&2; exit 1 ;;
 esac
 
-BIN_URL="${OCB_BIN_URL:-https://github.com/hiylo/opencode-backend/releases/latest/download/opencode-backend-${OS}-${ARCH}}"
+BIN_URL="${OCB_BIN_URL:-https://github.com/hiylo/startburst-backend/releases/latest/download/startburst-backend-${OS}-${ARCH}}"
 if [[ "$SYSTEMD" -eq 1 ]]; then
   INSTALL_DIR="/usr/local/bin"
-  CONFIG_DIR="/etc/opencode-backend"
-  DATA_DIR="/var/lib/opencode-backend"
-  SERVICE_FILE="/etc/systemd/system/opencode-backend.service"
+  CONFIG_DIR="/etc/startburst-backend"
+  DATA_DIR="/var/lib/startburst-backend"
+  SERVICE_FILE="/etc/systemd/system/startburst-backend.service"
 else
   # 沙箱模式：全部落在 $PREFIX 下，便于非 root / CI 验证。
   INSTALL_DIR="$PREFIX/usr/local/bin"
-  CONFIG_DIR="$PREFIX/etc/opencode-backend"
-  DATA_DIR="$PREFIX/var/lib/opencode-backend"
-  SERVICE_FILE="$PREFIX/etc/systemd/system/opencode-backend.service"
+  CONFIG_DIR="$PREFIX/etc/startburst-backend"
+  DATA_DIR="$PREFIX/var/lib/startburst-backend"
+  SERVICE_FILE="$PREFIX/etc/systemd/system/startburst-backend.service"
 fi
-BIN_PATH="$INSTALL_DIR/opencode-backend"
+BIN_PATH="$INSTALL_DIR/startburst-backend"
 
 echo "==> 下载 $BIN_URL"
 mkdir -p "$INSTALL_DIR"
@@ -167,7 +167,7 @@ if curl -fsSL -o "$BIN_PATH.tmp" "$BIN_URL"; then
   chmod +x "$BIN_PATH.tmp"
   mv "$BIN_PATH.tmp" "$BIN_PATH"
 else
-  echo "!! 下载失败。若在开发机本地运行，可先 go build -o $BIN_PATH ./cmd/opencode-backend 再重试" >&2
+  echo "!! 下载失败。若在开发机本地运行，可先 go build -o $BIN_PATH ./cmd/startburst-backend 再重试" >&2
   exit 1
 fi
 
@@ -177,7 +177,7 @@ mkdir -p "$CONFIG_DIR" "$DATA_DIR" "$(dirname "$SERVICE_FILE")"
 # 生成启动参数。SQLite 数据放 /var/lib, Postgres 用连接串。
 EXEC_ARGS=(--db "$DB" --workers "$WORKERS")
 if [[ "$DB" == "sqlite" ]]; then
-  EXEC_ARGS+=(--sqlite-path "$DATA_DIR/opencode-backend.db")
+  EXEC_ARGS+=(--sqlite-path "$DATA_DIR/startburst-backend.db")
 else
   EXEC_ARGS+=(--pg-dsn "$PG_DSN")
 fi
@@ -221,8 +221,8 @@ done
 if [[ "$SYSTEMD" -eq 1 ]]; then
   echo "==> 启动服务"
   systemctl daemon-reload
-  systemctl enable opencode-backend
-  systemctl restart opencode-backend
+  systemctl enable startburst-backend
+  systemctl restart startburst-backend
 else
   echo "==> 沙箱模式：跳过 systemctl（unit 已写入 $SERVICE_FILE）"
 fi
@@ -234,14 +234,14 @@ if [[ -n "$ADMIN_PASSWORD" ]]; then
 else
   echo "  - 配置页: http://<本机IP>:$PORT/  (默认密码 admin, 请首次登录后修改)"
 fi
-echo "  - 服务: opencode-backend (systemd, :$PORT)"
+echo "  - 服务: startburst-backend (systemd, :$PORT)"
 echo "  - 数据: $DATA_DIR"
-echo "  - 日志: journalctl -u opencode-backend -f"
+echo "  - 日志: journalctl -u startburst-backend -f"
 if [[ -n "$STT_URL" ]]; then
   echo "  - 语音识别: 已接入 $STT_URL"
 else
   echo "  - 语音识别: 未配置（App 需要它在端侧模型不可用时兜底）"
-  echo "    追加: systemctl edit opencode-backend 加 OCB_STT_URL，或重跑本脚本带 --stt-url"
+  echo "    追加: systemctl edit startburst-backend 加 OCB_STT_URL，或重跑本脚本带 --stt-url"
 fi
 # App 侧默认按 opencode 同主机 :18880 推导 backend 地址；端口不一致时必须
 # 在 App 的服务器配置里显式填 backendUrl，否则 App 找不到后端。

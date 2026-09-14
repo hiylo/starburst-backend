@@ -5,7 +5,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/hiylo/opencode-backend/internal/store"
+	"github.com/hiylo/startburst-backend/internal/store"
 )
 
 // handleBatch enqueues one task per target for a single prompt.

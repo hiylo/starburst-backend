@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/hiylo/opencode-backend/internal/store"
+	"github.com/hiylo/startburst-backend/internal/store"
 )
 
 // secureCompare compares two strings in constant time.

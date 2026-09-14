@@ -13,12 +13,12 @@ import (
 
 	"github.com/gorilla/websocket"
 
-	"github.com/hiylo/opencode-backend/internal/auth"
-	"github.com/hiylo/opencode-backend/internal/automation"
-	"github.com/hiylo/opencode-backend/internal/config"
-	"github.com/hiylo/opencode-backend/internal/opencode"
-	"github.com/hiylo/opencode-backend/internal/push"
-	"github.com/hiylo/opencode-backend/internal/store"
+	"github.com/hiylo/startburst-backend/internal/auth"
+	"github.com/hiylo/startburst-backend/internal/automation"
+	"github.com/hiylo/startburst-backend/internal/config"
+	"github.com/hiylo/startburst-backend/internal/opencode"
+	"github.com/hiylo/startburst-backend/internal/push"
+	"github.com/hiylo/startburst-backend/internal/store"
 )
 
 func newTestServer(t *testing.T) *Server {
@@ -222,7 +222,7 @@ func TestSystemEndpointWithToken(t *testing.T) {
 		OpenCodeVersion string `json:"opencodeVersion"`
 	}
 	_ = json.Unmarshal(rec.Body.Bytes(), &sys)
-	if sys.Backend != "opencode-backend" {
+	if sys.Backend != "startburst-backend" {
 		t.Fatalf("bad backend %q", sys.Backend)
 	}
 	if sys.OpenCodeVersion != "v9.9.9" {

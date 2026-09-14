@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/hiylo/opencode-backend/internal/store"
+	"github.com/hiylo/startburst-backend/internal/store"
 )
 
 func newTestManager(t *testing.T) *Manager {

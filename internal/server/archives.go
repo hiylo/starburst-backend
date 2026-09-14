@@ -10,8 +10,8 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/hiylo/opencode-backend/internal/opencode"
-	"github.com/hiylo/opencode-backend/internal/store"
+	"github.com/hiylo/startburst-backend/internal/opencode"
+	"github.com/hiylo/startburst-backend/internal/store"
 )
 
 // handleArchives lists archive metadata (GET) or archives a session (POST).

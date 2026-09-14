@@ -13,13 +13,13 @@ import (
 	"strings"
 	"time"
 
-	"github.com/hiylo/opencode-backend/internal/auth"
-	"github.com/hiylo/opencode-backend/internal/automation"
-	"github.com/hiylo/opencode-backend/internal/config"
-	"github.com/hiylo/opencode-backend/internal/llm"
-	"github.com/hiylo/opencode-backend/internal/opencode"
-	"github.com/hiylo/opencode-backend/internal/push"
-	"github.com/hiylo/opencode-backend/internal/store"
+	"github.com/hiylo/startburst-backend/internal/auth"
+	"github.com/hiylo/startburst-backend/internal/automation"
+	"github.com/hiylo/startburst-backend/internal/config"
+	"github.com/hiylo/startburst-backend/internal/llm"
+	"github.com/hiylo/startburst-backend/internal/opencode"
+	"github.com/hiylo/startburst-backend/internal/push"
+	"github.com/hiylo/startburst-backend/internal/store"
 )
 
 // Server wires all backend components behind an HTTP/WS listener.
@@ -114,7 +114,7 @@ func (s *Server) Start(ctx context.Context) error {
 	}
 	errCh := make(chan error, 1)
 	go func() {
-		log.Printf("opencode-backend listening on %s", s.cfg.ListenAddr)
+		log.Printf("startburst-backend listening on %s", s.cfg.ListenAddr)
 		if err := s.httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			errCh <- err
 		}

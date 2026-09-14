@@ -26,7 +26,7 @@
 ### GET /api/system（需 Token 或 X-Web-Session）
 返回内部地址，因此需要鉴权（APP Token 或 Web Session 二选一）：
 ```json
-{ "backend": "opencode-backend", "opencodeURL": "http://127.0.0.1:4096", "opencodeVersion": "v1.2.3", "db": "sqlite" }
+{ "backend": "startburst-backend", "opencodeURL": "http://127.0.0.1:4096", "opencodeVersion": "v1.2.3", "db": "sqlite" }
 ```
 
 ### GET /（免鉴权）

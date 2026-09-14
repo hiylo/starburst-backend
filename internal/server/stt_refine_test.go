@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/hiylo/opencode-backend/internal/llm"
+	"github.com/hiylo/startburst-backend/internal/llm"
 )
 
 // fakeLLM serves an OpenAI-compatible /chat/completions endpoint. It records

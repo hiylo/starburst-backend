@@ -15,9 +15,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/hiylo/opencode-backend/internal/llm"
-	"github.com/hiylo/opencode-backend/internal/push"
-	"github.com/hiylo/opencode-backend/internal/store"
+	"github.com/hiylo/startburst-backend/internal/llm"
+	"github.com/hiylo/startburst-backend/internal/push"
+	"github.com/hiylo/startburst-backend/internal/store"
 )
 
 // Executor runs claimed tasks against the OpenCode server and reports
@@ -357,7 +357,7 @@ var errCanceled = errors.New("task canceled")
 func (e *Executor) createSession(ctx context.Context, directory string) (string, error) {
 	body, _ := json.Marshal(map[string]any{
 		"directory": directory,
-		"title":     "opencode-backend task",
+		"title":     "startburst-backend task",
 	})
 	resp, err := e.httpClient.Post(e.openCodeBase+"/session", "application/json", bytes.NewReader(body))
 	if err != nil {

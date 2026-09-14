@@ -5,8 +5,8 @@ import (
 	"log"
 	"time"
 
-	"github.com/hiylo/opencode-backend/internal/automation"
-	"github.com/hiylo/opencode-backend/internal/store"
+	"github.com/hiylo/startburst-backend/internal/automation"
+	"github.com/hiylo/startburst-backend/internal/store"
 )
 
 // schedulerInterval is how often scheduled tasks are evaluated. One-shot tasks

@@ -12,7 +12,7 @@ import (
 // DefaultSTTTimeout bounds one round trip to the recognition engine.
 const DefaultSTTTimeout = 30 * time.Second
 
-// Config holds all runtime configuration for opencode-backend.
+// Config holds all runtime configuration for startburst-backend.
 type Config struct {
 	// ListenAddr is the address the HTTP server binds to, e.g. ":8080".
 	ListenAddr string
@@ -60,17 +60,17 @@ type Config struct {
 
 // Version is the semantic version reported by --version. CI 打 tag 时用
 // -ldflags "-X .../config.Version=<tag>" 注入，所以这里必须是 var（const 无法被链接器改写）。
-var Version = "0.1.0"
+var Version = "1.0.0"
 
 // Parse reads configuration from command-line flags and environment variables.
 // Environment variables take precedence over flag defaults where set.
 func Parse(args []string) (*Config, error) {
-	fs := flag.NewFlagSet("opencode-backend", flag.ContinueOnError)
+	fs := flag.NewFlagSet("startburst-backend", flag.ContinueOnError)
 
 	listenAddr := fs.String("listen", envOr("OCB_LISTEN", ":8080"), "HTTP listen address")
 	opencodeURL := fs.String("opencode-url", envOr("OCB_OPENCODE_URL", "http://127.0.0.1:4096"), "local OpenCode server base URL")
 	dbDriver := fs.String("db", envOr("OCB_DB", "sqlite"), "database driver: sqlite or postgres")
-	sqlitePath := fs.String("sqlite-path", envOr("OCB_SQLITE_PATH", "opencode-backend.db"), "SQLite database file path")
+	sqlitePath := fs.String("sqlite-path", envOr("OCB_SQLITE_PATH", "startburst-backend.db"), "SQLite database file path")
 	postgresDSN := fs.String("pg-dsn", os.Getenv("OCB_PG_DSN"), "PostgreSQL connection string")
 	defaultAdmin := fs.String("default-admin-password", envOr("OCB_ADMIN_PASSWORD", "admin"), "default web admin password (used only on first initialization)")
 	defaultToken := fs.String("default-token", os.Getenv("OCB_DEFAULT_TOKEN"), "optional pre-provisioned API token registered on first run (empty = off)")

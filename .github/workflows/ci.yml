@@ -63,11 +63,11 @@ jobs:
       - name: Shell syntax check
         run: bash -n scripts/install.sh
       - name: Build local binary
-        run: go build -o ./opencode-backend ./cmd/opencode-backend
+        run: go build -o ./startburst-backend ./cmd/startburst-backend
       - name: Sandbox install with special-character DSN
         run: |
           sandbox="$RUNNER_TEMP/sandbox"
-          OCB_BIN_URL="file://$(pwd)/opencode-backend" \
+          OCB_BIN_URL="file://$(pwd)/startburst-backend" \
             bash scripts/install.sh --prefix "$sandbox" --port 18080 \
               --db postgres --workers 2 \
               --pg-dsn 'postgres://user:p@ss@127.0.0.1:5432/db?sslmode=disable&application_name=a"b\c' \
@@ -75,10 +75,10 @@ jobs:
       - name: Verify generated unit and binary
         run: |
           sandbox="$RUNNER_TEMP/sandbox"
-          test -x "$sandbox/usr/local/bin/opencode-backend"
-          "$sandbox/usr/local/bin/opencode-backend" --version
-          grep -F 'sslmode=disable&application_name' "$sandbox/etc/systemd/system/opencode-backend.service"
-          ! grep -E '@(BIN_PATH|PORT|EXEC_QUOTED_ARGS|OPENCODE_URL|DATA_DIR)@' "$sandbox/etc/systemd/system/opencode-backend.service"
+          test -x "$sandbox/usr/local/bin/startburst-backend"
+          "$sandbox/usr/local/bin/startburst-backend" --version
+          grep -F 'sslmode=disable&application_name' "$sandbox/etc/systemd/system/startburst-backend.service"
+          ! grep -E '@(BIN_PATH|PORT|EXEC_QUOTED_ARGS|OPENCODE_URL|DATA_DIR)@' "$sandbox/etc/systemd/system/startburst-backend.service"
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')
@@ -111,16 +111,16 @@ jobs:
           GOARCH: ${{ matrix.arch }}
           GOARM: ${{ matrix.goarm }}
         run: |
-          name="opencode-backend-${{ matrix.os }}-${{ matrix.arch }}"
+          name="startburst-backend-${{ matrix.os }}-${{ matrix.arch }}"
           if [ "${{ matrix.os }}" = "windows" ]; then name="$name.exe"; fi
           mkdir -p dist
           go build -trimpath \
-            -ldflags "-s -w -X github.com/hiylo/opencode-backend/internal/config.Version=${GITHUB_REF_NAME}" \
-            -o "dist/$name" ./cmd/opencode-backend
+            -ldflags "-s -w -X github.com/hiylo/startburst-backend/internal/config.Version=${GITHUB_REF_NAME}" \
+            -o "dist/$name" ./cmd/startburst-backend
       - uses: actions/upload-artifact@v4
         with:
-          name: opencode-backend-${{ matrix.os }}-${{ matrix.arch }}
-          path: dist/opencode-backend-${{ matrix.os }}-${{ matrix.arch }}*
+          name: startburst-backend-${{ matrix.os }}-${{ matrix.arch }}
+          path: dist/startburst-backend-${{ matrix.os }}-${{ matrix.arch }}*
 
   # 合并各平台产物并创建 GitHub Release。install.sh 从 releases/latest/download/
   # 下载二进制，只有 Release 附件能满足，上传 artifact 本身不够。
@@ -146,4 +146,4 @@ jobs:
           gh release create "$tag" dist/* \
             --verify-tag \
             --title "$tag" \
-            --notes "opencode-backend $tag"
+            --notes "startburst-backend $tag"

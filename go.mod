@@ -1,4 +1,4 @@
-module github.com/hiylo/opencode-backend
+module github.com/hiylo/startburst-backend
 
 go 1.25.0
 

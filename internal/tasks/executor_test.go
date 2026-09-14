@@ -12,8 +12,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/hiylo/opencode-backend/internal/push"
-	"github.com/hiylo/opencode-backend/internal/store"
+	"github.com/hiylo/startburst-backend/internal/push"
+	"github.com/hiylo/startburst-backend/internal/store"
 )
 
 // concurrencyProbe tracks how many goroutines are inside a critical section at

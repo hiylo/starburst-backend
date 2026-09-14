@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/hiylo/opencode-backend/internal/push"
+	"github.com/hiylo/startburst-backend/internal/push"
 )
 
 // handleHealth reports backend liveness and upstream OpenCode health.
@@ -51,7 +51,7 @@ func (s *Server) handleSystem(w http.ResponseWriter, r *http.Request) {
 
 	version, _ := s.openCode.GetVersion(ctx)
 	writeJSON(w, http.StatusOK, map[string]any{
-		"backend":         "opencode-backend",
+		"backend":         "startburst-backend",
 		"opencodeURL":     s.cfg.OpenCodeURL,
 		"opencodeVersion": version,
 		"db":              s.cfg.DBDriver,

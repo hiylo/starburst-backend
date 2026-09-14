@@ -488,7 +488,7 @@ async function loadOverview() {
     const sysRes = await api("/api/system", { headers: hdr() });
     const sys = await sysRes.json();
     document.getElementById("sysInfo").textContent =
-      `后端 opencode-backend · 上游 ${sys.opencodeURL} · OpenCode 版本 ${sys.opencodeVersion || "未知"} · 数据库 ${sys.db}`;
+      `后端 startburst-backend · 上游 ${sys.opencodeURL} · OpenCode 版本 ${sys.opencodeVersion || "未知"} · 数据库 ${sys.db}`;
   } catch (_) { return; }
 
   const health = await fetch("/api/health").then(r => r.json()).catch(() => ({}));
