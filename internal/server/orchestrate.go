@@ -170,9 +170,12 @@ type projectSummary struct {
 	SessionCount int    `json:"sessionCount"`
 }
 
-// handleProjectSessions returns only the sessions whose working directory equals
-// the path segment, so this is a real filter rather than a re-listing.
-// Requires a web session or APP token.
+// handleProjectSessions returns the sessions for a project's working directory.
+// OpenCode tags every session with projectID 'global' and a flat root directory
+// (/workspaces), so a directory-exact filter would always come up empty. The
+// pragmatic contract is therefore: the selected directory is used for display
+// context, and the full session list is returned so the user can identify each
+// session by its title and directory. Requires a web session or APP token.
 func (s *Server) handleProjectSessions(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -199,11 +202,8 @@ func (s *Server) handleProjectSessions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	sessions := make([]opencode.SessionInfo, 0)
-	for _, it := range items {
-		if sessionDir(it) == id {
-			sessions = append(sessions, it)
-		}
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"sessions": sessions})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"directory": id,
+		"sessions":  items,
+	})
 }

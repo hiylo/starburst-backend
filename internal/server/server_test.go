@@ -548,32 +548,36 @@ func TestProjectsGroupAndFilter(t *testing.T) {
 		t.Fatalf("projects = %+v, want one group for /w", proj.Projects)
 	}
 
-	// The drill-down returns only sessions of that directory.
+	// The drill-down returns the full session list for the selected directory
+	// (OpenCode tags every session 'global' with a flat root directory, so a
+	// directory-exact filter would always be empty).
 	rec = s.do(t, http.MethodGet, "/api/projects/%2Fw", "", th)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("project sessions: %d %s", rec.Code, rec.Body.String())
 	}
 	var sess struct {
-		Sessions []struct {
+		Directory string `json:"directory"`
+		Sessions  []struct {
 			ID string `json:"id"`
 		} `json:"sessions"`
 	}
 	_ = json.Unmarshal(rec.Body.Bytes(), &sess)
+	if sess.Directory != "/w" {
+		t.Fatalf("directory = %q, want /w", sess.Directory)
+	}
 	if len(sess.Sessions) != 1 || sess.Sessions[0].ID != "ses_a" {
-		t.Fatalf("sessions = %+v, want ses_a only", sess.Sessions)
+		t.Fatalf("sessions = %+v, want ses_a", sess.Sessions)
 	}
 
-	// An unknown directory yields an empty list, not an error.
+	// An unknown directory still returns the full list (no directory-exact
+	// filtering) but echoes the requested directory.
 	rec = s.do(t, http.MethodGet, "/api/projects/%2Fother", "", th)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("unknown dir: %d", rec.Code)
 	}
-	var empty struct {
-		Sessions []struct{} `json:"sessions"`
-	}
-	_ = json.Unmarshal(rec.Body.Bytes(), &empty)
-	if len(empty.Sessions) != 0 {
-		t.Fatalf("unknown dir returned %d sessions", len(empty.Sessions))
+	_ = json.Unmarshal(rec.Body.Bytes(), &sess)
+	if sess.Directory != "/other" || len(sess.Sessions) != 1 {
+		t.Fatalf("unknown dir: directory=%q sessions=%d", sess.Directory, len(sess.Sessions))
 	}
 
 	// A missing id is a client error.

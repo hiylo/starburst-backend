@@ -219,7 +219,7 @@
         <div class="row">
           <button class="ghost" onclick="closeProjectSessions()">收起</button>
         </div>
-        <table id="projectSessionTable"><thead><tr><th>标题</th><th>会话 ID</th><th>模型</th><th>Agent</th><th>Token(输入/输出)</th><th>状态</th><th>更新时间</th></tr></thead><tbody></tbody></table>
+        <table id="projectSessionTable"><thead><tr><th>标题</th><th>会话 ID</th><th>模型</th><th>Agent</th><th>目录</th><th>Token(输入/输出)</th><th>状态</th><th>更新时间</th></tr></thead><tbody></tbody></table>
       </div>
     </div>
 
@@ -623,28 +623,31 @@ async function loadProjectSessions(dir) {
   card.classList.remove("hidden");
   document.getElementById("projectSessionDir").textContent = dir;
   const tb = document.querySelector("#projectSessionTable tbody");
-  tb.innerHTML = `<tr><td colspan="7" class="muted">加载中…</td></tr>`;
+  tb.innerHTML = `<tr><td colspan="8" class="muted">加载中…</td></tr>`;
   const res = await api("/api/projects/" + encodeURIComponent(dir), { headers: appHeaders() });
   const data = await res.json();
-  if (!res.ok) { tb.innerHTML = `<tr><td colspan="7" class="muted">${escapeHtml(data.error || "加载失败")}</td></tr>`; return; }
+  if (!res.ok) { tb.innerHTML = `<tr><td colspan="8" class="muted">${escapeHtml(data.error || "加载失败")}</td></tr>`; return; }
   const list = data.sessions || [];
   tb.innerHTML = "";
   for (const s of list) {
     const cls = s.busy ? "busy" : "idle";
     const label = s.busy ? "忙碌" : "空闲";
     const tokens = s.inputTokens != null ? `${fmtNum(s.inputTokens)} / ${fmtNum(s.outputTokens)}` : "-";
+    const model = (s.model && typeof s.model === "object" && s.model.id) ? s.model.id : (s.model || "-");
+    const sdir = (s.directory || s.path || "").toString().replace(/^\/workspaces\/?/, "~/");
     tb.insertAdjacentHTML("beforeend", `<tr>
-      <td class="clip" title="${escapeHtml(s.id)}">${escapeHtml(s.title || s.slug || s.id)}</td>
-      <td class="mono clip" title="${escapeHtml(s.id)}">${escapeHtml(s.id)}</td>
-      <td class="clip">${escapeHtml(s.model) || "-"}</td>
+      <td class="clip" title="${escapeHtml(s.title || s.id)}">${escapeHtml(s.title || s.slug || s.id)}</td>
+      <td class="mono clip muted" title="${escapeHtml(s.id)}">${escapeHtml(s.id.slice(0, 22))}</td>
+      <td class="clip">${escapeHtml(model)}</td>
       <td>${escapeHtml(s.agent) || "-"}</td>
+      <td class="mono clip muted" title="${escapeHtml(s.directory || s.path || "")}">${escapeHtml(sdir)}</td>
       <td class="mono">${tokens}</td>
       <td><span class="badge ${cls}">${label}</span></td>
       <td>${s.updatedMs ? new Date(s.updatedMs).toLocaleString() : "-"}</td>
     </tr>`);
   }
   if (!list.length) {
-    tb.insertAdjacentHTML("beforeend", `<tr><td colspan="7" class="muted">该项目下暂无会话</td></tr>`);
+    tb.insertAdjacentHTML("beforeend", `<tr><td colspan="8" class="muted">暂无会话</td></tr>`);
   }
 }
 function closeProjectSessions() {
