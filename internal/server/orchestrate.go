@@ -2,9 +2,11 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/url"
+	"path"
 	"strings"
 	"time"
 
@@ -72,30 +74,99 @@ func (s *Server) handleProjects(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
 
+	// 会话元数据的 directory 字段统一是工作区根（/workspaces，projectID 全为
+	// 'global'），按它分组只能得到一个目录。项目列表改用上游 project 集合——
+	// 每个项目带真实 worktree 子目录，这与用户对"不同项目在不同目录"的认知
+	// 一致。会话数按会话 title 与 worktree 叶目录名的关联统计（尽力而为）。
+	rawProjects, err := s.openCode.ListProjects(ctx)
+	if err != nil {
+		writeErr(w, http.StatusBadGateway, "opencode: "+err.Error())
+		return
+	}
+	projectsRaw := struct {
+		Projects []struct {
+			ID       string `json:"id"`
+			Worktree string `json:"worktree"`
+		} `json:"projects"`
+	}{}
+	if b, err := json.Marshal(rawProjects); err == nil {
+		_ = json.Unmarshal(b, &projectsRaw)
+	}
+	upstreamProjects := projectsRaw.Projects
+	// 上游可能直接返回数组（而非 {projects: [...]}）。
+	if len(upstreamProjects) == 0 {
+		var arr []struct {
+			ID       string `json:"id"`
+			Worktree string `json:"worktree"`
+		}
+		if b, err := json.Marshal(rawProjects); err == nil {
+			if err := json.Unmarshal(b, &arr); err == nil {
+				upstreamProjects = arr
+			}
+		}
+	}
+
 	items, err := s.openCode.ListSessions(ctx)
 	if err != nil {
 		writeErr(w, http.StatusBadGateway, "opencode: "+err.Error())
 		return
 	}
+	titlesByDir := sessionsByWorktreeLeaf(items)
 
-	projects := make([]projectSummary, 0)
-	seen := make(map[string]int)
-	for _, it := range items {
-		dir := sessionDir(it)
-		if i, ok := seen[dir]; ok {
-			projects[i].SessionCount++
-			continue
+	projects := make([]projectSummary, 0, len(upstreamProjects))
+	for _, p := range upstreamProjects {
+		wt := strings.TrimRight(p.Worktree, "/")
+		if wt == "" || wt == "/" {
+			continue // 跳过 global 根项目，只列真实子目录
 		}
-		seen[dir] = len(projects)
-		projects = append(projects, projectSummary{ID: dir, Directory: dir, SessionCount: 1})
+		leaf := path.Base(wt)
+		projects = append(projects, projectSummary{
+			ID:           wt,
+			Directory:    wt,
+			Title:        p.ID,
+			SessionCount: titlesByDir[leaf],
+		})
+	}
+	if len(projects) == 0 {
+		// 上游没有 project 元数据时退回按会话目录分组。
+		seen := make(map[string]int)
+		for _, it := range items {
+			dir := sessionDir(it)
+			if i, ok := seen[dir]; ok {
+				projects[i].SessionCount++
+				continue
+			}
+			seen[dir] = len(projects)
+			projects = append(projects, projectSummary{ID: dir, Directory: dir, SessionCount: 1})
+		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"projects": projects})
+}
+
+// sessionsByWorktreeLeaf buckets session titles by the leaf path segment of
+// their directory (/workspaces/components → "components"). Title may or may not
+// mention the project; counting sessions whose title contains the leaf name
+// is a best-effort association and only affects the displayed count.
+func sessionsByWorktreeLeaf(items []opencode.SessionInfo) map[string]int {
+	out := make(map[string]int)
+	for _, it := range items {
+		leaf := path.Base(strings.TrimRight(sessionDir(it), "/"))
+		out[leaf]++
+		// title 也做一次软匹配，提高命中率。
+		if it.Title != "" {
+			if s := path.Base(strings.TrimRight(it.Title, "/")); s != "" && s != leaf {
+				out[s]++
+			}
+		}
+	}
+	return out
 }
 
 // projectSummary groups the sessions of one working directory.
 type projectSummary struct {
 	ID           string `json:"id"`
 	Directory    string `json:"directory"`
+	Title        string `json:"title,omitempty"`
 	SessionCount int    `json:"sessionCount"`
 }
 

@@ -1003,7 +1003,7 @@ function appendStreamLine(text) {
 }
 function ensureStream(force) {
   const t = localStorage.getItem(APP_TOKEN_KEY) || "";
-  if (!t && !session) {
+  if (!session && !t) {
     streamState("未连接");
     show(document.getElementById("streamMsg"), "先登录，或在右上角填入 APP Token 并保存，再打开事件流");
     return;
@@ -1011,9 +1011,10 @@ function ensureStream(force) {
   if (streamES && !force) return;
   if (streamES) { streamES.close(); streamES = null; }
   document.getElementById("streamToggle").textContent = "停止";
-  // EventSource 不能自定义请求头：有 APP token 用 token，否则用登录会话
-  // 通过 ?session= 连接（后端已接受）。
-  const cred = t ? "token=" + encodeURIComponent(t) : "session=" + encodeURIComponent(session);
+  // EventSource 不能设自定义头。浏览器页面优先用登录会话（登录后一定有效），
+  // 只有未登录时才回退 APP token——本地残留的无效 token 不会再把页面打回
+  // 401 断开（后端已接受 ?session= 校验）。
+  const cred = session ? "session=" + encodeURIComponent(session) : "token=" + encodeURIComponent(t);
   const es = new EventSource("/api/stream?" + cred);
   streamES = es;
   streamState("连接中…");

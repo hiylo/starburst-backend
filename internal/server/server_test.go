@@ -43,6 +43,10 @@ func newTestServer(t *testing.T) *Server {
 			_, _ = w.Write([]byte(`{"healthy":true,"version":"v9.9.9"}`))
 		case "/session":
 			_, _ = w.Write([]byte(`[{"id":"ses_a","slug":"alpha","title":"Alpha","directory":"/w","agent":"build","model":{"id":"m1"},"cost":0,"tokens":{"input":1,"output":1,"reasoning":1},"time":{"created":1000,"updated":2000}}]`))
+		case "/project":
+			// 无真实 project 元数据时返回空数组，handleProjects 应回退到
+			// 按会话目录分组（测试断言依赖该回退路径）。
+			_, _ = w.Write([]byte(`[]`))
 		case "/session/status":
 			_, _ = w.Write([]byte(`{"ses_a":{"type":"busy"}}`))
 		case "/config":
