@@ -56,15 +56,18 @@ func sessionDir(it opencode.SessionInfo) string {
 
 // handleProjects lists OpenCode sessions grouped by working directory. Each
 // project carries its directory as id plus its session count, so clients can
-// drill down via /api/projects/{id}/sessions. Requires a valid APP token.
+// drill down via /api/projects/{id}/sessions. Requires a web session or APP
+// token.
 func (s *Server) handleProjects(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
-	if _, ok := s.requireToken(r); !ok {
-		writeErr(w, http.StatusUnauthorized, "invalid token")
-		return
+	if !s.requireWeb(r) {
+		if _, ok := s.requireToken(r); !ok {
+			writeErr(w, http.StatusUnauthorized, "web session or APP token required")
+			return
+		}
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
@@ -98,15 +101,17 @@ type projectSummary struct {
 
 // handleProjectSessions returns only the sessions whose working directory equals
 // the path segment, so this is a real filter rather than a re-listing.
-// Requires a valid APP token.
+// Requires a web session or APP token.
 func (s *Server) handleProjectSessions(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
-	if _, ok := s.requireToken(r); !ok {
-		writeErr(w, http.StatusUnauthorized, "invalid token")
-		return
+	if !s.requireWeb(r) {
+		if _, ok := s.requireToken(r); !ok {
+			writeErr(w, http.StatusUnauthorized, "web session or APP token required")
+			return
+		}
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()

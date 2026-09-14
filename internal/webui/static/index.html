@@ -416,8 +416,14 @@ function escapeHtml(s) {
 function fmtDate(v) { return v ? new Date(v).toLocaleString() : "-"; }
 
 async function api(path, opts) {
+  opts = opts || {};
   const res = await fetch(path, opts);
-  if (res.status === 401 && session) {
+  // 仅在请求携带 web session 头（即该请求本就依赖管理员会话）且收到 401
+  // 时才判定会话过期。用 APP token 的请求失败（如 token 被撤销）不应连坐
+  // 清掉仍有效的 web session，否则切菜单时任何一个 token 请求失败都会把
+  // 用户踢回登录页。
+  const usesWebSession = !!(opts.headers && (opts.headers["X-Web-Session"] || opts.headers["x-web-session"]));
+  if (res.status === 401 && session && usesWebSession) {
     session = "";
     localStorage.removeItem(SESSION_KEY);
     show(document.getElementById("loginMsg"), "会话已过期，请重新登录");

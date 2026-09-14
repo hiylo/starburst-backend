@@ -17,11 +17,13 @@ import (
 )
 
 // handleTasks lists (GET), creates (POST) and purges finished (DELETE)
-// orchestration tasks. All require a valid APP token.
+// orchestration tasks. Requires a web session (admin UI) or an APP token.
 func (s *Server) handleTasks(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.requireToken(r); !ok {
-		writeErr(w, http.StatusUnauthorized, "invalid token")
-		return
+	if !s.requireWeb(r) {
+		if _, ok := s.requireToken(r); !ok {
+			writeErr(w, http.StatusUnauthorized, "web session or APP token required")
+			return
+		}
 	}
 	switch r.Method {
 	case http.MethodGet:

@@ -27,11 +27,13 @@ func isValidSessionID(id string) bool {
 }
 
 // handleArchives lists archive metadata (GET) or archives a session (POST).
-// Requires an APP token.
+// Requires a web session or APP token.
 func (s *Server) handleArchives(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.requireToken(r); !ok {
-		writeErr(w, http.StatusUnauthorized, "invalid token")
-		return
+	if !s.requireWeb(r) {
+		if _, ok := s.requireToken(r); !ok {
+			writeErr(w, http.StatusUnauthorized, "web session or APP token required")
+			return
+		}
 	}
 	switch r.Method {
 	case http.MethodGet:
@@ -119,9 +121,11 @@ func (s *Server) archiveSession(w http.ResponseWriter, r *http.Request) {
 
 // handleArchiveByID gets (GET) or deletes (DELETE) a single archive.
 func (s *Server) handleArchiveByID(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.requireToken(r); !ok {
-		writeErr(w, http.StatusUnauthorized, "invalid token")
-		return
+	if !s.requireWeb(r) {
+		if _, ok := s.requireToken(r); !ok {
+			writeErr(w, http.StatusUnauthorized, "web session or APP token required")
+			return
+		}
 	}
 	id := r.URL.Path[len("/api/archives/"):]
 	if id == "" {
