@@ -11,6 +11,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"time"
@@ -167,6 +168,17 @@ func (e *Executor) runClaimed(ctx context.Context, t *store.Task) {
 		g.mu.Lock()
 		defer g.mu.Unlock()
 	}
+	// A panic in execute must not kill the whole process (Go does not isolate
+	// goroutine panics): mark the task failed so it can be inspected and retried,
+	// then return to the worker loop.
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("tasks: worker panic on task %s: %v\n%s", t.ID, r, debug.Stack())
+			ctx2, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_ = e.store.FailTask(ctx2, t.ID, fmt.Sprintf("panic: %v", r))
+		}
+	}()
 	e.execute(ctx, t)
 }
 

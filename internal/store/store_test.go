@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -619,4 +620,110 @@ func assertRetentionPurge(t *testing.T, st Store) {
 
 func TestPurgeFinishedTasks(t *testing.T) {
 	assertRetentionPurge(t, newTestStore(t))
+}
+
+// TestSessionEventsRoundTrip covers the global event collector's persistence
+// path: insert, forward-cursor list with filters, and retention cleanup.
+func TestSessionEventsRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	st := newTestStore(t)
+
+	base := time.Now().UTC().Add(-time.Hour)
+	for i, ev := range []*SessionEvent{
+		{SessionID: "ses_a", EventType: "session.created", Payload: json.RawMessage(`{"type":"session.created"}`)},
+		{SessionID: "ses_a", EventType: "message.updated", Payload: json.RawMessage(`{"type":"message.updated"}`)},
+		{SessionID: "ses_b", EventType: "session.created", Payload: json.RawMessage(`{"type":"session.created"}`)},
+	} {
+		ev.CreatedAt = base.Add(time.Duration(i+1) * time.Second)
+		if err := st.InsertEvent(ctx, ev); err != nil {
+			t.Fatalf("insert %d: %v", i, err)
+		}
+	}
+
+	// Unfiltered, oldest first.
+	all, err := st.ListEvents(ctx, "", time.Time{}, 0)
+	if err != nil {
+		t.Fatalf("list all: %v", err)
+	}
+	if len(all) != 3 || all[0].SessionID != "ses_a" || all[2].SessionID != "ses_b" {
+		t.Fatalf("unexpected list: %+v", all)
+	}
+	if string(all[0].Payload) != `{"type":"session.created"}` {
+		t.Fatalf("payload lost: %s", all[0].Payload)
+	}
+
+	// sessionId filter.
+	only, err := st.ListEvents(ctx, "ses_a", time.Time{}, 0)
+	if err != nil {
+		t.Fatalf("list filter: %v", err)
+	}
+	if len(only) != 2 {
+		t.Fatalf("filtered len %d, want 2", len(only))
+	}
+
+	// Forward cursor: only events strictly after the cursor.
+	after, err := st.ListEvents(ctx, "", all[0].CreatedAt, 0)
+	if err != nil {
+		t.Fatalf("list since: %v", err)
+	}
+	if len(after) != 2 || after[0].ID != all[1].ID {
+		t.Fatalf("since cursor returned wrong rows: %+v", after)
+	}
+
+	// limit caps the row count.
+	limited, err := st.ListEvents(ctx, "", time.Time{}, 2)
+	if err != nil {
+		t.Fatalf("list limit: %v", err)
+	}
+	if len(limited) != 2 {
+		t.Fatalf("limit len %d, want 2", len(limited))
+	}
+
+	// Retention janitor removes only rows older than the cutoff. Events sit at
+	// base+1s/+2s/+3s, so a cutoff of base+2s removes exactly the first.
+	n, err := st.DeleteEventsOlderThan(ctx, base.Add(2*time.Second))
+	if err != nil {
+		t.Fatalf("delete old: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("deleted %d, want 1", n)
+	}
+	remaining, _ := st.ListEvents(ctx, "", time.Time{}, 0)
+	if len(remaining) != 2 {
+		t.Fatalf("after cleanup len %d, want 2", len(remaining))
+	}
+	if remaining[0].SessionID != "ses_a" || remaining[0].EventType != "message.updated" {
+		t.Fatalf("wrong survivors: %+v", remaining[0])
+	}
+}
+
+// TestSessionEventSanitizePayload regresses PostgreSQL jsonb rejecting the
+// literal \u0000 escape: inserting such a payload must not fail, and the stored
+// payload must have the NUL escape replaced with U+FFFD.
+func TestSessionEventSanitizePayload(t *testing.T) {
+	if got := string(sanitizePayloadForJSONB([]byte(`{"delta":"\u0000"}`))); got != `{"delta":"\ufffd"}` {
+		t.Fatalf("sanitize NUL escape = %q", got)
+	}
+	if got := string(sanitizePayloadForJSONB([]byte(`{"delta":"a"}`))); got != `{"delta":"a"}` {
+		t.Fatalf("sanitize untouched payload = %q", got)
+	}
+
+	ctx := context.Background()
+	st := newTestStore(t)
+	ev := &SessionEvent{
+		SessionID: "ses_null",
+		EventType: "message.part.delta",
+		Payload:   json.RawMessage(`{"delta":"\u0000boom"}`),
+		CreatedAt: time.Now().UTC(),
+	}
+	if err := st.InsertEvent(ctx, ev); err != nil {
+		t.Fatalf("insert NUL payload: %v", err)
+	}
+	rows, err := st.ListEvents(ctx, "ses_null", time.Time{}, 0)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(rows) != 1 || string(rows[0].Payload) != `{"delta":"\ufffdboom"}` {
+		t.Fatalf("stored payload = %s", rows[0].Payload)
+	}
 }

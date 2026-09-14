@@ -237,18 +237,30 @@ func (s *sqlStore) CancelTask(ctx context.Context, id string) (bool, error) {
 // already failed or was canceled, but was later retried and succeeded). The
 // stored block reason is cleared. Returns the ids of the re-queued tasks so the
 // caller can push a per-task event.
+//
+// The promotion is a single atomic UPDATE ... RETURNING: the SELECT-then-UPDATE
+// split allowed a task inserted concurrently (after the read, before the write)
+// to be permanently skipped. Both SQLite (>=3.35) and PostgreSQL support
+// RETURNING, so one statement both claims and reports the promoted rows.
 func (s *sqlStore) PromotePendingDependents(ctx context.Context, upstreamID string) ([]string, error) {
-	ids, err := s.dependentIDs(ctx, upstreamID, TaskPending, TaskBlocked)
+	rows, err := s.db.QueryContext(ctx, s.q(`
+		UPDATE tasks SET status = ?, error = '', available_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+		WHERE depends_on = ? AND status IN (?, ?)
+		RETURNING id`),
+		TaskQueued, upstreamID, TaskPending, TaskBlocked)
 	if err != nil {
 		return nil, err
 	}
-	if len(ids) == 0 {
-		return ids, nil
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
 	}
-	if _, err := s.db.ExecContext(ctx, s.q(`
-		UPDATE tasks SET status = ?, error = '', available_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
-		WHERE depends_on = ? AND status IN (?, ?)`),
-		TaskQueued, upstreamID, TaskPending, TaskBlocked); err != nil {
+	if err := rows.Err(); err != nil {
 		return nil, err
 	}
 	return ids, nil
@@ -380,6 +392,36 @@ func (s *sqlStore) SetTaskLastFiredAt(ctx context.Context, id string, at time.Ti
 	_, err := s.db.ExecContext(ctx,
 		s.q(`UPDATE tasks SET last_fired_at = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`), at, id)
 	return err
+}
+
+// SetTaskLastFiredAtPtr sets the cursor to at, or to NULL when at is nil (used
+// to roll back a claimed fire whose clone failed, restoring the pre-claim state
+// so the next scheduler tick retries the occurrence).
+func (s *sqlStore) SetTaskLastFiredAtPtr(ctx context.Context, id string, at *time.Time) error {
+	_, err := s.db.ExecContext(ctx,
+		s.q(`UPDATE tasks SET last_fired_at = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`), at, id)
+	return err
+}
+
+// ClaimRecurringFire atomically advances the last_fired_at cursor of a recurring
+// template to `now`, but only if it still equals `expected` (nil means "never
+// fired"). Returns true only when this caller won the race; a concurrent
+// scheduler that already advanced the cursor gets false and must skip its tick,
+// otherwise two schedulers would each clone the task for the same due time.
+func (s *sqlStore) ClaimRecurringFire(ctx context.Context, id string, expected *time.Time, now time.Time) (bool, error) {
+	res, err := s.db.ExecContext(ctx, s.q(`
+		UPDATE tasks SET last_fired_at = ?, updated_at = CURRENT_TIMESTAMP
+		WHERE id = ? AND status = ? AND
+		      ((last_fired_at IS NULL AND ? IS NULL) OR last_fired_at = ?)`),
+		now, id, TaskScheduled, expected, expected)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
 }
 
 // CancelScheduledTask marks a scheduled (one-shot or recurring) task canceled.

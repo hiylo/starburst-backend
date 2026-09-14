@@ -2,14 +2,39 @@ package server
 
 import (
 	"context"
+	"errors"
 	"log"
 	"net/http"
 	"strings"
 	"time"
 
+	"github.com/gorilla/websocket"
+
 	"github.com/hiylo/startburst-backend/internal/config"
 	"github.com/hiylo/startburst-backend/internal/push"
 )
+
+// WebSocket keep-alive timing: we ping every wsPingInterval and drop the
+// connection if no pong arrives within wsPongWait. Writes must complete within
+// wsWriteWait. These mirror the gorilla chat example's recommended values.
+const (
+	wsWriteWait  = 10 * time.Second
+	wsPongWait   = 60 * time.Second
+	wsPingInterval = (wsPongWait * 9) / 10
+)
+
+// readBody 读取 JSON 请求体（限 4MiB），超限返回 413，解析失败返回 400。
+func readBody(w http.ResponseWriter, r *http.Request, v any) bool {
+	if err := readJSONLimited(w, r, v); err != nil {
+		if errors.Is(err, errBodyTooLarge) {
+			writeErr(w, http.StatusRequestEntityTooLarge, "request body too large")
+		} else {
+			writeErr(w, http.StatusBadRequest, "invalid request body")
+		}
+		return false
+	}
+	return true
+}
 
 // handleHealth reports backend liveness and upstream OpenCode health.
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -68,8 +93,7 @@ func (s *Server) handleWebSession(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			Password string `json:"password"`
 		}
-		if err := readJSON(r, &req); err != nil {
-			writeErr(w, http.StatusBadRequest, "invalid request body")
+		if !readBody(w, r, &req) {
 			return
 		}
 		key := clientKey(r)
@@ -119,8 +143,7 @@ func (s *Server) handleWebPassword(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		NewPassword string `json:"newPassword"`
 	}
-	if err := readJSON(r, &req); err != nil {
-		writeErr(w, http.StatusBadRequest, "invalid request body")
+	if !readBody(w, r, &req) {
 		return
 	}
 	if err := s.auth.SetPassword(r.Context(), req.NewPassword); err != nil {
@@ -151,8 +174,7 @@ func (s *Server) handleTokens(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			Name string `json:"name"`
 		}
-		if err := readJSON(r, &req); err != nil {
-			writeErr(w, http.StatusBadRequest, "invalid request body")
+		if !readBody(w, r, &req) {
 			return
 		}
 		if strings.TrimSpace(req.Name) == "" {
@@ -211,6 +233,34 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 	hc := s.hub.Register(conn)
 	defer s.hub.Unregister(hc)
+
+	// 半开连接防护：客户端必须周期回 pong，否则连接会被判定失联并回收，
+	// 避免只发 FIN 而不关闭 TCP 的坏客户端永久占用连接与 hub 槽位。
+	conn.SetReadDeadline(time.Now().Add(wsPongWait))
+	conn.SetPongHandler(func(string) error {
+		return conn.SetReadDeadline(time.Now().Add(wsPongWait))
+	})
+	conn.SetReadLimit(1024) // 入站仅 keep-alive，任何大数据帧都视为异常
+
+	// 周期性 ping 探活，同时重置写 deadline。
+	pingTicker := time.NewTicker(wsPingInterval)
+	defer pingTicker.Stop()
+	pingDone := make(chan struct{})
+	go func() {
+		for {
+			select {
+			case <-pingDone:
+				return
+			case <-pingTicker.C:
+				if err := conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(wsWriteWait)); err != nil {
+					// 写失败说明连接已死；主动关闭读循环。
+					_ = conn.Close()
+					return
+				}
+			}
+		}
+	}()
+	defer close(pingDone)
 
 	// Notify the client it is subscribed.
 	_ = hc.Write(push.Message{Type: "subscribed"})

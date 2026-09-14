@@ -123,8 +123,7 @@ func (s *Server) handleTaskGenerate(w http.ResponseWriter, r *http.Request) {
 		Draft       *taskPlanDraft `json:"draft"`
 		Instruction string         `json:"instruction"`
 	}
-	if err := readJSON(r, &req); err != nil {
-		writeErr(w, http.StatusBadRequest, "invalid request body")
+	if !readBody(w, r, &req) {
 		return
 	}
 

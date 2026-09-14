@@ -67,7 +67,7 @@ var Version = "1.0.0"
 func Parse(args []string) (*Config, error) {
 	fs := flag.NewFlagSet("startburst-backend", flag.ContinueOnError)
 
-	listenAddr := fs.String("listen", envOr("OCB_LISTEN", ":8080"), "HTTP listen address")
+	listenAddr := fs.String("listen", envOr("OCB_LISTEN", ":18880"), "HTTP listen address")
 	opencodeURL := fs.String("opencode-url", envOr("OCB_OPENCODE_URL", "http://127.0.0.1:4096"), "local OpenCode server base URL")
 	dbDriver := fs.String("db", envOr("OCB_DB", "sqlite"), "database driver: sqlite or postgres")
 	sqlitePath := fs.String("sqlite-path", envOr("OCB_SQLITE_PATH", "startburst-backend.db"), "SQLite database file path")

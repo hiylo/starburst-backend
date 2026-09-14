@@ -16,6 +16,11 @@ import (
 // one. It matches the engine's own limit.
 const defaultChunkBytes = 2 * 1024 * 1024
 
+// sttMaxEngineResponse caps how much of an engine response the backend will
+// read. Streaming transcripts are a few KB; anything near this limit means the
+// engine is misbehaving and we should fail fast instead of buffering it.
+const sttMaxEngineResponse = 16 * 1024 * 1024
+
 // sttEngine forwards audio chunks to the streaming recognition engine that
 // runs on the NAS. The backend itself never decodes audio: after authenticating
 // the caller and capping chunk size, the protocol, status codes and transcripts
@@ -72,7 +77,9 @@ func (e *sttEngine) Execute(ctx context.Context, method, path string, body []byt
 	}
 	defer resp.Body.Close()
 
-	data, err := io.ReadAll(resp.Body)
+	// 引擎响应必须有限：异常/被攻陷的引擎可能返回任意大 body，拖垮内存。
+	// 流式转写正常响应远小于此上限。
+	data, err := io.ReadAll(io.LimitReader(resp.Body, sttMaxEngineResponse))
 	if err != nil {
 		return 0, nil, fmt.Errorf("read stt response: %w", err)
 	}

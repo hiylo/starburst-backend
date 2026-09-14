@@ -45,6 +45,9 @@ func (l *loginLimiter) allow(key string) bool {
 		return false
 	}
 	l.attempts[key] = append(hits, now)
+	// 周期性清理已失去价值的 key，防止 attempts 无界增长（配合 clientKey
+	// 可被攻击者用大量 X-Forwarded-For 注入不同 key）。
+	l.prune(recent)
 	return true
 }
 

@@ -7,12 +7,24 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"regexp"
 	"strconv"
 	"time"
 
 	"github.com/hiylo/startburst-backend/internal/opencode"
 	"github.com/hiylo/startburst-backend/internal/store"
 )
+
+// sessionIDRe is the allow-list for session identifiers that are later
+// interpolated into upstream URLs (/session/{id}/message). Restricting to
+// alphanumerics plus dash/underscore prevents path-confusion injection.
+var sessionIDRe = regexp.MustCompile(`^[A-Za-z0-9_-]{1,128}$`)
+
+// isValidSessionID reports whether sessionID is safe to embed in an upstream
+// URL path segment.
+func isValidSessionID(id string) bool {
+	return sessionIDRe.MatchString(id)
+}
 
 // handleArchives lists archive metadata (GET) or archives a session (POST).
 // Requires an APP token.
@@ -51,12 +63,17 @@ func (s *Server) archiveSession(w http.ResponseWriter, r *http.Request) {
 		SessionID string `json:"sessionId"`
 		Format    string `json:"format"`
 	}
-	if err := readJSON(r, &req); err != nil {
-		writeErr(w, http.StatusBadRequest, "invalid request body")
+	if !readBody(w, r, &req) {
 		return
 	}
 	if req.SessionID == "" {
 		writeErr(w, http.StatusBadRequest, "sessionId is required")
+		return
+	}
+	// sessionId 会拼进上游 /session/{id}/message 路径，必须先做白名单校验，
+	// 防止含 /、? 等字符的输入把请求打到 upstream 其它端点（路径混淆）。
+	if !isValidSessionID(req.SessionID) {
+		writeErr(w, http.StatusBadRequest, "invalid sessionId")
 		return
 	}
 	if req.Format == "" {

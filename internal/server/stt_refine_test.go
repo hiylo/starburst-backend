@@ -92,9 +92,10 @@ func TestSTTRefineReturnsUnchangedWhenModelAgrees(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	// 模型没改动 → 本地补标点兜底：无标点文本应获得结尾句号。
-	if out.Text != "昨天是周一。" || !out.Changed {
-		t.Fatalf("out %+v want text=%q changed=true", out, "昨天是周一。")
+	// 模型没改动 → 本地规则去重补标点兜底。无连接词、非问句结尾的短文本
+	// 不再被强制追加句号（refine 标点规则调整），文本原样返回且 changed=false。
+	if out.Text != "昨天是周一" || out.Changed {
+		t.Fatalf("out %+v want text=%q changed=false", out, "昨天是周一")
 	}
 }
 
@@ -127,12 +128,13 @@ func TestSTTRefineRejectsUnrelatedOutput(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	// 模型乱答被拒 → 回退本地规则：去重+补结尾句号，语义不被改写。
-	if out.Text != "昨天是 MONDAY TODAY IS THE DAY。" || !out.Changed {
+	// 模型乱答被拒 → 回退本地规则：去重+补逗号标点，语义不被改写。
+	// 未以问句/连接词结尾的文本不再强制加结尾句号，故文本原样返回。
+	if out.Text != "昨天是 MONDAY TODAY IS THE DAY" || out.Changed {
 		t.Fatalf("out %+v must fall back to the punctuated original text", out)
 	}
-	if out.Reason == "" {
-		t.Fatal("expected a reason when the output is rejected")
+	if out.Reason != "rejected" {
+		t.Fatalf("expected reason %q, got %q", "rejected", out.Reason)
 	}
 }
 
@@ -149,8 +151,9 @@ func TestSTTRefineDegradations(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	// 本地标点兜底仍生效：无标点输入获得结尾句号。
-	if rec.Code != http.StatusOK || !out.Changed || out.Text != "昨天的话。" {
+	// 本地规则兜底仍生效：去重后仍无可修复项（无连接词/非问句结尾），
+	// 文本原样返回、changed=false（不再强制加结尾句号）。
+	if rec.Code != http.StatusOK || out.Changed || out.Text != "昨天的话" {
 		t.Fatalf("no-llm: status %d out %+v", rec.Code, out)
 	}
 	if out.Reason != "llm not configured" {
@@ -164,7 +167,7 @@ func TestSTTRefineDegradations(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if rec.Code != http.StatusOK || !out.Changed || out.Text != "昨天的话。" {
+	if rec.Code != http.StatusOK || out.Changed || out.Text != "昨天的话" {
 		t.Fatalf("unreachable-llm: status %d out %+v", rec.Code, out)
 	}
 
@@ -175,7 +178,7 @@ func TestSTTRefineDegradations(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if rec.Code != http.StatusOK || !out.Changed || out.Reason != "llm failed" {
+	if rec.Code != http.StatusOK || out.Changed || out.Reason != "llm failed" {
 		t.Fatalf("llm-500: status %d out %+v", rec.Code, out)
 	}
 }

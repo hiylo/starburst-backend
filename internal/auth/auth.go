@@ -73,14 +73,33 @@ func (m *Manager) EnsureDefaultToken(ctx context.Context, defaultToken string) (
 
 // SetPassword stores a new bcrypt hash for the admin password.
 func (m *Manager) SetPassword(ctx context.Context, plain string) error {
-	if len(plain) < 4 {
-		return fmt.Errorf("password must be at least 4 characters")
+	if !isStrongPassword(plain) {
+		return fmt.Errorf("password must be at least 8 characters and not a common weak password")
 	}
 	hash, err := bcrypt.GenerateFromPassword([]byte(plain), bcrypt.DefaultCost)
 	if err != nil {
 		return err
 	}
 	return m.store.SetSetting(ctx, SettingAdminPasswordHash, string(hash))
+}
+
+// weakPasswords are common defaults rejected by isStrongPassword even when
+// they meet the length requirement, so a fresh install can't sit on an easily
+// guessed admin credential.
+var weakPasswords = map[string]bool{
+	"admin": true, "password": true, "12345678": true, "123456789": true,
+	"1234567890": true, "qwertyui": true, "qwerty123": true, "letmein1": true,
+	"00000000": true, "admin123": true, "root1234": true, "12345678a": true,
+}
+
+// isStrongPassword enforces a minimum length of 8 and rejects common weak
+// passwords. Password rules are deliberately simple: length is the dominant
+// factor, the weak-list only blocks obviously guessable values.
+func isStrongPassword(plain string) bool {
+	if len(plain) < 8 {
+		return false
+	}
+	return !weakPasswords[strings.ToLower(strings.TrimSpace(plain))]
 }
 
 // VerifyPassword checks a plaintext password against the stored hash.

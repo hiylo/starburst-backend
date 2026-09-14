@@ -3,8 +3,10 @@ package opencode
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 )
@@ -257,5 +259,161 @@ func TestStreamEventsNon200(t *testing.T) {
 	c := New(srv.URL)
 	if err := c.StreamEvents(context.Background(), func(SSEEvent) error { return nil }); err == nil {
 		t.Fatalf("expected error for non-200")
+	}
+}
+
+// ===== typed API surface tests =====
+
+func TestSetAuthTokenAttachedToRequests(t *testing.T) {
+	srv := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer upstream-secret" {
+			t.Errorf("auth header = %q, want upstream token", got)
+		}
+		_, _ = w.Write([]byte(`{"healthy":true,"version":"v1"}`))
+	})
+	c := New(srv.URL)
+	c.SetAuthToken("upstream-secret")
+	if err := c.Ping(context.Background()); err != nil {
+		t.Fatalf("ping: %v", err)
+	}
+}
+
+func TestCreateSessionSendsDirectoryAndBody(t *testing.T) {
+	srv := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/session" {
+			t.Fatalf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+		if r.URL.Query().Get("directory") != "/w/p" {
+			t.Fatalf("directory query missing: %s", r.URL.RawQuery)
+		}
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		if body["title"] != "New" || body["parentID"] != "ses_par" {
+			t.Fatalf("bad body %v", body)
+		}
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"id":"ses_new","title":"New"}`))
+	})
+	c := New(srv.URL)
+	raw, err := c.CreateSession(context.Background(), "New", "ses_par", "/w/p")
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if !strings.Contains(string(raw), "ses_new") {
+		t.Fatalf("unexpected body %s", raw)
+	}
+}
+
+func TestListAllSessionsRootsQuery(t *testing.T) {
+	srv := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/experimental/session" || r.URL.Query().Get("roots") != "true" {
+			t.Fatalf("unexpected %s?%s", r.URL.Path, r.URL.RawQuery)
+		}
+		_, _ = w.Write([]byte(`[{"id":"s1"}]`))
+	})
+	c := New(srv.URL)
+	raw, err := c.ListAllSessions(context.Background(), "")
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if !strings.Contains(string(raw), "s1") {
+		t.Fatalf("bad body %s", raw)
+	}
+}
+
+func TestListMessagesPaginationQuery(t *testing.T) {
+	srv := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/session/ses_1/message" {
+			t.Fatalf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+		if r.URL.Query().Get("limit") != "10" || r.URL.Query().Get("before") != "msg_9" {
+			t.Fatalf("bad query %s", r.URL.RawQuery)
+		}
+		_, _ = w.Write([]byte(`[{"id":"msg_8"}]`))
+	})
+	c := New(srv.URL)
+	raw, err := c.ListMessages(context.Background(), "ses_1", 10, "msg_9")
+	if err != nil {
+		t.Fatalf("list messages: %v", err)
+	}
+	if !strings.Contains(string(raw), "msg_8") {
+		t.Fatalf("bad body %s", raw)
+	}
+}
+
+func TestPromptV2SendsDirectoryAndWorkspace(t *testing.T) {
+	srv := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/api/session/ses_1/prompt" {
+			t.Fatalf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+		q := r.URL.Query()
+		if q.Get("directory") != "/w" || q.Get("workspace") != "ws_1" {
+			t.Fatalf("bad query %s", r.URL.RawQuery)
+		}
+		var body V2PromptRequest
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode body: %v", err)
+		}
+		if body.Prompt.Text != "请解释这段代码" || body.Delivery != "steer" {
+			t.Fatalf("bad body %+v", body)
+		}
+		_, _ = w.Write([]byte(`{"data":{"id":"msg_1","admittedSeq":1}}`))
+	})
+	c := New(srv.URL)
+	req := V2PromptRequest{
+		ID:       "msg_1",
+		Prompt:   V2Prompt{Text: "请解释这段代码"},
+		Delivery: "steer",
+		Resume:   true,
+	}
+	raw, err := c.PromptV2(context.Background(), "ses_1", req, "/w", "ws_1")
+	if err != nil {
+		t.Fatalf("prompt v2: %v", err)
+	}
+	if !strings.Contains(string(raw), "admittedSeq") {
+		t.Fatalf("bad body %s", raw)
+	}
+}
+
+func TestTypedCallNon2xxError(t *testing.T) {
+	srv := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "denied", http.StatusUnauthorized)
+	})
+	c := New(srv.URL)
+	if err := c.DeleteSession(context.Background(), "ses_1"); err == nil {
+		t.Fatalf("expected error on 401")
+	}
+}
+
+func TestDoPassesMethodPathQueryBody(t *testing.T) {
+	srv := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/session/s1/prompt_async" {
+			t.Fatalf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+		if r.URL.Query().Get("directory") != "/w" {
+			t.Fatalf("query lost: %s", r.URL.RawQuery)
+		}
+		body, _ := io.ReadAll(r.Body)
+		if string(body) != `{"hi":1}` {
+			t.Fatalf("body %s", body)
+		}
+		if auth := r.Header.Get("Authorization"); auth != "" {
+			t.Fatalf("Authorization must not be relayed by Do, got %q", auth)
+		}
+		if r.Header.Get("X-Startburst-Directory") != "/w" {
+			t.Fatalf("custom header not relayed")
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
+	c := New(srv.URL)
+	hdr := http.Header{"X-Startburst-Directory": {"/w"}, "Authorization": {"Bearer app-token"}}
+	resp, err := c.Do(context.Background(), http.MethodPost, "/session/s1/prompt_async",
+		url.Values{"directory": {"/w"}}, strings.NewReader(`{"hi":1}`), hdr)
+	if err != nil {
+		t.Fatalf("do: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("status %d", resp.StatusCode)
 	}
 }

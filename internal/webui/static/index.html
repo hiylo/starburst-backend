@@ -546,8 +546,8 @@ async function loadTasks() {
     const cancellable = t.status === "queued" || t.status === "running" || t.status === "pending";
     const tid = escapeHtml(t.id);
     const action = t.status === "blocked"
-      ? `<button class="ghost sm" onclick="unblockTask('${tid}')">解阻</button>`
-      : (cancellable ? `<button class="danger sm" onclick="cancelTask('${tid}')">取消</button>` : "");
+      ? `<button class="ghost sm" data-unblock="${tid}">解阻</button>`
+      : (cancellable ? `<button class="danger sm" data-cancel="${tid}">取消</button>` : "");
     tb.insertAdjacentHTML("beforeend", `<tr data-task="${tid}">
       <td class="mono clip" title="${tid}">${tid}</td>
       <td class="clip" title="${escapeHtml(t.directory)}">${escapeHtml(t.directory) || "-"}</td>
@@ -560,6 +560,12 @@ async function loadTasks() {
       <td>${action}</td>
     </tr>`);
   }
+  tb.onclick = (e) => {
+    const ub = e.target.closest("button[data-unblock]");
+    if (ub) { unblockTask(ub.dataset.unblock); return; }
+    const cc = e.target.closest("button[data-cancel]");
+    if (cc) cancelTask(cc.dataset.cancel);
+  };
 }
 async function cancelTask(id) {
   await api("/api/tasks/" + encodeURIComponent(id), { method: "DELETE", headers: appHeaders() });
@@ -589,9 +595,13 @@ async function loadProjects() {
     tb.insertAdjacentHTML("beforeend", `<tr>
       <td class="clip" title="${escapeHtml(p.directory)}">${escapeHtml(p.directory) || "-"}</td>
       <td class="mono">${p.sessionCount ?? 0}</td>
-      <td><button class="ghost sm" onclick="loadProjectSessions('${escapeHtml(p.id).replace(/'/g, "\\'")}')">查看会话</button></td>
+      <td><button class="ghost sm" data-dir="${escapeHtml(p.id)}">查看会话</button></td>
     </tr>`);
   }
+  tb.onclick = (e) => {
+    const btn = e.target.closest("button[data-dir]");
+    if (btn) loadProjectSessions(btn.dataset.dir);
+  };
   if (!list.length) {
     tb.insertAdjacentHTML("beforeend", `<tr><td colspan="3" class="muted">暂无会话</td></tr>`);
   }
@@ -733,10 +743,14 @@ async function loadRules() {
       <td><span class="badge ${r.enabled ? "enabled" : "disabled"}">${r.enabled ? "启用" : "停用"}</span></td>
       <td>${fmtDate(r.lastFiredAt)}</td>
       <td id="exec-count-${escapeHtml(r.id)}">…</td>
-      <td><button class="danger sm" onclick="deleteRule('${escapeHtml(r.id)}')">删除</button></td>
+      <td><button class="danger sm" data-del-rule="${escapeHtml(r.id)}">删除</button></td>
     </tr>`);
     loadRuleExecCount(r.id);
   }
+  tb.onclick = (e) => {
+    const btn = e.target.closest("button[data-del-rule]");
+    if (btn) deleteRule(btn.dataset.delRule);
+  };
 }
 async function loadRuleExecCount(id) {
   try {
@@ -776,9 +790,13 @@ async function loadArchives() {
       <td>${escapeHtml(a.format)}</td>
       <td>${a.size}</td>
       <td>${fmtDate(a.createdAt)}</td>
-      <td><button class="danger sm" onclick="deleteArchive('${escapeHtml(a.id)}')">删除</button></td>
+      <td><button class="danger sm" data-del-archive="${escapeHtml(a.id)}">删除</button></td>
     </tr>`);
   }
+  tb.onclick = (e) => {
+    const btn = e.target.closest("button[data-del-archive]");
+    if (btn) deleteArchive(btn.dataset.delArchive);
+  };
 }
 async function deleteArchive(id) {
   await api("/api/archives/" + encodeURIComponent(id), { method: "DELETE", headers: appHeaders() });
@@ -821,9 +839,13 @@ async function loadTokens() {
       <td>${fmtDate(t.createdAt)}</td>
       <td>${fmtDate(t.lastUsed)}</td>
       <td><span class="badge ${active ? "active" : "revoked"}">${active ? "启用" : "已撤销"}</span></td>
-      <td>${active ? `<button class="danger sm" onclick="doRevoke('${escapeHtml(t.id)}')">撤销</button>` : ""}</td>
+      <td>${active ? `<button class="danger sm" data-revoke="${escapeHtml(t.id)}">撤销</button>` : ""}</td>
     </tr>`);
   }
+  tb.onclick = (e) => {
+    const btn = e.target.closest("button[data-revoke]");
+    if (btn) doRevoke(btn.dataset.revoke);
+  };
 }
 async function doCreateToken() {
   const name = document.getElementById("tokenName").value.trim();

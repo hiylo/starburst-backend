@@ -110,8 +110,7 @@ func (s *Server) createTask(w http.ResponseWriter, r *http.Request) {
 		ScheduledAt string `json:"scheduledAt"`
 		Cron        string `json:"cron"`
 	}
-	if err := readJSON(r, &req); err != nil {
-		writeErr(w, http.StatusBadRequest, "invalid request body")
+	if !readBody(w, r, &req) {
 		return
 	}
 	if req.Prompt == "" {

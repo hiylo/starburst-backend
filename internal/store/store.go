@@ -113,6 +113,11 @@ type Store interface {
 	PromoteScheduledTask(ctx context.Context, id string) (bool, error)
 	// SetTaskLastFiredAt records the last time a recurring template fired.
 	SetTaskLastFiredAt(ctx context.Context, id string, at time.Time) error
+	// SetTaskLastFiredAtPtr sets the cursor to at, or NULL when at is nil.
+	SetTaskLastFiredAtPtr(ctx context.Context, id string, at *time.Time) error
+	// ClaimRecurringFire atomically advances a recurring template's cursor only
+	// if it still matches expected; returns false when another scheduler won.
+	ClaimRecurringFire(ctx context.Context, id string, expected *time.Time, now time.Time) (bool, error)
 	// CancelScheduledTask cancels a scheduled (one-shot or recurring) task.
 	// Returns true if changed.
 	CancelScheduledTask(ctx context.Context, id string) (bool, error)
@@ -178,6 +183,18 @@ type Store interface {
 	DeleteWebSession(ctx context.Context, id string) error
 	// DeleteExpiredWebSessions purges expired sessions.
 	DeleteExpiredWebSessions(ctx context.Context) (int, error)
+
+	// ---- Session events (global event collector) ----
+
+	// InsertEvent stores one event captured from the global event stream.
+	InsertEvent(ctx context.Context, e *SessionEvent) error
+	// InsertEvents stores a batch of session events with a single multi-row INSERT.
+	InsertEvents(ctx context.Context, events []*SessionEvent) error
+	// ListEvents returns session events, oldest first, optionally filtered by
+	// session id and a since cutoff. limit caps the number of rows.
+	ListEvents(ctx context.Context, sessionID string, since time.Time, limit int) ([]*SessionEvent, error)
+	// DeleteEventsOlderThan purges session events older than cutoff.
+	DeleteEventsOlderThan(ctx context.Context, cutoff time.Time) (int, error)
 }
 
 // Open opens a store for the given driver/dsn. It applies all migrations

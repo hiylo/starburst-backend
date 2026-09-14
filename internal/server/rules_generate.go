@@ -55,7 +55,10 @@ func (s *Server) handleRuleGenerate(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Description string `json:"description"`
 	}
-	if err := readJSON(r, &req); err != nil || req.Description == "" {
+	if !readBody(w, r, &req) {
+		return
+	}
+	if req.Description == "" {
 		writeErr(w, http.StatusBadRequest, "description is required")
 		return
 	}

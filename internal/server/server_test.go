@@ -32,7 +32,7 @@ func newTestServer(t *testing.T) *Server {
 	t.Cleanup(func() { st.Close() })
 
 	am := auth.NewManager(st)
-	if _, err := am.Initialize(ctx, "admin"); err != nil {
+	if _, err := am.Initialize(ctx, "S3cureAdmin!"); err != nil {
 		t.Fatalf("init auth: %v", err)
 	}
 
@@ -111,7 +111,7 @@ func TestWebLoginFlow(t *testing.T) {
 	}
 
 	// Correct password -> session id.
-	rec = s.do(t, http.MethodPost, "/api/web/session", `{"password":"admin"}`, nil)
+	rec = s.do(t, http.MethodPost, "/api/web/session", `{"password":"S3cureAdmin!"}`, nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("login status %d: %s", rec.Code, rec.Body.String())
 	}
@@ -125,17 +125,17 @@ func TestWebLoginFlow(t *testing.T) {
 	h := map[string]string{"X-Web-Session": login.Session}
 
 	// Change password.
-	rec = s.do(t, http.MethodPost, "/api/web/password", `{"newPassword":"newpass"}`, h)
+	rec = s.do(t, http.MethodPost, "/api/web/password", `{"newPassword":"newStr0ngPass"}`, h)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("change password status %d: %s", rec.Code, rec.Body.String())
 	}
 
 	// Old password now fails, new works.
-	rec = s.do(t, http.MethodPost, "/api/web/session", `{"password":"admin"}`, nil)
+	rec = s.do(t, http.MethodPost, "/api/web/session", `{"password":"S3cureAdmin!"}`, nil)
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("old password still works")
 	}
-	rec = s.do(t, http.MethodPost, "/api/web/session", `{"password":"newpass"}`, nil)
+	rec = s.do(t, http.MethodPost, "/api/web/session", `{"password":"newStr0ngPass"}`, nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("new password rejected: %d", rec.Code)
 	}
@@ -145,7 +145,7 @@ func TestTokenAuthFlow(t *testing.T) {
 	s := newTestServer(t)
 
 	// Login as web admin and create a token.
-	rec := s.do(t, http.MethodPost, "/api/web/session", `{"password":"admin"}`, nil)
+	rec := s.do(t, http.MethodPost, "/api/web/session", `{"password":"S3cureAdmin!"}`, nil)
 	var login struct {
 		Session string `json:"session"`
 	}
@@ -200,7 +200,7 @@ func TestTokenAuthFlow(t *testing.T) {
 
 func TestSystemEndpointWithToken(t *testing.T) {
 	s := newTestServer(t)
-	rec := s.do(t, http.MethodPost, "/api/web/session", `{"password":"admin"}`, nil)
+	rec := s.do(t, http.MethodPost, "/api/web/session", `{"password":"S3cureAdmin!"}`, nil)
 	var login struct {
 		Session string `json:"session"`
 	}
@@ -233,7 +233,7 @@ func TestTasksCRUD(t *testing.T) {
 	s := newTestServer(t)
 
 	// Login and create a token.
-	rec := s.do(t, http.MethodPost, "/api/web/session", `{"password":"admin"}`, nil)
+	rec := s.do(t, http.MethodPost, "/api/web/session", `{"password":"S3cureAdmin!"}`, nil)
 	var login struct {
 		Session string `json:"session"`
 	}
@@ -295,7 +295,7 @@ func TestTaskDependsOn(t *testing.T) {
 	s := newTestServer(t)
 	ctx := context.Background()
 
-	rec := s.do(t, http.MethodPost, "/api/web/session", `{"password":"admin"}`, nil)
+	rec := s.do(t, http.MethodPost, "/api/web/session", `{"password":"S3cureAdmin!"}`, nil)
 	var login struct {
 		Session string `json:"session"`
 	}
@@ -400,7 +400,7 @@ func TestTaskUnblockAndDependentPush(t *testing.T) {
 	backend := httptest.NewServer(s.testMux)
 	t.Cleanup(backend.Close)
 
-	rec := s.do(t, http.MethodPost, "/api/web/session", `{"password":"admin"}`, nil)
+	rec := s.do(t, http.MethodPost, "/api/web/session", `{"password":"S3cureAdmin!"}`, nil)
 	var login struct {
 		Session string `json:"session"`
 	}
@@ -515,7 +515,7 @@ func TestTaskUnblockAndDependentPush(t *testing.T) {
 func TestProjectsGroupAndFilter(t *testing.T) {
 	s := newTestServer(t)
 
-	rec := s.do(t, http.MethodPost, "/api/web/session", `{"password":"admin"}`, nil)
+	rec := s.do(t, http.MethodPost, "/api/web/session", `{"password":"S3cureAdmin!"}`, nil)
 	var login struct {
 		Session string `json:"session"`
 	}
@@ -589,14 +589,14 @@ func TestLoginRateLimit(t *testing.T) {
 		}
 	}
 	// ...the sixth is throttled.
-	rec := s.do(t, http.MethodPost, "/api/web/session", `{"password":"admin"}`, nil)
+	rec := s.do(t, http.MethodPost, "/api/web/session", `{"password":"S3cureAdmin!"}`, nil)
 	if rec.Code != http.StatusTooManyRequests {
 		t.Fatalf("attempt 6: got %d want 429", rec.Code)
 	}
 
 	// A correct password resets the bucket.
 	s.loginLimit.clear(clientKey(httptest.NewRequest(http.MethodPost, "/api/web/session", nil)))
-	rec = s.do(t, http.MethodPost, "/api/web/session", `{"password":"admin"}`, nil)
+	rec = s.do(t, http.MethodPost, "/api/web/session", `{"password":"S3cureAdmin!"}`, nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("login after clear: got %d want 200", rec.Code)
 	}
@@ -609,7 +609,7 @@ func TestSystemRequiresAuth(t *testing.T) {
 		t.Fatalf("system without auth: got %d want 401", rec.Code)
 	}
 
-	rec := s.do(t, http.MethodPost, "/api/web/session", `{"password":"admin"}`, nil)
+	rec := s.do(t, http.MethodPost, "/api/web/session", `{"password":"S3cureAdmin!"}`, nil)
 	var login struct {
 		Session string `json:"session"`
 	}
@@ -632,7 +632,7 @@ func TestRulesCRUDAndWebhook(t *testing.T) {
 	s := newTestServer(t)
 
 	// Web session (rules are admin-managed).
-	rec := s.do(t, http.MethodPost, "/api/web/session", `{"password":"admin"}`, nil)
+	rec := s.do(t, http.MethodPost, "/api/web/session", `{"password":"S3cureAdmin!"}`, nil)
 	var login struct {
 		Session string `json:"session"`
 	}
@@ -684,9 +684,10 @@ func TestRulesCRUDAndWebhook(t *testing.T) {
 
 func TestWebhookFiresRule(t *testing.T) {
 	s := newTestServer(t)
+	s.cfg.WebhookSecret = "topsecret"
 
 	// Login and create an HTTP rule via web session.
-	rec := s.do(t, http.MethodPost, "/api/web/session", `{"password":"admin"}`, nil)
+	rec := s.do(t, http.MethodPost, "/api/web/session", `{"password":"S3cureAdmin!"}`, nil)
 	var login struct {
 		Session string `json:"session"`
 	}
@@ -700,7 +701,7 @@ func TestWebhookFiresRule(t *testing.T) {
 	_ = json.Unmarshal(rec.Body.Bytes(), &rule)
 
 	// Fire webhook for matching target.
-	rec = s.do(t, http.MethodPost, "/api/webhook?target=/workspaces/opencode", "", nil)
+	rec = s.do(t, http.MethodPost, "/api/webhook?target=/workspaces/opencode", "", map[string]string{"X-Webhook-Secret": "topsecret"})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("webhook status %d: %s", rec.Code, rec.Body.String())
 	}
@@ -729,7 +730,7 @@ func TestWebhookFiresRule(t *testing.T) {
 	}
 
 	// Non-matching target -> 404.
-	rec = s.do(t, http.MethodPost, "/api/webhook?target=/nope", "", nil)
+	rec = s.do(t, http.MethodPost, "/api/webhook?target=/nope", "", map[string]string{"X-Webhook-Secret": "topsecret"})
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("expected 404 for non-match, got %d", rec.Code)
 	}
@@ -739,7 +740,7 @@ func TestBatchCreatesMultipleTasks(t *testing.T) {
 	s := newTestServer(t)
 
 	// Login + token.
-	rec := s.do(t, http.MethodPost, "/api/web/session", `{"password":"admin"}`, nil)
+	rec := s.do(t, http.MethodPost, "/api/web/session", `{"password":"S3cureAdmin!"}`, nil)
 	var login struct {
 		Session string `json:"session"`
 	}
@@ -793,7 +794,7 @@ func TestAuditLogging(t *testing.T) {
 	s := newTestServer(t)
 
 	// Login + token.
-	rec := s.do(t, http.MethodPost, "/api/web/session", `{"password":"admin"}`, nil)
+	rec := s.do(t, http.MethodPost, "/api/web/session", `{"password":"S3cureAdmin!"}`, nil)
 	var login struct {
 		Session string `json:"session"`
 	}
@@ -847,7 +848,7 @@ func TestArchiveSessionFlow(t *testing.T) {
 	s := newTestServer(t)
 
 	// Login + token.
-	rec := s.do(t, http.MethodPost, "/api/web/session", `{"password":"admin"}`, nil)
+	rec := s.do(t, http.MethodPost, "/api/web/session", `{"password":"S3cureAdmin!"}`, nil)
 	var login struct {
 		Session string `json:"session"`
 	}
@@ -914,7 +915,7 @@ func TestStatsEndpoint(t *testing.T) {
 	s := newTestServer(t)
 
 	// Login + token, then make a couple of token calls to seed audit.
-	rec := s.do(t, http.MethodPost, "/api/web/session", `{"password":"admin"}`, nil)
+	rec := s.do(t, http.MethodPost, "/api/web/session", `{"password":"S3cureAdmin!"}`, nil)
 	var login struct {
 		Session string `json:"session"`
 	}
@@ -1003,7 +1004,7 @@ func TestStreamRelaysEvents(t *testing.T) {
 	}
 	t.Cleanup(func() { st.Close() })
 	am := auth.NewManager(st)
-	if _, err := am.Initialize(context.Background(), "admin"); err != nil {
+	if _, err := am.Initialize(context.Background(), "S3cureAdmin!"); err != nil {
 		t.Fatalf("init auth: %v", err)
 	}
 	cfg := &config.Config{ListenAddr: "127.0.0.1:0", OpenCodeURL: upstream.URL, DBDriver: "sqlite"}
@@ -1017,7 +1018,7 @@ func TestStreamRelaysEvents(t *testing.T) {
 	t.Cleanup(backend.Close)
 
 	// Login, create token.
-	rec := srv.do(t, http.MethodPost, "/api/web/session", `{"password":"admin"}`, nil)
+	rec := srv.do(t, http.MethodPost, "/api/web/session", `{"password":"S3cureAdmin!"}`, nil)
 	var login struct {
 		Session string `json:"session"`
 	}
@@ -1071,7 +1072,7 @@ func TestWebhookSecretProtection(t *testing.T) {
 	s.cfg.WebhookSecret = "topsecret"
 
 	// Login + create http rule.
-	rec := s.do(t, http.MethodPost, "/api/web/session", `{"password":"admin"}`, nil)
+	rec := s.do(t, http.MethodPost, "/api/web/session", `{"password":"S3cureAdmin!"}`, nil)
 	var login struct {
 		Session string `json:"session"`
 	}
@@ -1103,7 +1104,7 @@ func TestWebhookSecretProtection(t *testing.T) {
 func TestTaskListPagination(t *testing.T) {
 	s := newTestServer(t)
 
-	rec := s.do(t, http.MethodPost, "/api/web/session", `{"password":"admin"}`, nil)
+	rec := s.do(t, http.MethodPost, "/api/web/session", `{"password":"S3cureAdmin!"}`, nil)
 	var login struct {
 		Session string `json:"session"`
 	}
@@ -1261,7 +1262,7 @@ func TestFireRecurringFirstOccurrence(t *testing.T) {
 func TestTaskCreateReturnsStoredTimestamps(t *testing.T) {
 	s := newTestServer(t)
 
-	rec := s.do(t, http.MethodPost, "/api/web/session", `{"password":"admin"}`, nil)
+	rec := s.do(t, http.MethodPost, "/api/web/session", `{"password":"S3cureAdmin!"}`, nil)
 	var login struct {
 		Session string `json:"session"`
 	}

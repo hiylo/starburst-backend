@@ -28,8 +28,7 @@ func (s *Server) handleBatch(w http.ResponseWriter, r *http.Request) {
 			SessionID string `json:"sessionId"`
 		} `json:"targets"`
 	}
-	if err := readJSON(r, &req); err != nil {
-		writeErr(w, http.StatusBadRequest, "invalid request body")
+	if !readBody(w, r, &req) {
 		return
 	}
 	if req.Prompt == "" {
@@ -38,6 +37,13 @@ func (s *Server) handleBatch(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(req.Targets) == 0 {
 		writeErr(w, http.StatusBadRequest, "targets must not be empty")
+		return
+	}
+	// 一次性批量任务数必须有限：单个请求灌入上千任务会撑爆 DB 与 worker
+	// 队列，也放大超时窗口内的部分成功语义。
+	const maxBatchTargets = 100
+	if len(req.Targets) > maxBatchTargets {
+		writeErr(w, http.StatusBadRequest, "too many targets, max 100 per batch")
 		return
 	}
 

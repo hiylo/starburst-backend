@@ -41,6 +41,15 @@ func prepareSQLite(path string) error {
 	return os.MkdirAll(dir, 0o755)
 }
 
+// maskToken redacts a secret for logging, keeping only enough prefix to make
+// log lines traceable without leaking the full credential.
+func maskToken(s string) string {
+	if len(s) <= 4 {
+		return "****"
+	}
+	return s[:4]
+}
+
 func main() {
 	cfg, err := config.Parse(os.Args[1:])
 	if err != nil {
@@ -88,7 +97,8 @@ func main() {
 	if raw, err := am.EnsureDefaultToken(ctx, cfg.DefaultToken); err != nil {
 		log.Fatalf("provision default token: %v", err)
 	} else if raw != "" {
-		log.Printf("provisioned default API token: %s", raw)
+		// 只打掩码：完整 token 一旦进入日志/监控就等同泄露一把全权钥匙。
+		log.Printf("provisioned default API token: %s**** (retrieve/rotate via OCB_DEFAULT_TOKEN if lost)", maskToken(raw))
 	}
 
 	oc := opencode.New(cfg.OpenCodeURL)
@@ -136,6 +146,9 @@ func main() {
 	eng := automation.NewEngine(st, 15*time.Second)
 	srv.SetAutomation(eng)
 	go eng.Run(ctx)
+
+	// 全局会话事件采集器：常驻订阅 opencode 全局 SSE → 写 PG session_events（看板历史）。
+	go srv.StartEventCollector(ctx)
 
 	// Task scheduler: promotes due one-shot scheduled tasks to queued and
 	// clones recurring cron templates into concrete tasks.

@@ -17,7 +17,7 @@ import (
 func sttTestToken(t *testing.T, s *Server) map[string]string {
 	t.Helper()
 
-	rec := s.do(t, http.MethodPost, "/api/web/session", `{"password":"admin"}`, nil)
+	rec := s.do(t, http.MethodPost, "/api/web/session", `{"password":"S3cureAdmin!"}`, nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("login status %d", rec.Code)
 	}
@@ -308,7 +308,7 @@ func TestSTTNotAudited(t *testing.T) {
 	s := newTestServer(t)
 	s.SetSTT(engine.URL, 5*time.Second)
 
-	rec := s.do(t, http.MethodPost, "/api/web/session", `{"password":"admin"}`, nil)
+	rec := s.do(t, http.MethodPost, "/api/web/session", `{"password":"S3cureAdmin!"}`, nil)
 	var login struct {
 		Session string `json:"session"`
 	}

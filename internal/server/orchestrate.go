@@ -16,8 +16,18 @@ import (
 var upgrader = websocket.Upgrader{
 	ReadBufferSize:  4096,
 	WriteBufferSize: 4096,
+	// CheckOrigin 默认全放行，否则无法服务非浏览器客户端（App/CLI 不带 Origin）。
+	// 收到浏览器 Origin 时按同源策略校验，避免跨站 WebSocket 猜测性探测。
 	CheckOrigin: func(r *http.Request) bool {
-		return true
+		origin := r.Header.Get("Origin")
+		if origin == "" {
+			return true // 非浏览器客户端
+		}
+		u, err := url.Parse(origin)
+		if err != nil {
+			return false
+		}
+		return u.Host == r.Host
 	},
 }
 

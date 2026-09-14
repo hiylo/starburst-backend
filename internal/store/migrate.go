@@ -87,6 +87,7 @@ var migrations = []migration{
 	{name: "tasks_ai_summary", apply: migrationTasksAISummary},
 	{name: "tasks_depends_on", apply: migrationTasksDependsOn},
 	{name: "tasks_schedule", apply: migrationTasksSchedule},
+	{name: "session_events", apply: migrationSessionEvents},
 }
 
 // migrationTasksDependsOn adds the depends_on column holding the id of the
@@ -245,6 +246,36 @@ func migrationTasksAvailableAt(ctx context.Context, driver string, db *sql.DB) e
 	if _, err := db.ExecContext(ctx, `
 		CREATE INDEX IF NOT EXISTS idx_tasks_available ON tasks(status, available_at)`); err != nil {
 		return err
+	}
+	return nil
+}
+
+// migrationSessionEvents adds the table holding every event captured from the
+// upstream OpenCode global event stream. The payload column stores the raw
+// event JSON: jsonb on PostgreSQL, plain text on SQLite (the two backends
+// diverge here because SQLite has no native binary JSON type). Both indexes
+// serve the "recent activity per session" dashboard query and the retention
+// janitor.
+func migrationSessionEvents(ctx context.Context, driver string, db *sql.DB) error {
+	payloadType := "TEXT"
+	if isPostgres(driver) {
+		payloadType = "jsonb"
+	}
+	stmts := []string{
+		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS session_events (
+			%s,
+			session_id TEXT NOT NULL DEFAULT '',
+			event_type TEXT NOT NULL DEFAULT '',
+			payload %s,
+			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+		)`, idColumn(driver), payloadType),
+		`CREATE INDEX IF NOT EXISTS idx_session_events_session_created ON session_events(session_id, created_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_session_events_created ON session_events(created_at)`,
+	}
+	for _, s := range stmts {
+		if _, err := db.ExecContext(ctx, s); err != nil {
+			return err
+		}
 	}
 	return nil
 }

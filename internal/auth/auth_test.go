@@ -23,7 +23,7 @@ func TestInitializeAndVerify(t *testing.T) {
 	ctx := context.Background()
 	m := newTestManager(t)
 
-	created, err := m.Initialize(ctx, "admin")
+	created, err := m.Initialize(ctx, "Str0ngPass")
 	if err != nil {
 		t.Fatalf("initialize: %v", err)
 	}
@@ -31,7 +31,7 @@ func TestInitializeAndVerify(t *testing.T) {
 		t.Fatalf("expected first-run create")
 	}
 
-	ok, err := m.VerifyPassword(ctx, "admin")
+	ok, err := m.VerifyPassword(ctx, "Str0ngPass")
 	if err != nil || !ok {
 		t.Fatalf("verify correct password: ok=%v err=%v", ok, err)
 	}
@@ -41,14 +41,14 @@ func TestInitializeAndVerify(t *testing.T) {
 	}
 
 	// Second initialize is a no-op.
-	created, err = m.Initialize(ctx, "other")
+	created, err = m.Initialize(ctx, "OtherPass2")
 	if err != nil {
 		t.Fatalf("re-init: %v", err)
 	}
 	if created {
 		t.Fatalf("expected second init to be no-op")
 	}
-	ok, _ = m.VerifyPassword(ctx, "other")
+	ok, _ = m.VerifyPassword(ctx, "OtherPass2")
 	if ok {
 		t.Fatalf("re-init overwrote password")
 	}

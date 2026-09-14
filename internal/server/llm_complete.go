@@ -32,8 +32,7 @@ func (s *Server) handleLLMComplete(w http.ResponseWriter, r *http.Request) {
 		System string `json:"system"`
 		User   string `json:"user"`
 	}
-	if err := readJSON(r, &req); err != nil {
-		writeErr(w, http.StatusBadRequest, "invalid request body")
+	if !readBody(w, r, &req) {
 		return
 	}
 	if req.User == "" {

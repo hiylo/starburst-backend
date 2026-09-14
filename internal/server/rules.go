@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
 	"net/http"
@@ -12,12 +13,12 @@ import (
 	"github.com/hiylo/startburst-backend/internal/store"
 )
 
-// secureCompare compares two strings in constant time.
+// secureCompare compares two strings in constant time over their SHA-256
+// digests, so a length mismatch is not observable through timing.
 func secureCompare(a, b string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
+	ha := sha256.Sum256([]byte(a))
+	hb := sha256.Sum256([]byte(b))
+	return subtle.ConstantTimeCompare(ha[:], hb[:]) == 1
 }
 
 // handleRules implements rules CRUD. GET/POST require a web session (admin)
@@ -59,8 +60,7 @@ func (s *Server) createRule(w http.ResponseWriter, r *http.Request) {
 		Prompt    string `json:"prompt"`
 		Enabled   bool   `json:"enabled"`
 	}
-	if err := readJSON(r, &req); err != nil {
-		writeErr(w, http.StatusBadRequest, "invalid request body")
+	if !readBody(w, r, &req) {
 		return
 	}
 	if req.Kind == "" || req.Prompt == "" {
@@ -147,22 +147,23 @@ func (s *Server) handleRuleExecutions(w http.ResponseWriter, r *http.Request, id
 }
 
 // handleRuleWebhook fires a matching http-kind rule. It accepts an optional
-// ?target= path filter. If a webhook secret is configured, the request must
-// carry it in X-Webhook-Secret (or ?secret=).
+// ?target= path filter. Webhook delivery is disabled unless a shared secret is
+// configured: without one, /api/webhook refuses all calls. The secret must be
+// carried in the X-Webhook-Secret header (query-string credentials would leak
+// into proxy/access logs and history).
 func (s *Server) handleRuleWebhook(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
-	if s.cfg.WebhookSecret != "" {
-		provided := r.Header.Get("X-Webhook-Secret")
-		if provided == "" {
-			provided = r.URL.Query().Get("secret")
-		}
-		if !secureCompare(provided, s.cfg.WebhookSecret) {
-			writeErr(w, http.StatusUnauthorized, "invalid webhook secret")
-			return
-		}
+	if s.cfg.WebhookSecret == "" {
+		writeErr(w, http.StatusForbidden, "webhook disabled (no secret configured)")
+		return
+	}
+	provided := r.Header.Get("X-Webhook-Secret")
+	if provided == "" || !secureCompare(provided, s.cfg.WebhookSecret) {
+		writeErr(w, http.StatusUnauthorized, "invalid webhook secret")
+		return
 	}
 	target := r.URL.Query().Get("target")
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)

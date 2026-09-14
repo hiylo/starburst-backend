@@ -6,11 +6,13 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/hiylo/startburst-backend/internal/auth"
@@ -38,6 +40,16 @@ type Server struct {
 	testMux    http.Handler // set only in tests
 	loginLimit *loginLimiter
 	genLimit   *loginLimiter
+	// touchMu 保护 touchSeen，实现 TouchToken 写库节流。
+	touchMu   sync.Mutex
+	touchSeen map[string]time.Time
+	// sessionStatuses 是采集器从 session.status/idle 事件聚合的最新会话状态
+	//（sessionId → "busy"|"idle"|"retry"|"error"），用于给 App 提供比上游
+	// /session/status 快照更准确、更完整的状态视图。
+	sessionStatuses sync.Map
+	// sessionActivity 记录每个会话最近一次消息类事件的时间（用于把「状态已标
+	// idle 但仍在流式输出」的会话正确识别为处理中，上游 status 事件本身并不可靠）。
+	sessionActivity sync.Map
 }
 
 // New assembles the server with its dependencies.
@@ -50,6 +62,7 @@ func New(cfg *config.Config, st store.Store, am *auth.Manager, oc *opencode.Clie
 		hub:        hub,
 		loginLimit: newLoginLimiter(5, 5*time.Minute),
 		genLimit:   newLoginLimiter(20, time.Minute),
+		touchSeen:  make(map[string]time.Time),
 	}
 }
 
@@ -96,6 +109,10 @@ func (s *Server) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/stats", s.handleStats)
 	mux.HandleFunc("/api/archives", s.handleArchives)
 	mux.HandleFunc("/api/archives/", s.handleArchiveByID)
+	// OpenCode 镜像代理：/api/opencode/<path> ↔ opencode /<path>（App 后端可用时走此通道）。
+	mux.HandleFunc(OpenCodeProxyPrefix+"/", s.handleOpenCodeProxy)
+	// 全局事件查询：App 看板拉取最近会话动态。
+	mux.HandleFunc("/api/events", s.handleEvents)
 	mux.HandleFunc("/api/stt", s.handleSTTStatus)
 	mux.HandleFunc("/api/stt/refine", s.handleSTTRefine)
 	mux.HandleFunc("/api/stt/sessions", s.handleSTTCreate)
@@ -110,6 +127,7 @@ func (s *Server) Start(ctx context.Context) error {
 		Addr:              s.cfg.ListenAddr,
 		Handler:           s.routesMux(),
 		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       60 * time.Second,
 		IdleTimeout:       60 * time.Second,
 	}
 	errCh := make(chan error, 1)
@@ -178,7 +196,7 @@ func (s *Server) tokenFromRequest(r *http.Request) (*store.Token, bool) {
 		if err != nil || rec == nil {
 			return nil, false
 		}
-		_ = s.auth.TouchToken(r.Context(), rec.ID)
+		s.touchTokenThrottled(r.Context(), rec.ID)
 		return rec, true
 	}
 	return nil, false
@@ -235,8 +253,20 @@ func (s *Server) requireWeb(r *http.Request) bool {
 	return true
 }
 
+// tokenCtxKey 是 request context 中缓存已验证 token 记录的键，避免同一
+// 请求内（日志中间件 + handler）重复查库。
+type tokenCtxKey struct{}
+
+// touchInterval 是 TouchToken 写库的最小间隔：同一 token 距上次更新小于
+// 该值时跳过 UPDATE，避免高并发请求下的写放大。
+const touchInterval = 60 * time.Second
+
 // requireToken validates the Authorization Bearer token against the store.
+// 已通过校验的 token 记录会缓存在 request context 中，重复调用直接命中缓存。
 func (s *Server) requireToken(r *http.Request) (*store.Token, bool) {
+	if rec, ok := r.Context().Value(tokenCtxKey{}).(*store.Token); ok && rec != nil {
+		return rec, true
+	}
 	authz := r.Header.Get("Authorization")
 	token, ok := strings.CutPrefix(authz, "Bearer ")
 	if !ok || strings.TrimSpace(token) == "" {
@@ -246,8 +276,23 @@ func (s *Server) requireToken(r *http.Request) (*store.Token, bool) {
 	if err != nil || rec == nil {
 		return nil, false
 	}
-	_ = s.auth.TouchToken(r.Context(), rec.ID)
+	s.touchTokenThrottled(r.Context(), rec.ID)
+	*r = *r.WithContext(context.WithValue(r.Context(), tokenCtxKey{}, rec))
 	return rec, true
+}
+
+// touchTokenThrottled 按 tokenID 节流调用 TouchToken，距上次写库小于
+// touchInterval 时跳过。并发安全。
+func (s *Server) touchTokenThrottled(ctx context.Context, id string) {
+	s.touchMu.Lock()
+	last, seen := s.touchSeen[id]
+	if seen && time.Since(last) < touchInterval {
+		s.touchMu.Unlock()
+		return
+	}
+	s.touchSeen[id] = time.Now()
+	s.touchMu.Unlock()
+	_ = s.auth.TouchToken(ctx, id)
 }
 
 // ---- response helpers ----
@@ -265,4 +310,25 @@ func writeErr(w http.ResponseWriter, status int, msg string) {
 func readJSON(r *http.Request, v any) error {
 	defer r.Body.Close()
 	return json.NewDecoder(r.Body).Decode(v)
+}
+
+// maxJSONBody 是 JSON 请求体的最大字节数（4MiB）。
+const maxJSONBody = 4 << 20
+
+// errBodyTooLarge 表示请求体超过 maxJSONBody，调用方应返回 413。
+var errBodyTooLarge = errors.New("request body too large")
+
+// readJSONLimited 与 readJSON 类似，但用 http.MaxBytesReader 限制请求体
+// 大小，超限时返回 errBodyTooLarge（对应 HTTP 413）。
+func readJSONLimited(w http.ResponseWriter, r *http.Request, v any) error {
+	defer r.Body.Close()
+	r.Body = http.MaxBytesReader(w, r.Body, maxJSONBody)
+	if err := json.NewDecoder(r.Body).Decode(v); err != nil {
+		var mbe *http.MaxBytesError
+		if errors.As(err, &mbe) {
+			return errBodyTooLarge
+		}
+		return err
+	}
+	return nil
 }

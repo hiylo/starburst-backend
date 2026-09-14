@@ -41,13 +41,16 @@ func (s *Server) getLLMConfig(w http.ResponseWriter, r *http.Request) {
 // updateLLMConfig applies and persists a new LLM configuration. url and model
 // are set verbatim (empty = clear); an empty key keeps the current key.
 func (s *Server) updateLLMConfig(w http.ResponseWriter, r *http.Request) {
+	if s.llm == nil {
+		writeErr(w, http.StatusServiceUnavailable, "llm not configured")
+		return
+	}
 	var req struct {
 		URL   string `json:"url"`
 		Key   string `json:"key"`
 		Model string `json:"model"`
 	}
-	if err := readJSON(r, &req); err != nil {
-		writeErr(w, http.StatusBadRequest, "invalid request body")
+	if !readBody(w, r, &req) {
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
