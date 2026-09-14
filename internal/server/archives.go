@@ -220,16 +220,55 @@ func (s *Server) restoreArchive(w http.ResponseWriter, r *http.Request, id strin
 		return
 	}
 
-	// 逐条注入历史消息。
-	for i, rawMsg := range msgs {
-		if err := s.openCode.InjectMessage(ctx, newID, rawMsg); err != nil {
-			writeErr(w, http.StatusBadGateway, fmt.Sprintf("restore message %d/%d failed: %v", i+1, len(msgs), err))
+	// 逐条注入历史消息。opencode 拒绝 step-start/reasoning/tool/step-finish
+	// 等执行过程部件，只接受 text（和 file）part，所以恢复时按"用户消息
+	// 原样 + assistant 仅保留 text 回复"重放，形成可继续对话的历史。
+	type replayMsg struct {
+		Role  string           `json:"role"`
+		Parts []map[string]any `json:"parts"`
+	}
+	replay := make([]replayMsg, 0, len(msgs))
+	for _, rawMsg := range msgs {
+		var m struct {
+			Info struct {
+				Role string `json:"role"`
+			} `json:"info"`
+			Parts []map[string]any `json:"parts"`
+		}
+		if err := json.Unmarshal(rawMsg, &m); err != nil {
+			continue
+		}
+		var keep []map[string]any
+		for _, p := range m.Parts {
+			pt, _ := p["type"].(string)
+			if pt == "text" || pt == "file" {
+				keep = append(keep, p)
+			}
+		}
+		if len(keep) == 0 {
+			continue
+		}
+		replay = append(replay, replayMsg{Role: m.Info.Role, Parts: keep})
+	}
+	if len(replay) == 0 {
+		writeErr(w, http.StatusUnprocessableEntity, "archive has no replayable text messages")
+		return
+	}
+
+	for i, rp := range replay {
+		body, err := json.Marshal(rp)
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, "marshal replay message failed")
+			return
+		}
+		if err := s.openCode.InjectMessage(ctx, newID, body); err != nil {
+			writeErr(w, http.StatusBadGateway, fmt.Sprintf("restore message %d/%d failed: %v", i+1, len(replay), err))
 			return
 		}
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"id": newID, "title": a.Title, "restored": len(msgs),
+		"id": newID, "title": a.Title, "restored": len(replay),
 	})
 }
 
