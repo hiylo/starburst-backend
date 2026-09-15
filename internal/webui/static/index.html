@@ -4,1096 +4,354 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>OpenCode Backend 控制台</title>
-<style>
-  :root {
-    --bg: #0f1115; --panel: #181b21; --border: #262a33; --text: #e6e8ec;
-    --muted: #9aa1ad; --primary: #6366f1; --danger: #ef4444; --ok: #10b981;
-    --warn: #f59e0b; --sidebar: #14161c;
-  }
-  * { box-sizing: border-box; }
-  body { margin: 0; background: var(--bg); color: var(--text);
-    font: 14px/1.6 -apple-system, "Segoe UI", Roboto, "PingFang SC", sans-serif; }
-  a { color: var(--primary); }
-
-  /* Layout */
-  .app { display: flex; min-height: 100vh; }
-  .sidebar { width: 210px; background: var(--sidebar); border-right: 1px solid var(--border);
-    padding: 20px 12px; position: sticky; top: 0; height: 100vh; overflow-y: auto; flex-shrink: 0; }
-  .sidebar .logo { font-size: 16px; font-weight: 600; margin: 0 12px 20px; }
-  .sidebar .logo span { color: var(--primary); }
-  .nav { display: flex; flex-direction: column; gap: 2px; }
-  .nav button { display: block; width: 100%; text-align: left; padding: 9px 12px;
-    background: transparent; border: none; border-radius: 8px; color: var(--muted);
-    font-size: 14px; cursor: pointer; }
-  .nav button:hover { background: var(--panel); color: var(--text); }
-  .nav button.active { background: var(--panel); color: var(--text); font-weight: 500; }
-  .nav button.active::before { content: "▸ "; color: var(--primary); }
-  .main { flex: 1; padding: 24px 28px; max-width: 1200px; }
-  .page { display: none; }
-  .page.active { display: block; }
-
-  /* Header bar */
-  .topbar { display: flex; align-items: center; gap: 12px; margin-bottom: 20px; flex-wrap: wrap; }
-  .topbar h1 { font-size: 20px; margin: 0; flex: 1; }
-  .topbar .tokbox { display: flex; gap: 8px; align-items: center; }
-  .topbar input { width: 300px; }
-
-  /* Cards & forms */
-  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
-    padding: 18px; margin-bottom: 18px; }
-  .card h2 { font-size: 15px; margin: 0 0 14px; }
-  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 12px; }
-  .stat { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 14px; }
-  .stat .k { color: var(--muted); font-size: 12px; }
-  .stat .v { font-size: 24px; font-weight: 600; margin-top: 4px; }
-  label { display: block; margin: 10px 0 4px; color: var(--muted); font-size: 13px; }
-  input, select, textarea { width: 100%; padding: 9px 12px; background: var(--bg);
-    border: 1px solid var(--border); border-radius: 8px; color: var(--text); font-size: 14px; }
-  textarea { font-family: inherit; min-height: 70px; resize: vertical; }
-  button { padding: 9px 16px; border: none; border-radius: 8px; background: var(--primary);
-    color: #fff; font-size: 14px; cursor: pointer; }
-  button:hover { opacity: .9; }
-  button.ghost { background: transparent; border: 1px solid var(--border); color: var(--text); }
-  button.danger { background: transparent; border: 1px solid var(--danger); color: var(--danger); }
-  button.sm { padding: 5px 10px; font-size: 12px; }
-  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
-  .msg { margin-top: 10px; font-size: 13px; min-height: 18px; }
-  .msg.ok { color: var(--ok); } .msg.err { color: var(--danger); }
-
-  /* Tables */
-  table { width: 100%; border-collapse: collapse; margin-top: 10px; }
-  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); font-size: 13px; }
-  th { color: var(--muted); font-weight: 500; white-space: nowrap; }
-  .badge { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 12px; }
-  .badge.active, .badge.idle, .badge.succeeded { background: rgba(16,185,129,.15); color: var(--ok); }
-  .badge.revoked, .badge.failed, .badge.busy { background: rgba(239,68,68,.15); color: var(--danger); }
-  .badge.queued, .badge.retrying { background: rgba(245,158,11,.15); color: var(--warn); }
-  .badge.running { background: rgba(99,102,241,.15); color: var(--primary); }
-  .badge.canceled { background: rgba(154,161,173,.2); color: var(--muted); }
-  .badge.pending { background: rgba(154,161,173,.2); color: var(--muted); }
-  .badge.blocked { background: rgba(239,68,68,.15); color: var(--danger); }
-  .badge.enabled { background: rgba(16,185,129,.15); color: var(--ok); }
-  .badge.disabled { background: rgba(154,161,173,.2); color: var(--muted); }
-  .clip { max-width: 280px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .muted { color: var(--muted); }
-  .hidden { display: none; }
-  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; word-break: break-all; }
-  .pre { white-space: pre-wrap; word-break: break-word; background: var(--bg);
-    border: 1px solid var(--border); border-radius: 8px; padding: 12px; font-size: 13px; }
-
-  /* Stream viewer */
-  .stream { height: 420px; overflow-y: auto; background: #0a0c10; border: 1px solid var(--border);
-    border-radius: 10px; padding: 12px; font-family: ui-monospace, Menlo, monospace; font-size: 12px; }
-  .stream .line { padding: 2px 0; border-bottom: 1px solid #1a1d24; }
-  .stream .t { color: var(--primary); }
-  .stream .meta { color: var(--muted); }
-  .toast-wrap { position: fixed; top: 14px; right: 14px; z-index: 99; display: flex; flex-direction: column; gap: 8px; max-width: 360px; }
-  .toast { padding: 10px 14px; border-radius: 8px; font-size: 13px; line-height: 1.5; background: var(--panel); border: 1px solid var(--border); box-shadow: 0 6px 20px rgba(0,0,0,.35); animation: toastIn .25s ease; }
-  .toast.warn { border-left: 3px solid var(--warn); }
-  .toast.crit { border-left: 3px solid var(--danger); }
-  .toast.info { border-left: 3px solid var(--primary); }
-  .toast b { display: block; margin-bottom: 2px; }
-  @keyframes toastIn { from { opacity: 0; transform: translateY(-6px); } to { opacity: 1; transform: none; } }
-</style>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/assets/style.css">
 </head>
 <body>
 <div class="toast-wrap" id="toastWrap"></div>
 <div class="app">
   <aside class="sidebar">
-    <div class="logo">OpenCode <span>Backend</span></div>
+    <div class="logo">
+      <span class="mark" aria-hidden="true"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 7l6 5-6 5"/><path d="M13 17h6"/></svg></span>
+      <span class="txt">OpenCode <span>Backend</span></span>
+    </div>
     <nav class="nav" id="nav">
-      <button data-page="overview" class="active">概览</button>
-      <button data-page="tasks">任务</button>
-      <button data-page="stream">实时流</button>
-      <button data-page="projects">项目 / 会话</button>
-      <button data-page="rules">自动化规则</button>
-      <button data-page="archives">会话归档</button>
-      <button data-page="audit">审计日志</button>
-      <button data-page="tokens">Token 管理</button>
-      <button data-page="settings">设置</button>
+      <div class="nav-label">控制台</div>
+      <button data-page="overview"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg><span class="txt">概览</span></button>
+      <button data-page="workbench"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="14" rx="2"/><path d="M3 9h18M8 4v5M16 4v5"/><path d="M8 17h3M14 17h4"/></svg><span class="txt">AI 工作台</span></button>
+      <button data-page="tasks"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg><span class="txt">任务</span></button>
+      <button data-page="stream"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg><span class="txt">实时流</span></button>
+      <div class="nav-label">开发</div>
+      <button data-page="projects"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z"/></svg><span class="txt">项目 / 会话</span></button>
+      <button data-page="rules"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 3a9 9 0 0 1 0 18M12 8v4l3 2"/></svg><span class="txt">自动化规则</span></button>
+      <button data-page="archives"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="4" rx="1"/><path d="M5 8v10a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8M10 12h4"/></svg><span class="txt">会话归档</span></button>
+      <div class="nav-label">系统</div>
+      <button data-page="audit"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M9 13h6M9 17h6"/></svg><span class="txt">审计日志</span></button>
+      <button data-page="tokens"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg><span class="txt">Token 管理</span></button>
+      <button data-page="settings"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg><span class="txt">设置</span></button>
     </nav>
-    <button class="ghost" style="margin-top:24px;width:100%" onclick="doLogout()">退出登录</button>
+    <div class="sidebar-foot">
+      <input type="text" id="appToken" class="mini-token mono" placeholder="APP Token…">
+      <button class="ghost sm" onclick="saveAppToken()">保存 Token</button>
+      <button class="tertiary sm" onclick="doLogout()">退出登录</button>
+    </div>
   </aside>
 
-  <main class="main">
-    <div class="topbar">
+  <div class="main">
+    <header class="topbar">
       <h1 id="pageTitle">概览</h1>
-      <div class="tokbox">
-        <input type="text" id="appToken" class="mono" placeholder="APP Token（任务/项目/归档/流式需要）">
-        <button class="ghost sm" onclick="saveAppToken()">保存</button>
-      </div>
-    </div>
+      <span class="plate">startburst-backend</span>
+    </header>
 
-    <!-- 登录页 -->
-    <div id="loginPage" class="page active">
-      <div class="card" style="max-width:420px">
-        <h2>登录</h2>
-        <label>管理密码</label>
-        <input type="password" id="pw" placeholder="默认密码见安装提示">
-        <div class="row" style="margin-top:12px">
-          <button onclick="doLogin()">登录</button>
-        </div>
-        <div id="loginMsg" class="msg"></div>
-      </div>
-    </div>
+    <div class="content">
 
-    <!-- 概览 -->
-    <div id="page-overview" class="page">
-      <div class="grid" id="statGrid"></div>
-      <div class="card">
-        <h2>系统信息</h2>
-        <div id="sysInfo" class="muted">加载中…</div>
-        <div id="healthInfo" class="muted" style="margin-top:6px"></div>
-        <div id="uiVersion" class="muted" style="margin-top:6px"></div>
+      <!-- 登录页 -->
+      <div id="loginPage" class="page login-wrap hidden">
+        <div class="card login-card">
+          <div class="login-logo" aria-hidden="true"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 7l6 5-6 5"/><path d="M13 17h6"/></svg></div>
+          <h1>OpenCode Backend</h1>
+          <div class="sub">管理控制台 · 会话编排 / 自动化 / 推送</div>
+          <label>管理密码</label>
+          <input type="password" id="pw" placeholder="默认密码见安装提示">
+          <div class="row" style="margin-top:14px">
+            <button onclick="doLogin()" class="lg">登录</button>
+          </div>
+          <div id="loginMsg" class="msg"></div>
+        </div>
       </div>
-      <div class="card">
-        <h2>Token 使用排行</h2>
-        <table id="usageTable"><thead><tr><th>Token</th><th>调用次数</th></tr></thead><tbody></tbody></table>
-      </div>
-    </div>
 
-    <!-- 任务 -->
-    <div id="page-tasks" class="page">
-      <div class="card">
-        <h2>提交任务</h2>
-        <label>Prompt</label>
-        <textarea id="taskPrompt" placeholder="例如：给所有 controller 加日志"></textarea>
-        <label>目录（可选，新会话用）</label>
-        <input type="text" id="taskDirectory" placeholder="/path/to/repo">
-        <label>前置任务 ID（可选，等它成功后再执行）</label>
-        <input type="text" id="taskDependsOn" class="mono" placeholder="task_...">
-        <div class="row" style="margin-top:12px">
-          <button onclick="submitTask()">提交任务</button>
-          <span class="muted" style="font-size:12px">提交后立即返回，后台执行；填了前置任务则先等待它完成</span>
+      <!-- 概览 -->
+      <div id="page-overview" class="page">
+        <div class="grid" id="statGrid"></div>
+        <div class="card">
+          <h2><span class="dot"></span>系统信息</h2>
+          <div id="sysInfo" class="muted" style="font-size:13px">加载中…</div>
+          <div id="healthInfo" class="muted" style="margin-top:6px;font-size:13px"></div>
+          <div id="uiVersion" class="muted" style="margin-top:6px;font-size:12px"></div>
         </div>
-        <div id="taskSubmitMsg" class="msg"></div>
-      </div>
-      <div class="card">
-        <h2>任务列表</h2>
-        <div class="row">
-          <select id="taskFilter" style="width:auto">
-            <option value="">全部状态</option>
-            <option value="queued">排队中</option>
-            <option value="running">执行中</option>
-            <option value="succeeded">已完成</option>
-            <option value="failed">失败</option>
-            <option value="canceled">已取消</option>
-            <option value="pending">等待前置</option>
-            <option value="blocked">被阻塞</option>
-          </select>
-          <button class="ghost" onclick="loadTasks()">刷新</button>
-          <label style="margin:0"><input type="checkbox" id="taskAutoRefresh" checked> 自动刷新</label>
+        <div class="card">
+          <h2><span class="dot"></span>Token 使用排行</h2>
+          <div class="table-wrap">
+            <table id="usageTable"><thead><tr><th>Token</th><th>调用次数</th></tr></thead><tbody></tbody></table>
+          </div>
         </div>
-        <div id="taskMsg" class="msg"></div>
-        <table id="taskTable"><thead><tr><th>ID</th><th>目录</th><th>Prompt</th><th>状态</th><th>前置</th><th>结果/错误</th><th>AI 摘要</th><th>创建时间</th><th></th></tr></thead><tbody></tbody></table>
       </div>
-    </div>
 
-    <!-- 实时流 -->
-    <div id="page-stream" class="page">
-      <div class="card">
-        <h2>上游事件流（SSE）</h2>
-        <p class="muted" style="font-size:12px;margin-top:0">
-          后端持有到本机 OpenCode 的长连接并逐事件转发，断线自动重连。需在右上角填入 APP Token 后才能打开。
-        </p>
-        <div class="row">
-          <button class="ghost" id="streamToggle" onclick="toggleStream()">打开</button>
-          <button class="ghost" onclick="clearStream()">清空</button>
-          <span id="streamState" class="muted" style="font-size:12px">未连接</span>
+      <!-- AI 工作台 -->
+      <div id="page-workbench" class="page wb-page">
+        <div class="wb-stats">
+          <div class="wb-stat"><div class="n" id="wbCountQ">0</div><div class="l"><span class="dot dot-q"></span>提问中</div></div>
+          <div class="wb-stat"><div class="n" id="wbCountB">0</div><div class="l"><span class="dot dot-b"></span>处理中</div></div>
+          <div class="wb-stat"><div class="n" id="wbCountI">0</div><div class="l"><span class="dot dot-i"></span>空闲</div></div>
+          <div class="wb-stat"><div class="n" id="wbCountT">0</div><div class="l"><span class="dot dot-t"></span>会话总数</div></div>
+          <div class="wb-stat"><div class="n" id="wbCountE">0</div><div class="l"><span class="dot dot-e"></span>实时动态</div></div>
         </div>
-        <div id="streamMsg" class="msg"></div>
-        <div id="streamBox" class="stream"></div>
+        <div class="wb-grid">
+          <div class="wb-col wb-col-sessions">
+            <div class="wb-col-head">会话 <span class="cnt" id="wbListHint"></span></div>
+            <input type="text" id="wbFilter" class="wb-search" placeholder="搜索会话标题 / 目录…">
+            <div class="wb-filters" id="wbFilters"></div>
+            <div class="wb-body">
+              <div class="wb-list" id="wbList"><div class="wb-placeholder">加载中…</div></div>
+            </div>
+          </div>
+          <div class="wb-col wb-col-panel">
+            <div id="wbPanelPlaceholder" class="wb-placeholder">
+              <div class="ico" aria-hidden="true"><svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8M12 17v4"/><path d="M7 9h3M7 12h3m4-3h3m-3 3h3"/></svg></div>
+              选择左侧会话，查看 AI 决策面板<br>
+              <span class="muted" style="font-size:12px">AI 最近回复 · 待决问题 · 最近对话 · 快捷回复</span>
+            </div>
+            <div id="wbPanel" class="wb-panel hidden"></div>
+          </div>
+          <div class="wb-col wb-col-events">
+            <div class="wb-col-head">实时动态 <span class="cnt" id="wbEventCount"></span>
+              <button class="ghost sm" onclick="wbClearEvents()">清空</button>
+            </div>
+            <div class="wb-body">
+              <div class="wb-events" id="wbEvents"><div class="wb-placeholder">暂无动态，等待事件推送…</div></div>
+            </div>
+          </div>
+        </div>
       </div>
-    </div>
 
-    <!-- 项目 -->
-    <div id="page-projects" class="page">
-      <div class="card">
-        <h2>本机 OpenCode 会话</h2>
-        <div class="row"><button class="ghost" onclick="loadProjects()">刷新</button></div>
-        <div id="projectMsg" class="msg"></div>
-        <table id="projectTable"><thead><tr><th>目录</th><th>会话数</th><th></th></tr></thead><tbody></tbody></table>
-      </div>
-      <div id="projectSessionCard" class="card hidden">
-        <h2>会话明细 <span id="projectSessionDir" class="mono muted" style="font-size:13px"></span></h2>
-        <div class="row">
-          <button class="ghost" onclick="closeProjectSessions()">收起</button>
+      <!-- 任务 -->
+      <div id="page-tasks" class="page">
+        <div class="card">
+          <h2><span class="dot"></span>提交任务</h2>
+          <label>Prompt</label>
+          <textarea id="taskPrompt" placeholder="例如：给所有 controller 加日志"></textarea>
+          <div class="grid" style="grid-template-columns:1fr 1fr">
+            <div><label>目录（可选，新会话用）</label>
+            <input type="text" id="taskDirectory" placeholder="/path/to/repo"></div>
+            <div><label>前置任务 ID（可选，等它成功后再执行）</label>
+            <input type="text" id="taskDependsOn" class="mono" placeholder="task_..."></div>
+          </div>
+          <div class="row" style="margin-top:12px">
+            <button onclick="submitTask()">提交任务</button>
+            <span class="muted" style="font-size:12px">提交后立即返回，后台执行；填了前置任务则先等待它完成</span>
+          </div>
+          <div id="taskSubmitMsg" class="msg"></div>
         </div>
-        <table id="projectSessionTable"><thead><tr><th>标题</th><th>会话 ID</th><th>模型</th><th>Agent</th><th>目录</th><th>Token(输入/输出)</th><th>状态</th><th>更新时间</th></tr></thead><tbody></tbody></table>
+        <div class="card">
+          <h2><span class="dot"></span>任务列表</h2>
+          <div class="row" style="margin-bottom:8px">
+            <select id="taskFilter" style="width:auto">
+              <option value="">全部状态</option>
+              <option value="queued">排队中</option>
+              <option value="running">执行中</option>
+              <option value="succeeded">已完成</option>
+              <option value="failed">失败</option>
+              <option value="canceled">已取消</option>
+              <option value="pending">等待前置</option>
+              <option value="blocked">被阻塞</option>
+            </select>
+            <button class="ghost" onclick="loadTasks()">刷新</button>
+            <label style="margin:0;display:flex;align-items:center;gap:6px"><input type="checkbox" id="taskAutoRefresh" checked style="width:auto"> 自动刷新</label>
+          </div>
+          <div id="taskMsg" class="msg"></div>
+          <div class="table-wrap">
+            <table id="taskTable"><thead><tr><th>ID</th><th>目录</th><th>Prompt</th><th>状态</th><th>前置</th><th>结果/错误</th><th>AI 摘要</th><th>创建时间</th><th></th></tr></thead><tbody></tbody></table>
+          </div>
+        </div>
       </div>
-    </div>
 
-    <!-- 自动化规则 -->
-    <div id="page-rules" class="page">
-      <div class="card">
-        <h2>智能生成规则（AI）</h2>
-        <label>用一句话描述你的自动化需求</label>
-        <textarea id="nlDesc" placeholder="例如：每天早上8点检查前端依赖高危漏洞，有的话自动升级并跑测试"></textarea>
-        <div class="row" style="margin-top:12px">
-          <button onclick="generateRule()">生成规则草稿</button>
-          <span id="nlHint" class="muted" style="font-size:12px"></span>
+      <!-- 实时流 -->
+      <div id="page-stream" class="page">
+        <div class="card">
+          <h2><span class="dot"></span>上游事件流（SSE）</h2>
+          <p class="muted" style="font-size:12px;margin-top:0">
+            后端持有到本机 OpenCode 的长连接并逐事件转发，断线自动重连。需在左下角填入 APP Token 后打开。
+          </p>
+          <div class="row">
+            <button class="ghost" id="streamToggle" onclick="toggleStream()">打开</button>
+            <button class="ghost" onclick="clearStream()">清空</button>
+            <span id="streamState" class="muted" style="font-size:12px">未连接</span>
+          </div>
+          <div id="streamMsg" class="msg"></div>
+          <div id="streamBox" class="stream"></div>
         </div>
-        <div id="nlMsg" class="msg"></div>
-        <div id="nlDraft" class="hidden" style="margin-top:14px">
-          <h2 style="font-size:14px">生成结果（请确认后创建）</h2>
+      </div>
+
+      <!-- 项目 -->
+      <div id="page-projects" class="page">
+        <div class="card">
+          <h2><span class="dot"></span>本机 OpenCode 会话</h2>
+          <div class="row"><button class="ghost" onclick="loadProjects()">刷新</button></div>
+          <div id="projectMsg" class="msg"></div>
+          <div class="table-wrap">
+            <table id="projectTable"><thead><tr><th>目录</th><th>会话数</th><th></th></tr></thead><tbody></tbody></table>
+          </div>
+        </div>
+        <div id="projectSessionCard" class="card hidden">
+          <h2><span class="dot"></span>会话明细 <span id="projectSessionDir" class="mono muted" style="font-size:12px;text-transform:none;font-weight:400"></span></h2>
+          <div class="row">
+            <button class="ghost" onclick="closeProjectSessions()">收起</button>
+          </div>
+          <div class="table-wrap">
+            <table id="projectSessionTable"><thead><tr><th>标题</th><th>会话 ID</th><th>模型</th><th>Agent</th><th>目录</th><th>Token(输入/输出)</th><th>状态</th><th>更新时间</th></tr></thead><tbody></tbody></table>
+          </div>
+        </div>
+      </div>
+
+      <!-- 自动化规则 -->
+      <div id="page-rules" class="page">
+        <div class="card">
+          <h2><span class="dot"></span>智能生成规则（AI）</h2>
+          <label>用一句话描述你的自动化需求</label>
+          <textarea id="nlDesc" placeholder="例如：每天早上8点检查前端依赖高危漏洞，有的话自动升级并跑测试"></textarea>
+          <div class="row" style="margin-top:12px">
+            <button onclick="generateRule()">生成规则草稿</button>
+            <span id="nlHint" class="muted" style="font-size:12px"></span>
+          </div>
+          <div id="nlMsg" class="msg"></div>
+          <div id="nlDraft" class="hidden" style="margin-top:14px">
+            <div class="card" style="margin:0 0 10px">
+              <h2 style="text-transform:none">生成结果（请确认后创建）</h2>
+              <div class="grid">
+                <div><label>名称</label><input type="text" id="nlName"></div>
+                <div><label>类型</label>
+                  <select id="nlKind">
+                    <option value="cron">cron 定时</option>
+                    <option value="git">git 监听</option>
+                    <option value="http">webhook</option>
+                  </select>
+                </div>
+              </div>
+              <label>调度</label><input type="text" id="nlSchedule">
+              <label>工作目录</label><input type="text" id="nlDirectory">
+              <label>Prompt</label><textarea id="nlPrompt"></textarea>
+              <div class="row" style="margin-top:12px">
+                <button onclick="confirmNlRule()">确认创建</button>
+                <button class="ghost" onclick="resetNl()">取消</button>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="card">
+          <h2><span class="dot"></span>新建规则</h2>
           <div class="grid">
-            <div><label>名称</label><input type="text" id="nlName"></div>
+            <div><label>名称</label><input type="text" id="ruleName" placeholder="每晚测试"></div>
             <div><label>类型</label>
-              <select id="nlKind">
+              <select id="ruleKind">
                 <option value="cron">cron 定时</option>
-                <option value="git">git 监听</option>
-                <option value="http">webhook</option>
+                <option value="git">git 仓库监听</option>
+                <option value="http">http webhook</option>
               </select>
             </div>
           </div>
-          <label>调度</label><input type="text" id="nlSchedule">
-          <label>工作目录</label><input type="text" id="nlDirectory">
-          <label>Prompt</label><textarea id="nlPrompt"></textarea>
+          <label id="ruleScheduleLabel">调度（cron 表达式 秒 分 时 日 月 周，或 "5m" 间隔）</label>
+          <input type="text" id="ruleSchedule" placeholder="0 0 23 * * *">
+          <label>工作目录</label>
+          <input type="text" id="ruleDirectory" placeholder="/path/to/repo">
+          <label>Prompt</label>
+          <textarea id="rulePrompt" placeholder="跑构建并汇报结果"></textarea>
           <div class="row" style="margin-top:12px">
-            <button onclick="confirmNlRule()">确认创建</button>
-            <button class="ghost" onclick="resetNl()">取消</button>
+            <button onclick="createRule()">创建规则</button>
+          </div>
+          <div id="ruleMsg" class="msg"></div>
+        </div>
+        <div class="card">
+          <h2><span class="dot"></span>规则列表</h2>
+          <div class="row"><button class="ghost" onclick="loadRules()">刷新</button></div>
+          <div class="table-wrap">
+            <table id="ruleTable"><thead><tr><th>名称</th><th>类型</th><th>调度</th><th>Prompt</th><th>状态</th><th>最近触发</th><th>执行次数</th><th></th></tr></thead><tbody></tbody></table>
           </div>
         </div>
       </div>
-      <div class="card">
-        <h2>新建规则</h2>
-        <div class="grid">
-          <div><label>名称</label><input type="text" id="ruleName" placeholder="每晚测试"></div>
-          <div><label>类型</label>
-            <select id="ruleKind">
-              <option value="cron">cron 定时</option>
-              <option value="git">git 仓库监听</option>
-              <option value="http">http webhook</option>
-            </select>
+
+      <!-- 归档 -->
+      <div id="page-archives" class="page">
+        <div class="card">
+          <h2><span class="dot"></span>归档会话</h2>
+          <label>会话 ID</label>
+          <select id="archiveSessionId" style="width:100%"></select>
+          <label>格式</label>
+          <select id="archiveFormat" style="width:auto">
+            <option value="markdown">Markdown</option>
+            <option value="json">JSON</option>
+          </select>
+          <div class="row" style="margin-top:12px"><button onclick="createArchive()">归档</button></div>
+          <div id="archiveMsg" class="msg"></div>
+        </div>
+        <div class="card">
+          <h2><span class="dot"></span>归档列表</h2>
+          <div class="row"><button class="ghost" onclick="loadArchives()">刷新</button></div>
+          <div class="table-wrap">
+            <table id="archiveTable"><thead><tr><th>ID</th><th>会话</th><th>格式</th><th>大小</th><th>创建时间</th><th></th></tr></thead><tbody></tbody></table>
           </div>
         </div>
-        <label id="ruleScheduleLabel">调度（cron 表达式 秒 分 时 日 月 周，或 "5m" 间隔）</label>
-        <input type="text" id="ruleSchedule" placeholder="0 0 23 * * *">
-        <label>工作目录</label>
-        <input type="text" id="ruleDirectory" placeholder="/path/to/repo">
-        <label>Prompt</label>
-        <textarea id="rulePrompt" placeholder="跑构建并汇报结果"></textarea>
-        <div class="row" style="margin-top:12px">
-          <button onclick="createRule()">创建规则</button>
-        </div>
-        <div id="ruleMsg" class="msg"></div>
       </div>
-      <div class="card">
-        <h2>规则列表</h2>
-        <div class="row"><button class="ghost" onclick="loadRules()">刷新</button></div>
-        <table id="ruleTable"><thead><tr><th>名称</th><th>类型</th><th>调度</th><th>Prompt</th><th>状态</th><th>最近触发</th><th>执行次数</th><th></th></tr></thead><tbody></tbody></table>
-      </div>
-    </div>
 
-    <!-- 归档 -->
-    <div id="page-archives" class="page">
-      <div class="card">
-        <h2>归档会话</h2>
-        <label>会话 ID</label>
-        <select id="archiveSessionId" style="width:100%"></select>
-        <label>格式</label>
-        <select id="archiveFormat" style="width:auto">
-          <option value="markdown">Markdown</option>
-          <option value="json">JSON</option>
-        </select>
-        <div class="row" style="margin-top:12px"><button onclick="createArchive()">归档</button></div>
-        <div id="archiveMsg" class="msg"></div>
+      <!-- 审计 -->
+      <div id="page-audit" class="page">
+        <div class="card">
+          <h2><span class="dot"></span>审计日志</h2>
+          <div class="row">
+            <input type="text" id="auditTokenFilter" placeholder="按 Token ID 过滤（可选）" style="width:260px">
+            <button class="ghost" onclick="loadAudit()">查询</button>
+          </div>
+          <div id="auditMsg" class="msg"></div>
+          <div class="table-wrap">
+            <table id="auditTable"><thead><tr><th>时间</th><th>Token</th><th>方法</th><th>路径</th><th>状态码</th></tr></thead><tbody></tbody></table>
+          </div>
+        </div>
       </div>
-      <div class="card">
-        <h2>归档列表</h2>
-        <div class="row"><button class="ghost" onclick="loadArchives()">刷新</button></div>
-        <table id="archiveTable"><thead><tr><th>ID</th><th>会话</th><th>格式</th><th>大小</th><th>创建时间</th><th></th></tr></thead><tbody></tbody></table>
-      </div>
-    </div>
 
-    <!-- 审计 -->
-    <div id="page-audit" class="page">
-      <div class="card">
-        <h2>审计日志</h2>
-        <div class="row">
-          <input type="text" id="auditTokenFilter" placeholder="按 Token ID 过滤（可选）" style="width:260px">
-          <button class="ghost" onclick="loadAudit()">查询</button>
+      <!-- Token 管理 -->
+      <div id="page-tokens" class="page">
+        <div class="card">
+          <h2><span class="dot"></span>生成 Token</h2>
+          <div class="row">
+            <input type="text" id="tokenName" placeholder="设备名，如 我的手机" style="flex:1">
+            <button onclick="doCreateToken()">生成 Token</button>
+          </div>
+          <div id="tokenMsg" class="msg"></div>
+          <div id="newTokenBox" class="hidden" style="margin-top:10px">
+            <label>新 Token（仅显示一次，请立即复制保存）</label>
+            <input type="text" id="newToken" class="mono" readonly>
+          </div>
         </div>
-        <div id="auditMsg" class="msg"></div>
-        <table id="auditTable"><thead><tr><th>时间</th><th>Token</th><th>方法</th><th>路径</th><th>状态码</th></tr></thead><tbody></tbody></table>
+        <div class="card">
+          <h2><span class="dot"></span>Token 列表</h2>
+          <div class="row"><button class="ghost" onclick="loadTokens()">刷新</button></div>
+          <div class="table-wrap">
+            <table id="tokenTable"><thead><tr><th>名称</th><th>ID</th><th>创建时间</th><th>最后使用</th><th>状态</th><th></th></tr></thead><tbody></tbody></table>
+          </div>
+        </div>
       </div>
-    </div>
 
-    <!-- Token 管理 -->
-    <div id="page-tokens" class="page">
-      <div class="card">
-        <h2>生成 Token</h2>
-        <div class="row">
-          <input type="text" id="tokenName" placeholder="设备名，如 我的手机" style="flex:1">
-          <button onclick="doCreateToken()">生成 Token</button>
+      <!-- 设置 -->
+      <div id="page-settings" class="page">
+        <div class="card">
+          <h2><span class="dot"></span>大模型配置（智能编排）</h2>
+          <p class="muted" style="font-size:12px;margin-top:0">用于智能生成规则、任务摘要、失败自愈决策。留空 API 地址则退回纯规则引擎。</p>
+          <label>API 地址（OpenAI 兼容，如 http://192.0.2.150:4000/v1）</label>
+          <input type="text" id="llmUrl" placeholder="留空表示禁用">
+          <label>API Key</label>
+          <input type="password" id="llmKey" placeholder="API Key">
+          <label>模型名（如 sensenova-deepseek-v4-pro）</label>
+          <input type="text" id="llmModel" placeholder="模型名">
+          <div class="row" style="margin-top:12px">
+            <button onclick="saveLLMConfig()">保存</button>
+            <span id="llmStatus" class="muted" style="font-size:12px"></span>
+          </div>
+          <div id="llmMsg" class="msg"></div>
         </div>
-        <div id="tokenMsg" class="msg"></div>
-        <div id="newTokenBox" class="hidden" style="margin-top:10px">
-          <label>新 Token（仅显示一次，请立即复制保存）</label>
-          <input type="text" id="newToken" class="mono" readonly>
+        <div class="card">
+          <h2><span class="dot"></span>修改管理密码</h2>
+          <label>新密码</label>
+          <input type="password" id="newpw" placeholder="至少 4 位">
+          <div class="row" style="margin-top:12px"><button onclick="doChangePassword()">保存密码</button></div>
+          <div id="pwMsg" class="msg"></div>
         </div>
       </div>
-      <div class="card">
-        <h2>Token 列表</h2>
-        <div class="row"><button class="ghost" onclick="loadTokens()">刷新</button></div>
-        <table id="tokenTable"><thead><tr><th>名称</th><th>ID</th><th>创建时间</th><th>最后使用</th><th>状态</th><th></th></tr></thead><tbody></tbody></table>
-      </div>
-    </div>
 
-    <!-- 设置 -->
-    <div id="page-settings" class="page">
-      <div class="card">
-        <h2>大模型配置（智能编排）</h2>
-        <p class="muted" style="font-size:12px;margin-top:0">用于智能生成规则、任务摘要、失败自愈决策。留空 API 地址则退回纯规则引擎。</p>
-        <label>API 地址（OpenAI 兼容，如 http://192.0.2.150:4000/v1）</label>
-        <input type="text" id="llmUrl" placeholder="留空表示禁用">
-        <label>API Key</label>
-        <input type="password" id="llmKey" placeholder="API Key">
-        <label>模型名（如 sensenova-deepseek-v4-pro）</label>
-        <input type="text" id="llmModel" placeholder="模型名">
-        <div class="row" style="margin-top:12px">
-          <button onclick="saveLLMConfig()">保存</button>
-          <span id="llmStatus" class="muted" style="font-size:12px"></span>
-        </div>
-        <div id="llmMsg" class="msg"></div>
-      </div>
-      <div class="card">
-        <h2>修改管理密码</h2>
-        <label>新密码</label>
-        <input type="password" id="newpw" placeholder="至少 4 位">
-        <div class="row" style="margin-top:12px"><button onclick="doChangePassword()">保存密码</button></div>
-        <div id="pwMsg" class="msg"></div>
-      </div>
     </div>
-  </main>
+  </div>
 </div>
 
-<script>
-const SESSION_KEY = "ocb_web_session";
-const APP_TOKEN_KEY = "ocb_app_token";
-let session = localStorage.getItem(SESSION_KEY) || "";
-
-const TASK_STATUS = {
-  queued: "排队中", running: "执行中", succeeded: "已完成",
-  failed: "失败", retrying: "重试中", canceled: "已取消",
-  pending: "等待前置", blocked: "被阻塞",
-};
-const KIND_LABEL = { cron: "cron 定时", git: "git 监听", http: "webhook" };
-
-function hdr(extra) {
-  const h = { "Content-Type": "application/json" };
-  if (session) h["X-Web-Session"] = session;
-  return Object.assign(h, extra || {});
-}
-function appHeaders() {
-  const t = localStorage.getItem(APP_TOKEN_KEY) || "";
-  const h = {};
-  if (t) h["Authorization"] = "Bearer " + t;
-  // 同时带 web session：这些端点后端接受 'web session 或 APP token'，未配置
-  // APP token 的浏览器用户也能查看任务/项目/归档（否则无 token 请求 401）。
-  if (session) h["X-Web-Session"] = session;
-  return h;
-}
-function show(el, msg, ok) {
-  el.textContent = msg || "";
-  el.className = "msg " + (ok ? "ok" : "err");
-}
-// toast 弹出右上角通知，用于展示服务端推送的关键任务事件。
-// kind 为 info / warn / crit；ttl 毫秒后自动消失（默认 6 秒）。
-function toast(title, text, kind, ttl) {
-  const wrap = document.getElementById("toastWrap");
-  if (!wrap) return;
-  const el = document.createElement("div");
-  el.className = "toast " + (kind || "info");
-  el.innerHTML = "<b>" + escapeHtml(title) + "</b>" + escapeHtml(text || "");
-  wrap.appendChild(el);
-  setTimeout(() => {
-    el.style.transition = "opacity .3s";
-    el.style.opacity = "0";
-    setTimeout(() => el.remove(), 300);
-  }, ttl || 6000);
-}
-function escapeHtml(s) {
-  return String(s ?? "").replace(/[&<>"']/g, c =>
-    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
-}
-function fmtDate(v) { return v ? new Date(v).toLocaleString() : "-"; }
-
-async function api(path, opts) {
-  opts = opts || {};
-  const res = await fetch(path, opts);
-  // 仅在请求携带 web session 头（即该请求本就依赖管理员会话）且收到 401
-  // 时才判定会话过期。用 APP token 的请求失败（如 token 被撤销）不应连坐
-  // 清掉仍有效的 web session，否则切菜单时任何一个 token 请求失败都会把
-  // 用户踢回登录页。
-  const usesWebSession = !!(opts.headers && (opts.headers["X-Web-Session"] || opts.headers["x-web-session"]));
-  if (res.status === 401 && session && usesWebSession) {
-    session = "";
-    localStorage.removeItem(SESSION_KEY);
-    show(document.getElementById("loginMsg"), "会话已过期，请重新登录");
-    renderAuth();
-    throw new Error("unauthorized");
-  }
-  return res;
-}
-
-/* ---------- 路由 ---------- */
-const TITLES = {
-  overview: "概览", tasks: "任务", stream: "实时流", projects: "项目 / 会话",
-  rules: "自动化规则", archives: "会话归档", audit: "审计日志",
-  tokens: "Token 管理", settings: "设置",
-};
-function switchPage(name) {
-  document.querySelectorAll(".page").forEach(p => p.classList.remove("active"));
-  document.getElementById("page-" + name).classList.add("active");
-  document.querySelectorAll("#nav button").forEach(b => b.classList.toggle("active", b.dataset.page === name));
-  document.getElementById("pageTitle").textContent = TITLES[name] || name;
-  // 每个页面切到时自动加载数据，避免打开就是空的、还得手动点"刷新"。
-  if (name === "overview") loadOverview();
-  else if (name === "tasks") loadTasks();
-  else if (name === "projects") loadProjects();
-  else if (name === "rules") loadRules();
-  else if (name === "archives") { loadArchives(); loadArchiveSessions(); }
-  else if (name === "audit") loadAudit();
-  else if (name === "tokens") loadTokens();
-  else if (name === "settings") loadLLMConfig();
-  else if (name === "stream") ensureStream();
-}
-document.querySelectorAll("#nav button").forEach(b => {
-  b.addEventListener("click", () => switchPage(b.dataset.page));
-});
-
-/* ---------- 登录 ---------- */
-async function doLogin() {
-  const pw = document.getElementById("pw").value;
-  const res = await fetch("/api/web/session", { method: "POST", headers: hdr(), body: JSON.stringify({ password: pw }) });
-  const data = await res.json();
-  if (!res.ok) { show(document.getElementById("loginMsg"), data.error || "登录失败"); return; }
-  session = data.session;
-  localStorage.setItem(SESSION_KEY, session);
-  renderAuth();
-  loadOverview();
-}
-function doLogout() {
-  session = "";
-  localStorage.removeItem(SESSION_KEY);
-  renderAuth();
-}
-function renderAuth() {
-  const logged = !!session;
-  document.getElementById("loginPage").classList.toggle("active", !logged);
-  document.getElementById("nav").style.display = logged ? "" : "none";
-  if (!logged) {
-    document.querySelectorAll(".page:not(#loginPage)").forEach(p => p.classList.remove("active"));
-  } else {
-    switchPage("overview");
-  }
-}
-
-/* ---------- App token ---------- */
-function saveAppToken() {
-  const v = document.getElementById("appToken").value.trim();
-  localStorage.setItem(APP_TOKEN_KEY, v);
-  document.getElementById("appToken").value = v;
-  if (taskWS) taskWS.close();
-  connectTaskWS();
-  if (document.getElementById("page-stream").classList.contains("active")) ensureStream(true);
-}
-
-/* ---------- 概览 ---------- */
-async function loadOverview() {
-  try {
-    const sysRes = await api("/api/system", { headers: hdr() });
-    const sys = await sysRes.json();
-    document.getElementById("sysInfo").textContent =
-      `后端 startburst-backend · 上游 ${sys.opencodeURL} · OpenCode 版本 ${sys.opencodeVersion || "未知"} · 数据库 ${sys.db}`;
-  } catch (_) { return; }
-
-  const health = await fetch("/api/health").then(r => r.json()).catch(() => ({}));
-  const up = health.upstream ? "可达 ✓" : "不可达 ✗";
-  document.getElementById("healthInfo").textContent =
-    `后端: ${health.status || "?"} · 上游 OpenCode: ${up}`;
-  document.getElementById("uiVersion").textContent = "前端 v2 (auth-fix) · 如非此标识请硬刷新 (Ctrl+Shift+R)";
-
-  try {
-    const st = await (await api("/api/stats", { headers: hdr() })).json();
-    const t = st.tasks || {};
-    const stats = [
-      ["任务总数", t.total ?? 0], ["排队中", t.queued ?? 0], ["执行中", t.running ?? 0],
-      ["已完成", t.succeeded ?? 0], ["失败", t.failed ?? 0], ["重试过", t.retried ?? 0],
-      ["归档数", st.archives ?? 0],
-    ];
-    document.getElementById("statGrid").innerHTML = stats.map(([k, v]) =>
-      `<div class="stat"><div class="k">${k}</div><div class="v">${v}</div></div>`).join("");
-
-    const tb = document.querySelector("#usageTable tbody");
-    tb.innerHTML = "";
-    for (const u of (st.tokenUsage || [])) {
-      tb.insertAdjacentHTML("beforeend", `<tr><td>${escapeHtml(u.tokenName || u.tokenId)}</td><td>${u.calls}</td></tr>`);
-    }
-  } catch (_) {}
-}
-
-/* ---------- 任务 ---------- */
-async function submitTask() {
-  const prompt = document.getElementById("taskPrompt").value.trim();
-  const directory = document.getElementById("taskDirectory").value.trim();
-  const dependsOn = document.getElementById("taskDependsOn").value.trim();
-  if (!prompt) { show(document.getElementById("taskSubmitMsg"), "请填写 Prompt"); return; }
-  const body = { prompt, directory };
-  if (dependsOn) body.dependsOn = dependsOn;
-  const res = await api("/api/tasks", { method: "POST", headers: appHeaders(), body: JSON.stringify(body) });
-  const data = await res.json();
-  if (!res.ok) { show(document.getElementById("taskSubmitMsg"), data.error || "提交失败"); return; }
-  const note = data.status === "pending" ? "（等待前置任务）" : "";
-  show(document.getElementById("taskSubmitMsg"), `已提交任务 ${data.id}${note}`, true);
-  document.getElementById("taskPrompt").value = "";
-  document.getElementById("taskDependsOn").value = "";
-  loadTasks();
-}
-async function loadTasks() {
-  const status = document.getElementById("taskFilter").value;
-  const url = "/api/tasks" + (status ? "?status=" + status : "");
-  const res = await api(url, { headers: appHeaders() });
-  const data = await res.json();
-  if (!res.ok) { show(document.getElementById("taskMsg"), data.error || "加载失败"); return; }
-  const list = data.tasks || [];
-  const tb = document.querySelector("#taskTable tbody");
-  tb.innerHTML = "";
-  for (const t of list) {
-    const detail = (t.error || t.result || t.progress || "").trim();
-    const cancellable = t.status === "queued" || t.status === "running" || t.status === "pending";
-    const tid = escapeHtml(t.id);
-    const action = t.status === "blocked"
-      ? `<button class="ghost sm" data-unblock="${tid}">解阻</button>`
-      : (cancellable ? `<button class="danger sm" data-cancel="${tid}">取消</button>` : "");
-    tb.insertAdjacentHTML("beforeend", `<tr data-task="${tid}">
-      <td class="mono clip" title="${tid}">${tid}</td>
-      <td class="clip" title="${escapeHtml(t.directory)}">${escapeHtml(t.directory) || "-"}</td>
-      <td class="clip" title="${escapeHtml(t.prompt)}">${escapeHtml(t.prompt)}</td>
-      <td><span class="badge ${escapeHtml(t.status)}">${TASK_STATUS[t.status] || t.status}</span></td>
-      <td class="mono clip muted" title="${escapeHtml(t.dependsOn || "")}">${escapeHtml(t.dependsOn) || "-"}</td>
-      <td class="clip" title="${escapeHtml(detail)}">${escapeHtml(detail) || "-"}</td>
-      <td class="clip muted" title="${escapeHtml(t.aiSummary || "")}">${escapeHtml(t.aiSummary) || "-"}</td>
-      <td>${fmtDate(t.createdAt)}</td>
-      <td>${action}</td>
-    </tr>`);
-  }
-  tb.onclick = (e) => {
-    const ub = e.target.closest("button[data-unblock]");
-    if (ub) { unblockTask(ub.dataset.unblock); return; }
-    const cc = e.target.closest("button[data-cancel]");
-    if (cc) cancelTask(cc.dataset.cancel);
-  };
-}
-async function cancelTask(id) {
-  await api("/api/tasks/" + encodeURIComponent(id), { method: "DELETE", headers: appHeaders() });
-  loadTasks();
-}
-// unblockTask 手动解阻：人工处理完前置问题后，把 blocked 任务重新排队。
-async function unblockTask(id) {
-  if (!confirm("确认手动解阻该任务？\n前置任务不会重新执行，该任务会直接重新排队。")) return;
-  const res = await api("/api/tasks/" + encodeURIComponent(id), { method: "POST", headers: appHeaders() });
-  if (!res.ok) {
-    const data = await res.json();
-    show(document.getElementById("taskMsg"), data.error || "解阻失败");
-    return;
-  }
-  loadTasks();
-}
-
-/* ---------- 项目 ---------- */
-async function loadProjects() {
-  const res = await api("/api/projects", { headers: appHeaders() });
-  const data = await res.json();
-  if (!res.ok) { show(document.getElementById("projectMsg"), data.error || "加载失败"); return; }
-  const list = data.projects || [];
-  const tb = document.querySelector("#projectTable tbody");
-  tb.innerHTML = "";
-  for (const p of list) {
-    tb.insertAdjacentHTML("beforeend", `<tr>
-      <td class="clip" title="${escapeHtml(p.directory)}">${escapeHtml(p.directory) || "-"}</td>
-      <td class="mono">${p.sessionCount ?? 0}</td>
-      <td><button class="ghost sm" data-dir="${escapeHtml(p.id)}">查看会话</button></td>
-    </tr>`);
-  }
-  tb.onclick = (e) => {
-    const btn = e.target.closest("button[data-dir]");
-    if (btn) loadProjectSessions(btn.dataset.dir);
-  };
-  if (!list.length) {
-    tb.insertAdjacentHTML("beforeend", `<tr><td colspan="3" class="muted">暂无会话</td></tr>`);
-  }
-}
-async function loadProjectSessions(dir) {
-  const card = document.getElementById("projectSessionCard");
-  card.classList.remove("hidden");
-  document.getElementById("projectSessionDir").textContent = dir;
-  const tb = document.querySelector("#projectSessionTable tbody");
-  tb.innerHTML = `<tr><td colspan="8" class="muted">加载中…</td></tr>`;
-  const res = await api("/api/projects/" + encodeURIComponent(dir), { headers: appHeaders() });
-  const data = await res.json();
-  if (!res.ok) { tb.innerHTML = `<tr><td colspan="8" class="muted">${escapeHtml(data.error || "加载失败")}</td></tr>`; return; }
-  const list = data.sessions || [];
-  tb.innerHTML = "";
-  for (const s of list) {
-    const cls = s.busy ? "busy" : "idle";
-    const label = s.busy ? "忙碌" : "空闲";
-    const tokens = s.inputTokens != null ? `${fmtNum(s.inputTokens)} / ${fmtNum(s.outputTokens)}` : "-";
-    const model = (s.model && typeof s.model === "object" && s.model.id) ? s.model.id : (s.model || "-");
-    const sdir = (s.directory || s.path || "").toString().replace(/^\/workspaces\/?/, "~/");
-    tb.insertAdjacentHTML("beforeend", `<tr>
-      <td class="clip" title="${escapeHtml(s.title || s.id)}">${escapeHtml(s.title || s.slug || s.id)}</td>
-      <td class="mono clip muted" title="${escapeHtml(s.id)}">${escapeHtml(s.id.slice(0, 22))}</td>
-      <td class="clip">${escapeHtml(model)}</td>
-      <td>${escapeHtml(s.agent) || "-"}</td>
-      <td class="mono clip muted" title="${escapeHtml(s.directory || s.path || "")}">${escapeHtml(sdir)}</td>
-      <td class="mono">${tokens}</td>
-      <td><span class="badge ${cls}">${label}</span></td>
-      <td>${s.updatedMs ? new Date(s.updatedMs).toLocaleString() : "-"}</td>
-    </tr>`);
-  }
-  if (!list.length) {
-    tb.insertAdjacentHTML("beforeend", `<tr><td colspan="8" class="muted">暂无会话</td></tr>`);
-  }
-}
-function closeProjectSessions() {
-  document.getElementById("projectSessionCard").classList.add("hidden");
-  document.getElementById("projectSessionDir").textContent = "";
-}
-function fmtNum(n) {
-  if (n >= 1e9) return (n / 1e9).toFixed(1) + "B";
-  if (n >= 1e6) return (n / 1e6).toFixed(1) + "M";
-  if (n >= 1e3) return (n / 1e3).toFixed(1) + "K";
-  return String(n);
-}
-
-/* ---------- 规则 ---------- */
-function ruleScheduleLabel() {
-  const kind = document.getElementById("ruleKind").value;
-  document.getElementById("ruleScheduleLabel").textContent =
-    kind === "cron" ? "调度（cron 表达式「秒 分 时 日 月 周」，或如 5m/1h 间隔）"
-    : kind === "git" ? "仓库路径（Schedule，监听 HEAD 变化）"
-    : "触发路径（target 过滤，如 /workspaces/opencode）";
-}
-document.getElementById("ruleKind").addEventListener("change", ruleScheduleLabel);
-ruleScheduleLabel();
-
-/* ---------- 智能生成规则 ---------- */
-async function generateRule() {
-  const desc = document.getElementById("nlDesc").value.trim();
-  const msg = document.getElementById("nlMsg");
-  const hint = document.getElementById("nlHint");
-  if (!desc) { show(msg, "请填写自动化需求描述"); return; }
-  hint.textContent = "生成中…（可能需要数秒）";
-  try {
-    const res = await api("/api/rules/generate", { method: "POST", headers: hdr(), body: JSON.stringify({ description: desc }) });
-    const data = await res.json();
-    hint.textContent = "";
-    if (!res.ok) {
-      show(msg, data.error || "生成失败");
-      return;
-    }
-    const d = data.draft || {};
-    document.getElementById("nlName").value = d.name || "";
-    document.getElementById("nlKind").value = d.kind || "cron";
-    document.getElementById("nlSchedule").value = d.schedule || "";
-    document.getElementById("nlDirectory").value = d.directory || "";
-    document.getElementById("nlPrompt").value = d.prompt || "";
-    document.getElementById("nlDraft").classList.remove("hidden");
-    show(msg, "已生成草稿，请确认后创建", true);
-  } catch (e) {
-    hint.textContent = "";
-    if (e.message !== "unauthorized") show(msg, "生成失败，请稍后重试");
-  }
-}
-async function confirmNlRule() {
-  const body = {
-    name: document.getElementById("nlName").value.trim(),
-    kind: document.getElementById("nlKind").value,
-    schedule: document.getElementById("nlSchedule").value.trim(),
-    directory: document.getElementById("nlDirectory").value.trim(),
-    prompt: document.getElementById("nlPrompt").value.trim(),
-    enabled: true,
-  };
-  const msg = document.getElementById("nlMsg");
-  if (!body.name || !body.prompt) { show(msg, "名称和 Prompt 不能为空"); return; }
-  const res = await api("/api/rules", { method: "POST", headers: hdr(), body: JSON.stringify(body) });
-  const data = await res.json();
-  if (!res.ok) { show(msg, data.error || "创建失败"); return; }
-  show(msg, "规则已创建", true);
-  resetNl();
-  loadRules();
-}
-function resetNl() {
-  document.getElementById("nlDesc").value = "";
-  document.getElementById("nlDraft").classList.add("hidden");
-  document.getElementById("nlMsg").textContent = "";
-  document.getElementById("nlHint").textContent = "";
-}
-
-async function createRule() {
-  const body = {
-    name: document.getElementById("ruleName").value.trim(),
-    kind: document.getElementById("ruleKind").value,
-    schedule: document.getElementById("ruleSchedule").value.trim(),
-    directory: document.getElementById("ruleDirectory").value.trim(),
-    prompt: document.getElementById("rulePrompt").value.trim(),
-    enabled: true,
-  };
-  if (!body.name || !body.prompt) { show(document.getElementById("ruleMsg"), "请填写名称和 Prompt"); return; }
-  const res = await api("/api/rules", { method: "POST", headers: hdr(), body: JSON.stringify(body) });
-  const data = await res.json();
-  if (!res.ok) { show(document.getElementById("ruleMsg"), data.error || "创建失败"); return; }
-  show(document.getElementById("ruleMsg"), "规则已创建", true);
-  document.getElementById("ruleName").value = ""; document.getElementById("rulePrompt").value = "";
-  loadRules();
-}
-async function loadRules() {
-  const res = await api("/api/rules", { headers: hdr() });
-  const data = await res.json();
-  if (!res.ok) return;
-  const list = data.rules || [];
-  const tb = document.querySelector("#ruleTable tbody");
-  tb.innerHTML = "";
-  for (const r of list) {
-    tb.insertAdjacentHTML("beforeend", `<tr data-rule="${escapeHtml(r.id)}">
-      <td>${escapeHtml(r.name)}</td>
-      <td>${KIND_LABEL[r.kind] || r.kind}</td>
-      <td class="clip mono" title="${escapeHtml(r.schedule)}">${escapeHtml(r.schedule) || "-"}</td>
-      <td class="clip" title="${escapeHtml(r.prompt)}">${escapeHtml(r.prompt)}</td>
-      <td><span class="badge ${r.enabled ? "enabled" : "disabled"}">${r.enabled ? "启用" : "停用"}</span></td>
-      <td>${fmtDate(r.lastFiredAt)}</td>
-      <td id="exec-count-${escapeHtml(r.id)}">…</td>
-      <td><button class="danger sm" data-del-rule="${escapeHtml(r.id)}">删除</button></td>
-    </tr>`);
-    loadRuleExecCount(r.id);
-  }
-  tb.onclick = (e) => {
-    const btn = e.target.closest("button[data-del-rule]");
-    if (btn) deleteRule(btn.dataset.delRule);
-  };
-}
-async function loadRuleExecCount(id) {
-  try {
-    const res = await api(`/api/rules/${encodeURIComponent(id)}/executions`, { headers: hdr() });
-    const data = await res.json();
-    const el = document.getElementById("exec-count-" + id);
-    if (el) el.textContent = data.total ?? 0;
-  } catch (_) {}
-}
-async function deleteRule(id) {
-  await api("/api/rules/" + encodeURIComponent(id), { method: "DELETE", headers: hdr() });
-  loadRules();
-}
-
-/* ---------- 归档 ---------- */
-// 加载本机 OpenCode 会话列表到归档下拉框（按标题+ID 展示，便于选择）。
-async function loadArchiveSessions() {
-  const sel = document.getElementById("archiveSessionId");
-  if (!sel || sel.dataset.loaded) return;
-  sel.dataset.loaded = "1";
-  sel.innerHTML = '<option value="">加载中…</option>';
-  try {
-    const res = await api("/api/opencode/session", { headers: appHeaders() });
-    const data = await res.json();
-    const items = (Array.isArray(data) ? data : (data.sessions || data.data || [])).slice(0, 200);
-    sel.innerHTML = "";
-    if (!items.length) {
-      sel.innerHTML = '<option value="">无可用会话</option>';
-      return;
-    }
-    for (const it of items) {
-      const id = it.id || "";
-      const label = (it.title || it.slug || id).toString().slice(0, 60);
-      sel.add(new Option(label + "  ·  " + id.slice(0, 20), id));
-    }
-  } catch (_) {
-    sel.innerHTML = '<option value="">会话列表加载失败</option>';
-  }
-}
-async function createArchive() {
-  const sessionId = document.getElementById("archiveSessionId").value.trim();
-  const format = document.getElementById("archiveFormat").value;
-  if (!sessionId) { show(document.getElementById("archiveMsg"), "请填写会话 ID"); return; }
-  const res = await api("/api/archives", { method: "POST", headers: appHeaders(), body: JSON.stringify({ sessionId, format }) });
-  const data = await res.json();
-  if (!res.ok) { show(document.getElementById("archiveMsg"), data.error || "归档失败"); return; }
-  show(document.getElementById("archiveMsg"), `已归档（${data.size} 字节）`, true);
-  loadArchives();
-}
-async function loadArchives() {
-  const res = await api("/api/archives", { headers: appHeaders() });
-  const data = await res.json();
-  if (!res.ok) return;
-  const list = data.archives || [];
-  const tb = document.querySelector("#archiveTable tbody");
-  tb.innerHTML = "";
-  for (const a of list) {
-    tb.insertAdjacentHTML("beforeend", `<tr>
-      <td class="mono clip" title="${escapeHtml(a.id)}">${escapeHtml(a.id)}</td>
-      <td class="mono clip">${escapeHtml(a.sessionId)}</td>
-      <td>${escapeHtml(a.format)}</td>
-      <td>${a.size}</td>
-      <td>${fmtDate(a.createdAt)}</td>
-      <td>
-        <button class="ghost sm" data-view-archive="${escapeHtml(a.id)}">查看</button>
-        <button class="ghost sm" data-download-archive="${escapeHtml(a.id)}" data-fmt="${escapeHtml(a.format)}">下载</button>
-        <button class="danger sm" data-del-archive="${escapeHtml(a.id)}">删除</button>
-      </td>
-    </tr>`);
-  }
-  tb.onclick = (e) => {
-    const vw = e.target.closest("button[data-view-archive]");
-    if (vw) { viewArchive(vw.dataset.viewArchive); return; }
-    const dl = e.target.closest("button[data-download-archive]");
-    if (dl) { downloadArchive(dl.dataset.downloadArchive, dl.dataset.fmt); return; }
-    const btn = e.target.closest("button[data-del-archive]");
-    if (btn) deleteArchive(btn.dataset.delArchive);
-  };
-}
-async function deleteArchive(id) {
-  await api("/api/archives/" + encodeURIComponent(id), { method: "DELETE", headers: appHeaders() });
-  loadArchives();
-}
-// viewArchive 在新标签页展示归档全文。
-async function viewArchive(id) {
-  const res = await api("/api/archives/" + encodeURIComponent(id), { headers: appHeaders() });
-  const data = await res.json();
-  if (!res.ok) { show(document.getElementById("archiveMsg"), data.error || "加载失败"); return; }
-  const win = window.open("", "_blank");
-  if (!win) { show(document.getElementById("archiveMsg"), "浏览器拦截了新窗口，请允许弹窗"); return; }
-  const isJson = data.format === "json";
-  win.document.write("<!DOCTYPE html><html><head><meta charset=utf-8><title>" + escapeHtml(data.title || data.id) + "</title></head><body><pre style='white-space:pre-wrap'>" + (isJson ? escapeHtml(JSON.stringify(JSON.parse(data.content || "[]"), null, 2)) : escapeHtml(data.content || "")) + "</pre></body></html>");
-  win.document.close();
-}
-// downloadArchive 把归档全文下载为本地文件。
-async function downloadArchive(id, fmt) {
-  const res = await api("/api/archives/" + encodeURIComponent(id), { headers: appHeaders() });
-  const data = await res.json();
-  if (!res.ok) { show(document.getElementById("archiveMsg"), data.error || "下载失败"); return; }
-  const ext = fmt === "json" ? "json" : "md";
-  const blob = new Blob([data.content || ""], { type: fmt === "json" ? "application/json" : "text/markdown" });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = (data.id || "archive") + "." + ext;
-  a.click();
-  URL.revokeObjectURL(url);
-}
-
-/* ---------- 审计 ---------- */
-async function loadAudit() {
-  const tid = document.getElementById("auditTokenFilter").value.trim();
-  const url = "/api/audit?limit=100" + (tid ? "&tokenId=" + encodeURIComponent(tid) : "");
-  const res = await api(url, { headers: hdr() });
-  const data = await res.json();
-  if (!res.ok) return;
-  const list = data.audit || [];
-  const tb = document.querySelector("#auditTable tbody");
-  tb.innerHTML = "";
-  for (const a of list) {
-    tb.insertAdjacentHTML("beforeend", `<tr>
-      <td>${fmtDate(a.createdAt)}</td>
-      <td>${escapeHtml(a.tokenName || a.tokenId)}</td>
-      <td>${escapeHtml(a.method)}</td>
-      <td class="mono">${escapeHtml(a.path)}</td>
-      <td>${a.status}</td>
-    </tr>`);
-  }
-}
-
-/* ---------- Token ---------- */
-async function loadTokens() {
-  const res = await api("/api/tokens", { headers: hdr() });
-  if (!res.ok) return;
-  const tokens = await res.json();
-  const tb = document.querySelector("#tokenTable tbody");
-  tb.innerHTML = "";
-  for (const t of tokens) {
-    const active = !t.revokedAt;
-    tb.insertAdjacentHTML("beforeend", `<tr>
-      <td>${escapeHtml(t.name || "(未命名)")}</td>
-      <td class="mono clip" title="${escapeHtml(t.id)}">${escapeHtml(t.id)}</td>
-      <td>${fmtDate(t.createdAt)}</td>
-      <td>${fmtDate(t.lastUsed)}</td>
-      <td><span class="badge ${active ? "active" : "revoked"}">${active ? "启用" : "已撤销"}</span></td>
-      <td>${active ? `<button class="danger sm" data-revoke="${escapeHtml(t.id)}">撤销</button>` : ""}</td>
-    </tr>`);
-  }
-  tb.onclick = (e) => {
-    const btn = e.target.closest("button[data-revoke]");
-    if (btn) doRevoke(btn.dataset.revoke);
-  };
-}
-async function doCreateToken() {
-  const name = document.getElementById("tokenName").value.trim();
-  if (!name) { show(document.getElementById("tokenMsg"), "请填写设备名称"); return; }
-  const res = await api("/api/tokens", { method: "POST", headers: hdr(), body: JSON.stringify({ name }) });
-  const data = await res.json();
-  if (!res.ok) { show(document.getElementById("tokenMsg"), data.error || "生成失败"); return; }
-  document.getElementById("newTokenBox").classList.remove("hidden");
-  document.getElementById("newToken").value = data.token;
-  show(document.getElementById("tokenMsg"), "Token 已生成，仅显示一次", true);
-  document.getElementById("tokenName").value = "";
-  loadTokens();
-}
-async function doRevoke(id) {
-  await api("/api/tokens/" + encodeURIComponent(id), { method: "DELETE", headers: hdr() });
-  loadTokens();
-}
-
-/* ---------- 设置 ---------- */
-async function loadLLMConfig() {
-  try {
-    const res = await api("/api/llm", { headers: hdr() });
-    const data = await res.json();
-    document.getElementById("llmUrl").value = data.url || "";
-    document.getElementById("llmModel").value = data.model || "";
-    document.getElementById("llmKey").placeholder = data.keySet ? "已设置（留空不修改）" : "API Key";
-    document.getElementById("llmKey").value = "";
-    const st = document.getElementById("llmStatus");
-    st.textContent = data.enabled ? "已启用" : "未启用";
-    st.style.color = data.enabled ? "var(--ok)" : "var(--muted)";
-  } catch (_) {}
-}
-async function saveLLMConfig() {
-  const body = {
-    url: document.getElementById("llmUrl").value.trim(),
-    key: document.getElementById("llmKey").value,
-    model: document.getElementById("llmModel").value.trim(),
-  };
-  const res = await api("/api/llm", { method: "POST", headers: hdr(), body: JSON.stringify(body) });
-  const data = await res.json();
-  if (!res.ok) { show(document.getElementById("llmMsg"), data.error || "保存失败"); return; }
-  show(document.getElementById("llmMsg"), "已保存" + (data.enabled ? "（已启用）" : "（已禁用）"), true);
-  loadLLMConfig();
-}
-async function doChangePassword() {
-  const np = document.getElementById("newpw").value;
-  const res = await api("/api/web/password", { method: "POST", headers: hdr(), body: JSON.stringify({ newPassword: np }) });
-  const data = await res.json();
-  show(document.getElementById("pwMsg"), res.ok ? "密码已更新" : (data.error || "修改失败"), res.ok);
-}
-
-/* ---------- 自动刷新任务 ---------- */
-setInterval(() => {
-  if (!document.getElementById("taskAutoRefresh").checked) return;
-  const page = document.querySelector(".page.active");
-  if (page && page.id === "page-tasks" && session) loadTasks();
-}, 4000);
-
-/* ---------- 实时推送（任务 AI 摘要 / 状态） ---------- */
-let taskWS = null;
-function connectTaskWS() {
-  const t = localStorage.getItem(APP_TOKEN_KEY) || "";
-  if (!t) return;
-  const proto = location.protocol === "https:" ? "wss:" : "ws:";
-  try {
-    taskWS = new WebSocket(`${proto}//${location.host}/api/ws?token=${encodeURIComponent(t)}`);
-  } catch (_) { return; }
-  taskWS.onmessage = (ev) => {
-    let msg;
-    try { msg = JSON.parse(ev.data); } catch (_) { return; }
-    if (!msg.payload) return;
-    if (msg.type === "task.summary") {
-      updateTaskAI(msg.payload.id, msg.payload.summary, false);
-    } else if (msg.type === "task.failure") {
-      updateTaskAI(msg.payload.id, msg.payload.analysis, true);
-    } else if (msg.type === "task.event") {
-      const p = msg.payload || {};
-      const label = TASK_STATUS[p.status] || p.status || "";
-      if (p.status === "blocked") {
-        // 前置任务失败/取消：需要人工介入，弹通知并跳到任务页。
-        toast("任务被阻塞：" + label, (p.reason ? "原因：" + p.reason : "") + (p.upstream ? "（前置 " + p.upstream + "）" : ""), "warn", 12000);
-      } else if (p.status === "failed") {
-        toast("任务失败：" + label, "", "crit", 12000);
-      } else if (p.status === "queued" && (p.reason === "manual unblock" || p.upstream)) {
-        const why = p.reason === "manual unblock" ? "已手动解阻" : "前置 " + p.upstream + " 已完成";
-        toast("任务已重新排队", why, "info");
-      }
-      const page = document.querySelector(".page.active");
-      if (page && page.id === "page-tasks" && session) loadTasks();
-    }
-  };
-  taskWS.onclose = () => { setTimeout(connectTaskWS, 5000); };
-}
-function updateTaskAI(id, text, isFailure) {
-  const tr = document.querySelector('#taskTable tr[data-task="' + id + '"]');
-  if (!tr || tr.children.length < 7) return;
-  const aiCell = tr.children[6];
-  aiCell.textContent = text || "";
-  aiCell.title = text || "";
-  aiCell.className = isFailure ? "clip" : "clip muted";
-  if (isFailure) aiCell.style.color = "var(--danger)";
-}
-
-/* ---------- 实时事件流（SSE 中继） ---------- */
-const STREAM_MAX_LINES = 500;
-let streamES = null;
-
-function streamState(text, color) {
-  const el = document.getElementById("streamState");
-  el.textContent = text;
-  el.style.color = color || "var(--muted)";
-}
-function appendStreamLine(text) {
-  const box = document.getElementById("streamBox");
-  box.insertAdjacentHTML("beforeend",
-    `<div class="line"><span class="t">${new Date().toLocaleTimeString()}</span> ${escapeHtml(text)}</div>`);
-  while (box.children.length > STREAM_MAX_LINES) box.removeChild(box.firstChild);
-  box.scrollTop = box.scrollHeight;
-}
-function ensureStream(force) {
-  const t = localStorage.getItem(APP_TOKEN_KEY) || "";
-  if (!session && !t) {
-    streamState("未连接");
-    show(document.getElementById("streamMsg"), "先登录，或在右上角填入 APP Token 并保存，再打开事件流");
-    return;
-  }
-  if (streamES && !force) return;
-  if (streamES) { streamES.close(); streamES = null; }
-  document.getElementById("streamToggle").textContent = "停止";
-  // EventSource 不能设自定义头。浏览器页面优先用登录会话（登录后一定有效），
-  // 只有未登录时才回退 APP token——本地残留的无效 token 不会再把页面打回
-  // 401 断开（后端已接受 ?session= 校验）。
-  const cred = session ? "session=" + encodeURIComponent(session) : "token=" + encodeURIComponent(t);
-  const es = new EventSource("/api/stream?" + cred);
-  streamES = es;
-  streamState("连接中…");
-  show(document.getElementById("streamMsg"), "");
-  es.addEventListener("connected", () => streamState("已连接", "var(--ok)"));
-  es.onmessage = (ev) => {
-    let pretty = ev.data;
-    try { pretty = JSON.stringify(JSON.parse(pretty)); } catch (_) {}
-    appendStreamLine(pretty);
-  };
-  es.onerror = () => {
-    if (streamES === es) streamState("已断开，等待后端重连…", "var(--warn)");
-  };
-}
-function toggleStream() {
-  if (streamES) {
-    streamES.close();
-    streamES = null;
-    streamState("已停止");
-    document.getElementById("streamToggle").textContent = "打开";
-  } else {
-    ensureStream(true);
-  }
-}
-function clearStream() {
-  document.getElementById("streamBox").innerHTML = "";
-}
-
-/* ---------- 启动 ---------- */
-document.getElementById("appToken").value = localStorage.getItem(APP_TOKEN_KEY) || "";
-renderAuth();
-if (session) {
-  switchPage("overview");
-  loadOverview();
-  connectTaskWS();
-}
-</script>
+<script src="/assets/app.js"></script>
 </body>
 </html>
