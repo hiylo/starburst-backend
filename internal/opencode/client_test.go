@@ -400,13 +400,13 @@ func TestDoPassesMethodPathQueryBody(t *testing.T) {
 		if auth := r.Header.Get("Authorization"); auth != "" {
 			t.Fatalf("Authorization must not be relayed by Do, got %q", auth)
 		}
-		if r.Header.Get("X-Startburst-Directory") != "/w" {
+		if r.Header.Get("X-Starburst-Directory") != "/w" {
 			t.Fatalf("custom header not relayed")
 		}
 		w.WriteHeader(http.StatusNoContent)
 	})
 	c := New(srv.URL)
-	hdr := http.Header{"X-Startburst-Directory": {"/w"}, "Authorization": {"Bearer app-token"}}
+	hdr := http.Header{"X-Starburst-Directory": {"/w"}, "Authorization": {"Bearer app-token"}}
 	resp, err := c.Do(context.Background(), http.MethodPost, "/session/s1/prompt_async",
 		url.Values{"directory": {"/w"}}, strings.NewReader(`{"hi":1}`), hdr)
 	if err != nil {
