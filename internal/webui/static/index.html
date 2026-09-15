@@ -3,7 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>OpenCode Backend 控制台</title>
+<title>StarBurst 控制台</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop offset='0' stop-color='%236366f1'/%3E%3Cstop offset='.55' stop-color='%238b5cf6'/%3E%3Cstop offset='1' stop-color='%2306b6d4'/%3E%3C/linearGradient%3E%3C/defs%3E%3Cpath fill='url(%23g)' d='M12 2l2.9 6.26 6.6.57-5 4.4 1.53 6.52L12 16.9 5.97 19.75 7.5 13.23l-5-4.4 6.6-.57z'/%3E%3C/svg%3E">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
@@ -14,8 +15,8 @@
 <div class="app">
   <aside class="sidebar">
     <div class="logo">
-      <span class="mark" aria-hidden="true"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 7l6 5-6 5"/><path d="M13 17h6"/></svg></span>
-      <span class="txt">OpenCode <span>Backend</span></span>
+      <span class="mark" aria-hidden="true"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2l2.9 6.26 6.6.57-5 4.4 1.53 6.52L12 16.9 5.97 19.75 7.5 13.23l-5-4.4 6.6-.57z"/></svg></span>
+      <span class="txt">StarBurst</span>
     </div>
     <nav class="nav" id="nav">
       <div class="nav-label">控制台</div>
@@ -42,7 +43,7 @@
   <div class="main">
     <header class="topbar">
       <h1 id="pageTitle">概览</h1>
-      <span class="plate">startburst-backend</span>
+      <span class="plate">starburst-backend</span>
     </header>
 
     <div class="content">
@@ -50,8 +51,8 @@
       <!-- 登录页 -->
       <div id="loginPage" class="page login-wrap hidden">
         <div class="card login-card">
-          <div class="login-logo" aria-hidden="true"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 7l6 5-6 5"/><path d="M13 17h6"/></svg></div>
-          <h1>OpenCode Backend</h1>
+          <div class="login-logo" aria-hidden="true"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2l2.9 6.26 6.6.57-5 4.4 1.53 6.52L12 16.9 5.97 19.75 7.5 13.23l-5-4.4 6.6-.57z"/></svg></div>
+          <h1>StarBurst</h1>
           <div class="sub">管理控制台 · 会话编排 / 自动化 / 推送</div>
           <label>管理密码</label>
           <input type="password" id="pw" placeholder="默认密码见安装提示">
@@ -90,7 +91,19 @@
         </div>
         <div class="wb-grid">
           <div class="wb-col wb-col-sessions">
-            <div class="wb-col-head">会话 <span class="cnt" id="wbListHint"></span></div>
+            <div class="wb-col-head">会话 <span class="cnt" id="wbListHint"></span>
+              <button class="ghost sm" id="wbNewBtn" title="新建会话（选择工作目录）" onclick="wbToggleNew()">＋ 新建</button>
+            </div>
+            <div id="wbNewForm" class="wb-new hidden">
+              <input type="text" id="wbNewDir" list="wbDirList" placeholder="工作目录（如 /workspaces/xxx）">
+              <datalist id="wbDirList"></datalist>
+              <input type="text" id="wbNewTitle" placeholder="标题（可选）">
+              <div class="row">
+                <button class="sm" onclick="wbCreateSession()">创建</button>
+                <button class="ghost sm" onclick="wbToggleNew()">取消</button>
+              </div>
+              <div id="wbNewMsg" class="msg"></div>
+            </div>
             <input type="text" id="wbFilter" class="wb-search" placeholder="搜索会话标题 / 目录…">
             <div class="wb-filters" id="wbFilters"></div>
             <div class="wb-body">

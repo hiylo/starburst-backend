@@ -1,11 +1,12 @@
 /* ============================================================================
- * OpenCode Backend Console — app logic
+ * StarBurst Console — app logic
  * 布局：左栏导航 + 顶栏 + 内容区；所有 API 端点与后端保持稳定契约。
  * ========================================================================== */
 "use strict";
 
 const SESSION_KEY = "ocb_web_session";
 const APP_TOKEN_KEY = "ocb_app_token";
+const PAGE_KEY = "ocb_last_page";
 let session = localStorage.getItem(SESSION_KEY) || "";
 
 const TASK_STATUS = {
@@ -82,11 +83,16 @@ const TITLES = {
   tokens: "Token 管理", settings: "设置",
 };
 function switchPage(name) {
+  // 记住当前页面，刷新后回到同一页而不是跳回首页。
+  localStorage.setItem(PAGE_KEY, name);
   document.querySelectorAll(".page").forEach(p => p.classList.add("hidden"));
   const target = document.getElementById("page-" + name);
   if (target) target.classList.remove("hidden");
   document.querySelectorAll("#nav button").forEach(b => b.classList.toggle("active", b.dataset.page === name));
   document.getElementById("pageTitle").textContent = TITLES[name] || name;
+  // 工作台大屏布局：内容区整宽并纵向撑满，消除右侧/底部空余。
+  const content = document.querySelector(".content");
+  if (content) content.classList.toggle("wb-tight", name === "workbench");
   // 每个页面切到时自动加载数据，避免打开就是空的、还得手动点"刷新"。
   if (name === "overview") loadOverview();
   else if (name === "workbench") { loadWorkbench(); loadWbEvents(); renderWbFilters(); ensureWbProviders(); }
@@ -126,12 +132,20 @@ function renderAuth() {
   document.getElementById("loginPage").classList.toggle("hidden", logged);
   document.getElementById("nav").style.display = logged ? "" : "none";
   document.querySelector(".sidebar-foot").style.display = logged ? "" : "none";
+  // 未登录时整个侧栏隐藏，登录页居中；登录后再恢复。
+  const sidebar = document.querySelector(".sidebar");
+  if (sidebar) sidebar.style.display = logged ? "" : "none";
+  // 未登录时顶栏（页面标题/版本 plate）也隐藏，只留居中的登录卡片。
+  const topbar = document.querySelector(".topbar");
+  if (topbar) topbar.style.display = logged ? "" : "none";
   if (!logged) {
     document.querySelectorAll(".page").forEach(p => {
       if (p.id !== "loginPage") p.classList.add("hidden");
     });
   } else {
-    switchPage("overview");
+    // 恢复上次所在页面（刷新不跳回首页）；无效/无记录则回概览。
+    const last = localStorage.getItem(PAGE_KEY);
+    switchPage(TITLES[last] ? last : "overview");
   }
 }
 
@@ -152,7 +166,7 @@ async function loadOverview() {
     const sysRes = await api("/api/system", { headers: hdr() });
     const sys = await sysRes.json();
     document.getElementById("sysInfo").textContent =
-      `后端 startburst-backend · 上游 ${sys.opencodeURL} · OpenCode 版本 ${sys.opencodeVersion || "未知"} · 数据库 ${sys.db}`;
+      `后端 starburst-backend · 上游 ${sys.opencodeURL} · OpenCode 版本 ${sys.opencodeVersion || "未知"} · 数据库 ${sys.db}`;
   } catch (_) { return; }
 
   const health = await fetch("/api/health").then(r => r.json()).catch(() => ({}));
@@ -161,22 +175,22 @@ async function loadOverview() {
   document.getElementById("healthInfo").innerHTML =
     `后端: <span style="color:${health.status === "ok" ? "var(--success)" : "var(--danger)"}">${health.status || "?"}</span> · ` +
     `上游 OpenCode: <span style="color:${upOk ? "var(--success)" : "var(--danger)"}">${up}</span>`;
-  document.getElementById("uiVersion").textContent = "前端 v4 (Linear) · 如非此标识请硬刷新 (Ctrl+Shift+R)";
+  document.getElementById("uiVersion").textContent = "前端 v6 (StarBurst) · 如非此标识请硬刷新 (Ctrl+Shift+R)";
 
   try {
     const st = await (await api("/api/stats", { headers: hdr() })).json();
     const t = st.tasks || {};
     const stats = [
-      ["任务总数", t.total ?? 0, null],
-      ["排队中", t.queued ?? 0, "warn"],
-      ["执行中", t.running ?? 0, "primary"],
-      ["已完成", t.succeeded ?? 0, "ok"],
-      ["失败", t.failed ?? 0, "danger"],
-      ["重试过", t.retried ?? 0, "warn"],
-      ["归档数", st.archives ?? 0, null],
+      ["任务总数", t.total ?? 0, null, "M12 20h9M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"],
+      ["排队中", t.queued ?? 0, "warn", "M4 9V7a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v2M4 9h16M4 9v8a2 2 0 0 0 2 2h7"],
+      ["执行中", t.running ?? 0, "primary", "M12 2a10 10 0 1 0 10 10M12 2a10 10 0 0 1 10 10M12 2v6M22 12h-6"],
+      ["已完成", t.succeeded ?? 0, "ok", "M9 11l3 3L22 4M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"],
+      ["失败", t.failed ?? 0, "danger", "M12 9v4M12 17h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"],
+      ["重试过", t.retried ?? 0, "warn", "M1 4v6h6M23 20v-6h-6M20.5 9A9 9 0 0 0 5.6 5.6L1 10m22 4-4.6 4.4A9 9 0 0 1 3.5 15"],
+      ["归档数", st.archives ?? 0, null, "M21 8v13H3V8M1 3h22v5H1ZM10 12h4"],
     ];
-    document.getElementById("statGrid").innerHTML = stats.map(([k, v, tone]) =>
-      `<div class="stat ${tone || ""}"><div class="k">${k}</div><div class="v">${v}</div></div>`).join("");
+    document.getElementById("statGrid").innerHTML = stats.map(([k, v, tone, icon]) =>
+      `<div class="stat ${tone || ""}"><div class="k"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="${icon}"/></svg>${k}</div><div class="v">${v}</div></div>`).join("");
 
     const tb = document.querySelector("#usageTable tbody");
     tb.innerHTML = "";
@@ -723,12 +737,11 @@ function updateTaskAI(id, text, isFailure) {
  * 增强：状态筛选 Tab、会话模型/Agent 信息、提问徽标、气泡式最近对话、Enter 快捷回复
  * ========================================================================== */
 const WB_HIGH_FREQ = new Set(["heartbeat", "server.heartbeat", "sync", "server.connected", "message.part.delta", "message.part.updated", "message.part.removed", "message.updated", "session.updated"]);
-const WB_MAX_EVENTS = 100;
+const WB_MAX_EVENTS = 50;
 // 大屏浏览器可容纳更完整的内容：多拉消息、多显示几条、少截断。
 const WB_PANEL_LIMIT = 200;
 const WB_RECENT = 40;
 const WB_MSG_CLIP = 3000;
-const WB_AI_CLIP = 6000;
 const WB_RECENT_SHOW = 24;
 let wbSessions = [];
 let wbStatuses = {};
@@ -744,6 +757,13 @@ let wbLastListLoad = 0;
 let wbFilterOption = "all";
 // 决策面板「最近对话」是否展开显示全部（默认收起，只显示最新 N 条，更早的从顶部展开）。
 let wbMoreMsgs = false;
+// 决策面板是否处于「改名」编辑态。
+let wbRenaming = false;
+// 有未读新消息的会话集合（后端 session_unread 为准，Web/App 共享）。
+let wbNewSet = new Set();
+// 待决问题的作答暂存：wbQAnswers[requestId][questionIndex] = [selectedLabels...]。
+// 一个 request 可包含多个 question，需全部作答后一次性提交（answers 数组按序对应）。
+let wbQAnswers = {};
 // 渲染后是否把对话区贴底（打开会话 / 刚发送回复时用），展示最新消息。
 let wbPanelScrollBottom = false;
 // 正在拉取并渲染的决策面板会话 id（同会话去重，避免 5s 轮询与 WS 推送重复拉取）。
@@ -841,7 +861,6 @@ function wbPanelSigFor(d) {
   const st = it ? it.status : d.status;
   const model = (d.session && d.session.model && d.session.model.id) || "";
   return [d.id, st, model,
-    (d.aiSummary || "").slice(0, 120),
     (d.pending || []).map(q => q.id).join(","),
     (d.recent || []).map(m => m.role + ":" + m.text.slice(0, 60)).join("|"),
   ].join("\u0001");
@@ -986,6 +1005,42 @@ function refreshWbStats() {
   document.getElementById("wbCountE").textContent = wbEvents.length;
 }
 
+// 新建会话：展开内联表单，目录支持从已有会话目录选择（datalist）。
+function wbToggleNew() {
+  const f = document.getElementById("wbNewForm");
+  if (!f) return;
+  f.classList.toggle("hidden");
+  if (!f.classList.contains("hidden")) {
+    const dirs = [...new Set(wbSessions.map(s => s.directory).filter(Boolean))];
+    document.getElementById("wbDirList").innerHTML = dirs.map(d => `<option value="${escapeHtml(d)}">`).join("");
+    show(document.getElementById("wbNewMsg"), "");
+  }
+}
+async function wbCreateSession() {
+  const dir = document.getElementById("wbNewDir").value.trim();
+  const title = document.getElementById("wbNewTitle").value.trim();
+  const msg = document.getElementById("wbNewMsg");
+  if (!dir) { show(msg, "请填写工作目录"); return; }
+  const body = {};
+  if (title) body.title = title;
+  // 工作目录走 query 参数（opencode 只认 directory query / x-opencode-directory 头），
+  // 否则新会话回退到 process.cwd()，落错路径。
+  const url = `/api/opencode/session?directory=${encodeURIComponent(dir)}&x-opencode-directory=${encodeURIComponent(dir)}`;
+  const headers = appHeaders();
+  headers["x-starburst-directory"] = dir;
+  headers["x-opencode-directory"] = dir;
+  const res = await api(url, { method: "POST", headers, body: JSON.stringify(body) });
+  if (!res.ok) { show(msg, "创建失败 (" + res.status + ")"); return; }
+  const data = await res.json();
+  toast("已创建会话", data.id, "info");
+  show(msg, "已创建 " + data.id, true);
+  document.getElementById("wbNewTitle").value = "";
+  document.getElementById("wbNewDir").value = "";
+  wbToggleNew();
+  await loadWorkbench();
+  if (data && data.id) openWbPanel(data.id);
+}
+
 function wbItemHtml(it) {
   const s = it.session;
   const id = s.id;
@@ -996,8 +1051,9 @@ function wbItemHtml(it) {
   const q = (it.pending || []).length;
   const active = wbSelected === id ? "active" : "";
   const wrap = q ? `<span class="qbadge">提问 ${q}</span>` : "";
+  const newDot = wbNewSet.has(id) ? `<span class="newdot" title="有新消息"></span>` : "";
   return `<div class="wb-item ${active}" data-sid="${escapeHtml(id)}">
-    <div class="t"><span class="dot ${escapeHtml(it.status)}"></span><span class="ttl">${escapeHtml(title)}</span>${wrap}</div>
+    <div class="t"><span class="dot ${escapeHtml(it.status)}"></span><span class="ttl">${escapeHtml(title)}</span>${newDot}${wrap}</div>
     <div class="dir">${escapeHtml(dir) || "-"}</div>
     ${metaParts.length ? `<div class="meta">${escapeHtml(metaParts.join(" · "))}</div>` : ""}
   </div>`;
@@ -1012,7 +1068,7 @@ function renderWbList() {
   // 内容指纹：状态/排序/关键字/选中项都没变就不重建 DOM，避免滚动条跳动；
   // 选中项必须参与比对，否则点选其他会话时高亮不会更新。
   const sig = filter + "\u0001" + kw + "\u0001" + (wbSelected || "") + "\u0001" + wbItems.map(it =>
-    it.session.id + ":" + it.status + ":" + (it.pending || []).length + ":" + (it.session.time && it.session.time.updated || 0)
+    it.session.id + ":" + it.status + ":" + (it.pending || []).length + ":" + (it.session.time && it.session.time.updated || 0) + ":U" + (wbNewSet.has(it.session.id) ? 1 : 0)
   ).join(",");
   if (sig === wbListSig) return;
   wbListSig = sig;
@@ -1058,10 +1114,9 @@ async function loadWorkbench() {
   wbLoading = true;
   wbLastListLoad = Date.now();
   try {
-    const [sr, stR, qR] = await Promise.all([
+    const [sr, stR] = await Promise.all([
       api("/api/opencode/experimental/session?roots=true", { headers: appHeaders() }),
       api("/api/opencode/session/status", { headers: appHeaders() }),
-      api("/api/opencode/question", { headers: appHeaders() }),
     ]);
     if (!sr.ok) { toast("会话列表加载失败", "HTTP " + sr.status, "crit"); return; }
     const data = await sr.json();
@@ -1069,14 +1124,23 @@ async function loadWorkbench() {
     let st = {};
     if (stR.ok) { try { st = await stR.json(); } catch (_) {} }
     wbStatuses = st || {};
-    let qs = [];
-    if (qR.ok) { try { qs = await qR.json(); } catch (_) {} }
+    // 待决问题接口必须按会话目录查询（全局 /question 恒为空），否则选项弹不出来。
     wbPending = {};
-    for (const q of (Array.isArray(qs) ? qs : [])) {
-      if (q && q.sessionID) (wbPending[q.sessionID] = wbPending[q.sessionID] || []).push(q);
+    const dirs = [...new Set(wbSessions.map(s => s.directory).filter(Boolean))];
+    const qResps = await Promise.all(dirs.map(d =>
+      api("/api/opencode/question?directory=" + encodeURIComponent(d), { headers: appHeaders() })
+        .then(r => (r.ok ? r.json() : []))
+        .catch(() => [])
+    ));
+    for (const qs of qResps) {
+      for (const q of (Array.isArray(qs) ? qs : [])) {
+        if (q && q.sessionID) (wbPending[q.sessionID] = wbPending[q.sessionID] || []).push(q);
+      }
     }
     renderWbList();
     if (wbSelected) refreshWbPanel(wbSelected);
+    // 同步后端未读集合（Web/App 共享的绿点权威状态）。
+    syncWbUnread();
   } catch (e) {
     if (e.message !== "unauthorized") toast("加载失败", e.message || "未知错误", "crit");
   } finally {
@@ -1184,18 +1248,22 @@ function wbEventDot(ev) {
   if (t.startsWith("question.") || t.startsWith("permission.")) return "question";
   return "idle";
 }
-function wbMergeEvent(ev) {
+// 把一条有意义的事件追加进动态历史（不按会话折叠，最多保留最近 WB_MAX_EVENTS 条）。
+// 轮询带事件 id 用 id 去重；页面首次加载的历史事件按时间排，让动态栏更丰富。
+function wbAppendEvent(ev) {
   if (!ev || !ev.sessionId) return;
   const item = wbEventItem(ev);
   const dot = wbEventDot(ev);
-  wbEvents = [{ ...item, dot }, ...wbEvents.filter(x => x.sessionId !== ev.sessionId)]
-    .sort((a, b) => (b.ts || 0) - (a.ts || 0))
-    .slice(0, WB_MAX_EVENTS);
+  const key = (ev.id !== undefined && ev.id !== null) ? "id:" + ev.id : "raw:" + ev.eventType + ":" + ev.sessionId + ":" + item.ts;
+  if (wbEvents.some(x => x.key === key)) return;
+  wbEvents.push({ ...item, dot, key });
+  wbEvents.sort((a, b) => (b.ts || 0) - (a.ts || 0));
+  if (wbEvents.length > WB_MAX_EVENTS) wbEvents = wbEvents.slice(0, WB_MAX_EVENTS);
 }
 function renderWbEvents() {
   const box = document.getElementById("wbEvents");
   document.getElementById("wbEventCount").textContent = "· " + wbEvents.length;
-  const sig = wbEvents.map(e => e.sessionId + ":" + e.ts + ":" + e.dot + ":" + e.title + ":" + e.summary + ":" + e.directory).join("|");
+  const sig = wbEvents.map(e => (e.key || e.sessionId) + ":" + e.sessionId + ":" + e.ts + ":" + e.dot + ":" + e.title + ":" + e.summary + ":" + e.directory).join("|");
   if (sig === wbEventsSig) return;
   wbEventsSig = sig;
   const scroller = box.closest(".wb-body") || box;
@@ -1213,7 +1281,9 @@ function renderWbEvents() {
   };
 }
 async function loadWbEvents() {
-  const q = "/api/events?limit=100" + (wbEventsCursor ? "&since=" + encodeURIComponent(wbEventsCursor) : "");
+  // 首次加载(无游标)多拉一些历史事件回填动态栏，之后按游标增量。
+  const hadCursor = !!wbEventsCursor;
+  const q = "/api/events?limit=" + (wbEventsCursor ? "100" : "200") + (wbEventsCursor ? "&since=" + encodeURIComponent(wbEventsCursor) : "");
   const res = await api(q, { headers: appHeaders() });
   if (!res.ok) return;
   let data;
@@ -1224,8 +1294,10 @@ async function loadWbEvents() {
   let listChanged = false;
   for (const ev of list) {
     if (WB_HIGH_FREQ.has(ev.eventType)) continue;
-    wbMergeEvent(ev);
+    wbAppendEvent(ev);
     added = true;
+    // 增量轮询中的新活动 → 本地点亮绿点（权威状态由 syncWbUnread 收敛）。
+    if (hadCursor && wbUnreadTrigger(ev.eventType)) wbHandleActivity(ev.sessionId);
     // 会话增删事件即使 WS 断线期间错过，轮询也能兜底触发列表全量刷新。
     if (ev.eventType === "session.created" || ev.eventType === "session.deleted" || ev.eventType === "session.compacted") listChanged = true;
   }
@@ -1258,6 +1330,46 @@ function wbStatusFromPayload(payload) {
   if (!st) return "";
   return typeof st === "object" ? (st.type || "") : String(st);
 }
+// 判定事件是否会触发「未读」（与后端 isUnreadTriggerEvent 保持一致）。
+function wbUnreadTrigger(t) {
+  return ["message.complete", "message.created", "message.updated",
+    "question.asked", "question.updated", "permission.asked",
+    "session.idle", "session.status", "session.error", "session.failed"].includes(t);
+}
+// 从后端同步未读集合（会话列表绿点的权威来源，Web/App 共享已读状态）。
+async function syncWbUnread() {
+  try {
+    const res = await api("/api/unread", { headers: appHeaders() });
+    if (!res.ok) return;
+    const d = await res.json();
+    const m = d.unread || {};
+    const next = new Set(Object.keys(m).filter(k => m[k]));
+    if (next.size !== wbNewSet.size || [...next].some(x => !wbNewSet.has(x))) {
+      wbNewSet = next;
+      renderWbList();
+    }
+  } catch (_) {}
+}
+// 标记已读：清本地绿点 + 通知后端（任一端读过后全端不再显示未读）。
+async function wbMarkRead(sid) {
+  if (!sid) return;
+  if (wbNewSet.has(sid)) {
+    wbNewSet.delete(sid);
+    renderWbList();
+  }
+  try {
+    await api(`/api/unread/${encodeURIComponent(sid)}`, { method: "POST", headers: appHeaders() });
+  } catch (_) {}
+}
+// 会话有新活动：正在看的会话视为已读（同步后端），否则本地亮绿点（随后由同步收敛）。
+function wbHandleActivity(sid) {
+  if (!sid) return;
+  if (wbSelected === sid) { wbMarkRead(sid); return; }
+  if (!wbNewSet.has(sid)) {
+    wbNewSet.add(sid);
+    wbScheduleRenderList();
+  }
+}
 function handleWbPush(ev) {
   const sid = ev.sessionId;
   const et = ev.eventType;
@@ -1280,31 +1392,22 @@ function handleWbPush(ev) {
       st = ["busy", "idle", "retry"].includes(stt) ? stt : (wbStatuses[sid] && wbStatuses[sid].type) || "idle";
     }
     wbStatuses[sid] = { type: st };
+    wbHandleActivity(sid);
     wbScheduleRenderList();
     if (wbSelected === sid && (et === "session.status" || et === "session.updated")) wbSchedulePanelRefresh(sid);
   }
   if (et === "question.asked" || et === "question.updated" || et === "permission.asked" || et === "message.complete" || et === "session.error" || et === "session.failed") {
+    wbHandleActivity(sid);
     wbScheduleWorkbench();
     return;
   }
-  if (!WB_HIGH_FREQ.has(et)) {
-    wbMergeEvent(ev);
-    renderWbEvents();
-  }
+  // 动态栏由 5s 轮询统一喂（带事件 id 去重），WS 不再追加，避免同一事件重复展示。
   refreshWbStats();
 }
 
 /* ---- 决策面板 ---- */
 function parseWbMessages(msgs) {
   const list = Array.isArray(msgs) ? msgs : [];
-  let aiSummary = "";
-  for (let i = list.length - 1; i >= 0; i--) {
-    const m = list[i];
-    if (m && m.info && m.info.role === "assistant") {
-      const text = wbMsgText(m);
-      if (text) { aiSummary = text.slice(0, WB_AI_CLIP); break; }
-    }
-  }
   // 最近 N 条有文本的消息，接口返回按时间从旧到新；收集时倒序遍历取「最新在前」。
   const newestFirst = [];
   for (let i = list.length - 1; i >= 0; i--) {
@@ -1329,7 +1432,7 @@ function parseWbMessages(msgs) {
       ? { ...m, full: true, clipped: false }
       : { ...m, full: false, clipped: m.text.length > WB_MSG_CLIP, text: m.text.slice(0, WB_MSG_CLIP) };
   });
-  return { aiSummary, recent };
+  return { recent };
 }
 function wbMsgText(m) {
   return (m.parts || []).filter(p => p && p.type === "text" && !p.synthetic && !p.ignored && p.text).map(p => p.text).join("\n").trim();
@@ -1337,12 +1440,16 @@ function wbMsgText(m) {
 function openWbPanel(id) {
   const switched = wbSelected !== id;
   wbSelected = id;
+  wbMarkRead(id);
   document.getElementById("wbPanelPlaceholder").classList.add("hidden");
   document.getElementById("wbPanel").classList.remove("hidden");
   if (switched) {
     // 切会话时先清空为加载态，避免显示上一个会话的内容。
-    wbPanelData = { id, loading: true, aiSummary: "", recent: [], pending: [], status: "", session: null };
+    wbPanelData = { id, loading: true, recent: [], pending: [], status: "", session: null };
+    // 切换会话时清掉上一会话的待决问题作答暂存。
+    wbQAnswers = {};
     wbMoreMsgs = false;
+    wbRenaming = false;
     wbPanelScrollBottom = true;
     renderWbPanel();
   }
@@ -1382,7 +1489,6 @@ async function refreshWbPanel(id, force) {
     const parsed = parseWbMessages(msgs);
     const newData = {
       id,
-      aiSummary: parsed.aiSummary,
       recent: parsed.recent,
       pending: (item && item.pending) || [],
       status: item ? item.status : "idle",
@@ -1391,6 +1497,12 @@ async function refreshWbPanel(id, force) {
     // 拉取后比较：内容没变化才跳过重绘。先拉后比才能发现「上游新增了消息」
     // （旧逻辑在拉取前用旧面板数据比较，新增消息永远无法触发刷新）。
     if (!force && wbPanelData && wbPanelData.id === id && wbPanelSigFor(wbPanelData) === wbPanelSigFor(newData)) return;
+    // 用户在快捷回复输入框里打字时暂缓整块重绘，避免抢走焦点/中断输入；
+    // 等输入结束（失焦）后下一次轮询再渲染新内容。强制刷新（如发送后）不受影响。
+    if (!force) {
+      const ta = document.getElementById("wbReplyInput");
+      if (ta && document.activeElement === ta) return;
+    }
     wbPanelData = newData;
     const snap = wbSnapshotPanel();
     renderWbPanel();
@@ -1457,14 +1569,22 @@ function renderWbPanel() {
       </div>
       <div style="display:flex;flex-direction:column;gap:6px;align-items:flex-end;flex-shrink:0">
         <span class="badge ${statusBadgeCls}">${wbStatusLabel(status)}</span>
-        <button class="danger sm" data-wb-del="${escapeHtml(d.id)}">删除</button>
+        <div style="display:flex;gap:6px">
+          <button class="ghost sm" data-wb-rename="1" title="修改会话标题">改名</button>
+          <button class="danger sm" data-wb-del="${escapeHtml(d.id)}">删除</button>
+        </div>
       </div>
     </div>
+    ${wbRenaming ? `<div class="wb-rename-row">
+      <input id="wbRenameInput" maxlength="120" value="${escapeHtml(title)}">
+      <button class="sm" data-wb-rensave="1">保存</button>
+      <button class="ghost sm" data-wb-rencancel="1">取消</button>
+      <div id="wbRenameMsg" class="msg"></div>
+    </div>` : ""}
     <div class="wb-scroll">
       <div class="wb-model-row"><span class="lbl">模型</span>
         <select id="wbModelSelect" onchange="wbModelChange(this)">${wbModelOptions()}</select>
       </div>
-      ${d.aiSummary ? `<div class="wb-block"><h4>AI 最近回复<span class="info">前 ${WB_AI_CLIP} 字</span></h4><div class="wb-summary">${escapeHtml(d.aiSummary)}</div></div>` : ""}
       ${qhtml ? `<div class="wb-block"><h4>待决问题<span class="info">${(d.pending || []).reduce((n, q) => n + (q.questions || []).length, 0)} 个</span></h4>${qhtml}</div>` : ""}
       <div class="wb-block wb-msg-block"><h4>最近对话<span class="info">${wbMoreMsgs ? `全部 ${d.recent.length} 条` : `最新 ${visCount} / ${d.recent.length} 条`}</span></h4>
         ${moreBtn}
@@ -1479,6 +1599,18 @@ function renderWbPanel() {
       </div>
     </div>`;
   panel.onclick = (e) => {
+    const ren = e.target.closest("[data-wb-rename]");
+    if (ren) {
+      wbRenaming = true;
+      wbRerenderPanel();
+      const ri = document.getElementById("wbRenameInput");
+      if (ri) { ri.focus(); ri.select(); }
+      return;
+    }
+    const renc = e.target.closest("[data-wb-rencancel]");
+    if (renc) { wbRenaming = false; wbRerenderPanel(); return; }
+    const rens = e.target.closest("[data-wb-rensave]");
+    if (rens) { wbRenameSession(d.id); return; }
     const del = e.target.closest("[data-wb-del]");
     if (del) { deleteWbSession(del.dataset.wbDel); return; }
     const more = e.target.closest("[data-wb-more]");
@@ -1495,11 +1627,13 @@ function renderWbPanel() {
       return;
     }
     const opt = e.target.closest("[data-qopt]");
-    if (opt) { wbAnswerQ(opt.dataset.qopt, opt.dataset.label); return; }
+    if (opt) { wbQToggle(opt.dataset.qopt, Number(opt.dataset.qidx), opt.dataset.label); return; }
     const rej = e.target.closest("[data-qreject]");
     if (rej) { wbRejectQ(rej.dataset.qreject); return; }
-    const sub = e.target.closest("[data-qcustom]");
-    if (sub) { wbAnswerQCustom(sub.dataset.qcustom); }
+    const sub = e.target.closest("[data-qsubmit]");
+    if (sub) { wbQSubmit(sub.dataset.qsubmit); return; }
+    const cus = e.target.closest("[data-qcustom]");
+    if (cus) { wbQCustom(cus.dataset.qcustom, Number(cus.dataset.qidx)); return; }
   };
   const ta = document.getElementById("wbReplyInput");
   if (ta) ta.addEventListener("keydown", (ev) => {
@@ -1515,38 +1649,80 @@ function renderWbPanel() {
   }
   wbPanelSig = wbPanelSigFor(wbPanelData);
 }
+// 渲染待决问题。一个 request 可含多个 question，answers 数组须按序一一对应，
+// 因此把同一 request 的问题聚合成一组，逐题选择后一次性提交全部作答。
+// 点选项只做本地暂存/高亮，绝不立即提交（避免误触导致 request 提前被消费）。
 function renderWbQuestions() {
   const pending = wbPanelData.pending || [];
+  // 清理已不在待决列表里的 request 的暂存作答，避免旧选择残留。
+  const valid = new Set(pending.map(x => x.id));
+  Object.keys(wbQAnswers).forEach(k => { if (!valid.has(k)) delete wbQAnswers[k]; });
   return pending.map(q => {
     const qs = q.questions || [];
-    return qs.map(qu => {
-      const opts = (qu.options || []).map((o, i) =>
-        `<button data-qopt="${escapeHtml(q.id)}" data-label="${escapeHtml(o.label)}">${escapeHtml(o.label)}${o.description ? `<br><span class="muted" style="font-size:11px;font-weight:400">${escapeHtml(o.description)}</span>` : ""}</button>`).join("");
+    if (!qs.length) return "";
+    const sel = (wbQAnswers[q.id] = wbQAnswers[q.id] || qs.map(() => []));
+    const cards = qs.map((qu, qi) => {
+      const opts = (qu.options || []).map(o => {
+        const active = (sel[qi] || []).includes(o.label);
+        return `<button class="wb-qopt${active ? " active" : ""}" data-qopt="${escapeHtml(q.id)}" data-qidx="${qi}" data-label="${escapeHtml(o.label)}">${escapeHtml(o.label)}${o.description ? `<br><span class="muted" style="font-size:11px;font-weight:400">${escapeHtml(o.description)}</span>` : ""}</button>`;
+      }).join("");
       const custom = qu.custom !== false
-        ? `<div class="wb-qcustom"><input id="wbQInput_${escapeHtml(q.id)}" placeholder="自定义回答（可选）"><button class="ghost sm" data-qcustom="${escapeHtml(q.id)}">提交</button></div>`
+        ? `<div class="wb-qcustom"><input id="wbQInput_${escapeHtml(q.id)}_${qi}" placeholder="自定义回答（可选）"><button class="ghost sm" data-qcustom="${escapeHtml(q.id)}" data-qidx="${qi}">填入</button></div>`
         : "";
-      return `<div class="wb-qcard"><div class="qhead">${escapeHtml(qu.header || "AI 提问")}</div><div class="q">${escapeHtml(qu.question)}</div>
-        <div class="wb-qopts">${opts}<button class="reject" data-qreject="${escapeHtml(q.id)}">拒绝</button></div>${custom}</div>`;
+      return `<div class="wb-qcard"><div class="qhead">${escapeHtml(qu.header || "AI 提问")}${qs.length > 1 ? ` <span class="muted" style="font-weight:400">${qi + 1}/${qs.length}</span>` : ""}</div><div class="q">${escapeHtml(qu.question)}</div>
+        <div class="wb-qopts">${opts}</div>${custom}</div>`;
     }).join("");
+    const answered = sel.filter(a => a && a.length).length;
+    const footer = `<div class="wb-qsubmit"><button class="sm" data-qsubmit="${escapeHtml(q.id)}" ${answered ? "" : "disabled"} title="已作答 ${answered}/${qs.length}">提交回答${qs.length > 1 ? `（${answered}/${qs.length}）` : ""}</button><button class="reject" data-qreject="${escapeHtml(q.id)}">拒绝</button></div>`;
+    return `<div class="wb-qgroup">${cards}${footer}</div>`;
   }).join("");
 }
-async function wbAnswerQ(reqId, label) {
-  await postWbAnswer(reqId, [[label]]);
+// 点击问题选项：单选/多选切换本地暂存（不会立即提交）。
+function wbQToggle(reqId, qidx, label) {
+  const q = (wbPanelData.pending || []).find(x => x.id === reqId);
+  if (!q) return;
+  const qu = (q.questions || [])[qidx];
+  if (!qu) return;
+  const sel = (wbQAnswers[reqId] = wbQAnswers[reqId] || (q.questions || []).map(() => []));
+  const cur = sel[qidx] || [];
+  if (qu.multiple === true) {
+    sel[qidx] = cur.includes(label) ? cur.filter(x => x !== label) : [...cur, label];
+  } else {
+    sel[qidx] = [label];
+  }
+  wbRerenderPanel();
 }
-async function wbAnswerQCustom(reqId) {
-  const input = document.getElementById("wbQInput_" + reqId);
+// 自定义回答「填入」：仅暂存，随「提交回答」一起发出。
+async function wbQCustom(reqId, qidx) {
+  const input = document.getElementById("wbQInput_" + reqId + "_" + qidx);
   const v = input ? input.value.trim() : "";
   if (!v) { toast("答复失败", "请先输入回答内容"); return; }
-  await postWbAnswer(reqId, [[v]]);
+  const q = (wbPanelData.pending || []).find(x => x.id === reqId);
+  if (!q) return;
+  const qs = q.questions || [];
+  const sel = (wbQAnswers[reqId] = wbQAnswers[reqId] || qs.map(() => []));
+  sel[qidx] = [v];
+  wbRerenderPanel();
+}
+async function wbQSubmit(reqId) {
+  const q = (wbPanelData.pending || []).find(x => x.id === reqId);
+  if (!q) return;
+  const qs = q.questions || [];
+  const sel = (wbQAnswers[reqId] = wbQAnswers[reqId] || qs.map(() => []));
+  // answers 数组长度必须与 questions 一致（未作答的给空数组）。
+  const answers = qs.map((_, i) => (sel[i] || []).slice());
+  if (!answers.some(a => a.length)) { toast("提交失败", "请至少回答一个问题"); return; }
+  await postWbAnswer(reqId, answers);
 }
 async function postWbAnswer(reqId, answers) {
   const dir = (wbPanelData && wbPanelData.session && wbPanelData.session.directory) || "";
-  // 与 App 一致：question reply 的目录以 query 参数传递（x-startburst-directory 头只对 prompt_async 生效）。
+  // 与 App 一致：question reply 的目录以 query 参数传递（x-starburst-directory 头只对 prompt_async 生效）。
   const url = `/api/opencode/question/${encodeURIComponent(reqId)}/reply` + (dir ? "?directory=" + encodeURIComponent(dir) : "");
   const res = await api(url, { method: "POST", headers: appHeaders(), body: JSON.stringify({ answers }) });
   if (!res.ok) { toast("答复失败", "问题回复未送达 (" + res.status + ")", "crit"); return; }
   toast("已答复", "问题已回复", "info");
-  wbPanelData.pending = wbPanelData.pending.filter(q => q.id !== reqId);
+  wbPanelData.pending = wbPanelData.pending.filter(x => x.id !== reqId);
+  delete wbQAnswers[reqId];
   wbRerenderPanel();
   loadWorkbench();
 }
@@ -1557,6 +1733,7 @@ async function wbRejectQ(reqId) {
   if (!res.ok) { toast("拒绝失败", "拒绝未送达 (" + res.status + ")", "crit"); return; }
   toast("已拒绝", "问题已拒绝", "info");
   wbPanelData.pending = wbPanelData.pending.filter(q => q.id !== reqId);
+  delete wbQAnswers[reqId];
   wbRerenderPanel();
   loadWorkbench();
 }
@@ -1574,7 +1751,7 @@ async function sendWbReply() {
     parts: [{ type: "text", text }],
   };
   const headers = appHeaders();
-  if (dir) headers["x-startburst-directory"] = dir;
+  if (dir) headers["x-starburst-directory"] = dir;
   try {
     const res = await api(`/api/opencode/session/${encodeURIComponent(wbSelected)}/prompt_async`, { method: "POST", headers, body: JSON.stringify(body) });
     if (!res.ok) { toast("发送失败", "快捷回复未送达 (" + res.status + ")", "crit"); return; }
@@ -1592,6 +1769,28 @@ async function sendWbReply() {
     if (btn) btn.disabled = false;
   }
 }
+// 修改会话标题（PATCH /session/{id}，与 App updateSession 契约一致）。
+async function wbRenameSession(id) {
+  const input = document.getElementById("wbRenameInput");
+  const title = input ? input.value.trim() : "";
+  const msg = document.getElementById("wbRenameMsg");
+  if (!title) { if (msg) show(msg, "标题不能为空"); return; }
+  const item = wbItems.find(x => x.session.id === id);
+  const dir = (item && item.session && item.session.directory) || "";
+  const headers = appHeaders();
+  if (dir) headers["x-opencode-directory"] = dir;
+  const res = await api(`/api/opencode/session/${encodeURIComponent(id)}`, { method: "PATCH", headers, body: JSON.stringify({ title }) });
+  if (!res.ok) { if (msg) show(msg, "改名失败 (" + res.status + ")"); return; }
+  wbRenaming = false;
+  // 本地同步标题，避免等待下一次轮询才看到新名字。
+  const s = wbSessions.find(x => x.id === id);
+  if (s) s.title = title;
+  if (wbPanelData && wbPanelData.session && wbPanelData.session.id === id) wbPanelData.session.title = title;
+  toast("已改名", title, "info");
+  wbRerenderPanel();
+  renderWbList();
+}
+
 async function deleteWbSession(id) {
   if (!confirm("确认删除该会话？此操作不可恢复。")) return;
   const res = await api(`/api/opencode/session/${encodeURIComponent(id)}`, { method: "DELETE", headers: appHeaders() });
@@ -1666,8 +1865,4 @@ function clearStream() {
 /* ---------- 启动 ---------- */
 document.getElementById("appToken").value = localStorage.getItem(APP_TOKEN_KEY) || "";
 renderAuth();
-if (session) {
-  switchPage("overview");
-  loadOverview();
-  connectTaskWS();
-}
+connectTaskWS();
