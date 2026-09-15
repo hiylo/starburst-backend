@@ -85,7 +85,7 @@ func isHopByHopHeader(k string) bool {
 // mirror without a separately configured APP token. The client Authorization
 // header is intentionally NOT forwarded: it belongs to the backend, and the
 // upstream receives the credentials configured on the opencode.Client
-// (SetAuthToken) instead. Directory scoping headers (x-startburst-directory /
+// (SetAuthToken) instead. Directory scoping headers (x-starburst-directory /
 // x-opencode-directory) and query parameters pass through untouched.
 func (s *Server) handleOpenCodeProxy(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.requireToken(r); !ok && !s.requireWeb(r) {

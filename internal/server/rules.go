@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/hiylo/startburst-backend/internal/store"
+	"github.com/hiylo/starburst-backend/internal/store"
 )
 
 // secureCompare compares two strings in constant time over their SHA-256

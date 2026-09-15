@@ -13,5 +13,5 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write([]byte("startburst-backend is running (headless).\nConfig UI is not compiled in; authenticate via POST /api/web/session.\n"))
+	_, _ = w.Write([]byte("starburst-backend is running (headless).\nConfig UI is not compiled in; authenticate via POST /api/web/session.\n"))
 }

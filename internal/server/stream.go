@@ -7,7 +7,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/hiylo/startburst-backend/internal/opencode"
+	"github.com/hiylo/starburst-backend/internal/opencode"
 )
 
 // handleStream relays the upstream OpenCode global SSE event stream to the

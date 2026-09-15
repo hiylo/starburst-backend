@@ -1,15 +1,15 @@
 services:
-  startburst-backend:
+  starburst-backend:
     build:
       context: .
-    container_name: startburst-backend
+    container_name: starburst-backend
     ports:
       - "8080:8080"
     volumes:
-      - startburst-data:/data
+      - starburst-data:/data
     environment:
       OCB_LISTEN: ":8080"
-      OCB_SQLITE_PATH: "/data/startburst-backend.db"
+      OCB_SQLITE_PATH: "/data/starburst-backend.db"
     restart: unless-stopped
 
 # ---- 流式语音识别引擎（可选）----
@@ -29,11 +29,11 @@ services:
     restart: unless-stopped
 
 volumes:
-  startburst-data:
+  starburst-data:
 
   # ---- PostgreSQL 方案（可选）----
   # 启用：docker compose --profile postgres up -d
-  # 之后在 startburst-backend 中设置环境变量切换数据库：
+  # 之后在 starburst-backend 中设置环境变量切换数据库：
   #   OCB_DB=pg
   #   OCB_PG_DSN: "postgres://opencode:opencode@postgres:5432/opencode?sslmode=disable"
   # postgres:

@@ -11,8 +11,8 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/hiylo/startburst-backend/internal/opencode"
-	"github.com/hiylo/startburst-backend/internal/store"
+	"github.com/hiylo/starburst-backend/internal/opencode"
+	"github.com/hiylo/starburst-backend/internal/store"
 )
 
 // sessionIDRe is the allow-list for session identifiers that are later

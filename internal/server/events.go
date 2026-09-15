@@ -9,9 +9,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/hiylo/startburst-backend/internal/opencode"
-	"github.com/hiylo/startburst-backend/internal/push"
-	"github.com/hiylo/startburst-backend/internal/store"
+	"github.com/hiylo/starburst-backend/internal/opencode"
+	"github.com/hiylo/starburst-backend/internal/push"
+	"github.com/hiylo/starburst-backend/internal/store"
 )
 
 // eventRetention is how long captured session events are kept before the
@@ -132,6 +132,23 @@ func (s *Server) flushEventsLoop(ctx context.Context, queue <-chan *store.Sessio
 			log.Printf("events: batch insert %d events: %v", len(batch), err)
 		}
 		cancel()
+		// 批内含新消息/待决问题/完成等事件 → 把对应会话标记为「有未读」，
+		// 供 Web/App 的未读绿点展示；已读由任一端 POST /api/unread/{id} 清除。
+		unreadIDs := make([]string, 0, len(batch))
+		seen := make(map[string]bool)
+		for _, e := range batch {
+			if isUnreadTriggerEvent(e.EventType) && e.SessionID != "" && !seen[e.SessionID] {
+				seen[e.SessionID] = true
+				unreadIDs = append(unreadIDs, e.SessionID)
+			}
+		}
+		if len(unreadIDs) > 0 {
+			wctx2, cancel2 := context.WithTimeout(context.Background(), 10*time.Second)
+			if err := s.store.SetSessionsUnread(wctx2, unreadIDs); err != nil {
+				log.Printf("events: mark session unread: %v", err)
+			}
+			cancel2()
+		}
 		batch = batch[:0]
 	}
 	for {
@@ -372,6 +389,20 @@ func parseStatusFromPayload(payload []byte) string {
 func isMessageActivityEvent(eventType string) bool {
 	switch eventType {
 	case "message.part.delta", "message.part.updated", "message.updated", "message.complete":
+		return true
+	}
+	return false
+}
+
+// isUnreadTriggerEvent reports whether the event should flag its session as
+// having new/unread activity for the shared Web/App indicator: a completed or
+// updated message, a pending question/permission, or a session turning idle /
+// erroring (i.e. something happened that a user may want to look at).
+func isUnreadTriggerEvent(eventType string) bool {
+	switch eventType {
+	case "message.complete", "message.created", "message.updated",
+		"question.asked", "question.updated", "permission.asked",
+		"session.idle", "session.status", "session.error", "session.failed":
 		return true
 	}
 	return false

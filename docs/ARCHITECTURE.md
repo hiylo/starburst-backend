@@ -1,8 +1,8 @@
-# OpenCode Backend 架构文档
+# StarBurst Backend 架构文档
 
 ## 1. 定位与边界
 
-OpenCode Backend 是运行在**开发机本机**的轻量编排层，位于 OpenCode 服务与客户端（APP / Web）之间。它**不是透传代理**——核心价值是对本机 OpenCode 做**编排**（调度任务、聚合会话、事件触发、归档）并为客户端提供**推送**。
+StarBurst Backend 是运行在**开发机本机**的轻量编排层，位于 OpenCode 服务与客户端（APP / Web）之间。它**不是透传代理**——核心价值是对本机 OpenCode 做**编排**（调度任务、聚合会话、事件触发、归档）并为客户端提供**推送**。
 
 ```
 ┌──────────┐  直连(可选)   ┌──────────────────┐
@@ -12,7 +12,7 @@ OpenCode Backend 是运行在**开发机本机**的轻量编排层，位于 Open
      │ Token + WS 推送              │  HTTP 编排调用
      ▼                              │
 ┌────────────────────────────────────┴───────────┐
-│              startburst-backend（单二进制）        │
+│              starburst-backend（单二进制）        │
 │  HTTP API + WebSocket 推送 + 任务调度 + 自动化   │
 │  SQLite / PostgreSQL                            │
 └─────────────────────────────────────────────────┘
@@ -128,7 +128,7 @@ GOFLAGS=-mod=mod GOPROXY=off GOSUMDB=off go test ./internal/...
 
 ## 8. 部署形态
 
-- **开发机本机**：`scripts/install.sh` → systemd 服务，`/var/lib/startburst-backend` 存数据。
+- **开发机本机**：`scripts/install.sh` → systemd 服务，`/var/lib/starburst-backend` 存数据。
 - **容器**：`Dockerfile`（多阶段、非 root）+ `docker-compose.yml`（可选 PG profile）。
 - **CI**：GitHub Actions `test` job + 打 tag 触发 `release` job 交叉编译 6 平台单二进制。
 

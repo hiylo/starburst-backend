@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/hiylo/startburst-backend/internal/opencode"
+	"github.com/hiylo/starburst-backend/internal/opencode"
 )
 
 // newProxyEnv builds a Server whose openCode client points at the given fake
@@ -47,7 +47,7 @@ func TestOpenCodeProxyPassthrough(t *testing.T) {
 		gotMethod = r.Method
 		gotPath = r.URL.Path
 		gotQuery = r.URL.RawQuery
-		gotDirHdr = r.Header.Get("x-startburst-directory")
+		gotDirHdr = r.Header.Get("x-starburst-directory")
 		gotAuth = r.Header.Get("Authorization")
 		buf := make([]byte, 64)
 		n, _ := r.Body.Read(buf)
@@ -63,7 +63,7 @@ func TestOpenCodeProxyPassthrough(t *testing.T) {
 		map[string]string{
 			"Authorization":          "Bearer " + tok,
 			"Content-Type":           "application/json",
-			"X-Startburst-Directory": "/w/proj",
+			"X-Starburst-Directory": "/w/proj",
 		})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("want 200, got %d: %s", rec.Code, rec.Body.String())

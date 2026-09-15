@@ -9,7 +9,7 @@ RUN go mod download
 
 # 拷贝源码并编译（modernc.org/sqlite 为纯 Go 实现，无需 CGO）
 COPY . .
-RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o /startburst-backend ./cmd/startburst-backend
+RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o /starburst-backend ./cmd/starburst-backend
 
 # ---- Runtime stage ----
 FROM alpine:3.21
@@ -19,7 +19,7 @@ RUN apk add --no-cache ca-certificates \
     && mkdir -p /data \
     && chown appuser:appuser /data
 
-COPY --from=builder /startburst-backend /usr/local/bin/startburst-backend
+COPY --from=builder /starburst-backend /usr/local/bin/starburst-backend
 
 USER appuser
 
@@ -27,6 +27,6 @@ EXPOSE 8080
 VOLUME ["/data"]
 
 ENV OCB_LISTEN=:8080 \
-    OCB_SQLITE_PATH=/data/startburst-backend.db
+    OCB_SQLITE_PATH=/data/starburst-backend.db
 
-ENTRYPOINT ["startburst-backend"]
+ENTRYPOINT ["starburst-backend"]

@@ -89,6 +89,7 @@ var migrations = []migration{
 	{name: "tasks_schedule", apply: migrationTasksSchedule},
 	{name: "session_events", apply: migrationSessionEvents},
 	{name: "archives_raw_messages", apply: migrationArchivesRawMessages},
+	{name: "session_unread", apply: migrationSessionUnread},
 }
 
 // migrationArchivesRawMessages adds the raw_messages column storing an
@@ -302,6 +303,18 @@ func migrationSessionEvents(ctx context.Context, driver string, db *sql.DB) erro
 		}
 	}
 	return nil
+}
+
+// migrationSessionUnread adds the session unread table used by the shared
+// Web/App "has new messages" indicator. Row exists = unread; MarkSessionRead
+// deletes it. Portable across SQLite and PostgreSQL.
+func migrationSessionUnread(ctx context.Context, driver string, db *sql.DB) error {
+	_, err := db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS session_unread (
+		session_id TEXT PRIMARY KEY,
+		unread BOOLEAN NOT NULL DEFAULT TRUE,
+		updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+	)`)
+	return err
 }
 
 // migrationInitial creates the base tables shared by all drivers.

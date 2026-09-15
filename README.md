@@ -1,6 +1,6 @@
-# OpenCode Backend
+# StarBurst Backend
 
-OpenCode 客户端的轻量独立后端（Go 单二进制）。运行在开发机上连接本机 OpenCode，为 APP 提供**编排、自动化与推送**能力。APP 可直连 OpenCode，也可先连本后端再访问 OpenCode。
+StarBurst（App）的轻量独立后端（Go 单二进制）。运行在开发机上连接本机 OpenCode，为 StarBurst App 提供**编排、自动化与推送**能力。App 可直连 OpenCode，也可先连本后端再访问 OpenCode。
 
 ## 特性
 
@@ -32,17 +32,17 @@ OpenCode 客户端的轻量独立后端（Go 单二进制）。运行在开发�
 ## 构建
 
 ```bash
-go build -o startburst-backend ./cmd/startburst-backend
+go build -o starburst-backend ./cmd/starburst-backend
 ```
 
 ## 运行
 
 ```bash
 # SQLite（默认）
-./startburst-backend --listen :18880 --default-admin-password admin
+./starburst-backend --listen :18880 --default-admin-password admin
 
 # PostgreSQL
-./startburst-backend --listen :18880 --db postgres --pg-dsn "postgres://user:pass@host/db"
+./starburst-backend --listen :18880 --db postgres --pg-dsn "postgres://user:pass@host/db"
 ```
 
 配置项支持命令行 flag 与环境变量（环境变量优先）：
@@ -52,7 +52,7 @@ go build -o startburst-backend ./cmd/startburst-backend
 | `--listen` | `OCB_LISTEN` | `:18880` | HTTP 监听地址 |
 | `--opencode-url` | `OCB_OPENCODE_URL` | `http://127.0.0.1:4096` | 本机 OpenCode 地址 |
 | `--db` | `OCB_DB` | `sqlite` | `sqlite` 或 `postgres` |
-| `--sqlite-path` | `OCB_SQLITE_PATH` | `startburst-backend.db` | SQLite 数据库文件 |
+| `--sqlite-path` | `OCB_SQLITE_PATH` | `starburst-backend.db` | SQLite 数据库文件 |
 | `--pg-dsn` | `OCB_PG_DSN` | — | PostgreSQL 连接串 |
 | `--default-admin-password` | `OCB_ADMIN_PASSWORD` | `admin` | 首次初始化密码（可后改） |
 | `--default-token` | `OCB_DEFAULT_TOKEN` | — | 首次运行时预置的 API token（只落哈希，明文只在日志里打一次） |
@@ -94,14 +94,14 @@ curl -fsSL https://<host>/install.sh | bash
 ```
 
 或本地 `bash scripts/install.sh [--port 8080] [--db sqlite|postgres] [--pg-dsn "..."] [--admin-password "..."] [--workers 4]`。
-安装为 systemd 服务，数据存 `/var/lib/startburst-backend`。
+安装为 systemd 服务，数据存 `/var/lib/starburst-backend`。
 
 加 `--default-token <值>`（或 `OCB_DEFAULT_TOKEN`）可在首次启动时预置一个固定 API token，客户端直接拿它调 API/WS/SSE，不用再登网页建 token。该值只在首次运行生效一次（仅保存哈希，日志里打印一次明文），之后改配置不重建；在配置页删除它则彻底取消。
 
 只验证脚本、不触碰真实系统时加 `--prefix <目录>`（沙箱模式）：二进制、配置、unit 全部写到该目录下并跳过 systemctl，配合 `OCB_BIN_URL=file:///本地二进制` 可跳过下载：
 
 ```bash
-OCB_BIN_URL="file://$(pwd)/startburst-backend" bash scripts/install.sh --prefix /tmp/sandbox --db postgres --pg-dsn "$OCB_PG_DSN"
+OCB_BIN_URL="file://$(pwd)/starburst-backend" bash scripts/install.sh --prefix /tmp/sandbox --db postgres --pg-dsn "$OCB_PG_DSN"
 ```
 
 ## Docker
@@ -124,7 +124,7 @@ docker compose --profile postgres up -d   # 附带 PG，可用 OCB_PG_DSN 切换
 ## 目录结构
 
 ```
-cmd/startburst-backend  入口（--version / --health-check / serve）
+cmd/starburst-backend  入口（--version / --health-check / serve）
 internal/
   config     flag/env 配置
   store      SQLite/Postgres 存储抽象 + 迁移（v1-v10）

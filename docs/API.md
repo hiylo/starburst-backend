@@ -1,4 +1,4 @@
-# OpenCode Backend API 契约
+# StarBurst Backend API 契约
 
 > 供客户端（Android / Web）与后端并行开发的接口规范。Base URL 形如 `http://<host>:18880`。
 
@@ -26,7 +26,7 @@
 ### GET /api/system（需 Token 或 X-Web-Session）
 返回内部地址，因此需要鉴权（APP Token 或 Web Session 二选一）：
 ```json
-{ "backend": "startburst-backend", "opencodeURL": "http://127.0.0.1:4096", "opencodeVersion": "v1.2.3", "db": "sqlite" }
+{ "backend": "starburst-backend", "opencodeURL": "http://127.0.0.1:4096", "opencodeVersion": "v1.2.3", "db": "sqlite" }
 ```
 
 ### GET /（免鉴权）

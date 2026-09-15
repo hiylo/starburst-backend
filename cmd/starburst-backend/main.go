@@ -11,16 +11,16 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/hiylo/startburst-backend/internal/auth"
-	"github.com/hiylo/startburst-backend/internal/automation"
-	"github.com/hiylo/startburst-backend/internal/config"
-	"github.com/hiylo/startburst-backend/internal/llm"
-	"github.com/hiylo/startburst-backend/internal/opencode"
-	"github.com/hiylo/startburst-backend/internal/push"
-	"github.com/hiylo/startburst-backend/internal/server"
-	"github.com/hiylo/startburst-backend/internal/store"
-	"github.com/hiylo/startburst-backend/internal/tasks"
-	"github.com/hiylo/startburst-backend/internal/webui"
+	"github.com/hiylo/starburst-backend/internal/auth"
+	"github.com/hiylo/starburst-backend/internal/automation"
+	"github.com/hiylo/starburst-backend/internal/config"
+	"github.com/hiylo/starburst-backend/internal/llm"
+	"github.com/hiylo/starburst-backend/internal/opencode"
+	"github.com/hiylo/starburst-backend/internal/push"
+	"github.com/hiylo/starburst-backend/internal/server"
+	"github.com/hiylo/starburst-backend/internal/store"
+	"github.com/hiylo/starburst-backend/internal/tasks"
+	"github.com/hiylo/starburst-backend/internal/webui"
 )
 
 func mustJSON(v any) json.RawMessage {
@@ -57,7 +57,7 @@ func main() {
 	}
 
 	if cfg.ShowVersion {
-		fmt.Printf("startburst-backend %s\n", config.Version)
+		fmt.Printf("starburst-backend %s\n", config.Version)
 		return
 	}
 
@@ -208,7 +208,7 @@ func main() {
 	if err := srv.Start(ctx); err != nil {
 		log.Fatalf("server: %v", err)
 	}
-	log.Println("startburst-backend stopped")
+	log.Println("starburst-backend stopped")
 }
 
 // loadLLMConfig resolves the orchestration LLM settings. Persisted settings

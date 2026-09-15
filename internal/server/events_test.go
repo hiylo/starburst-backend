@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/hiylo/startburst-backend/internal/opencode"
+	"github.com/hiylo/starburst-backend/internal/opencode"
 )
 
 func TestParseSessionEventV1Properties(t *testing.T) {

@@ -15,13 +15,13 @@ import (
 	"sync"
 	"time"
 
-	"github.com/hiylo/startburst-backend/internal/auth"
-	"github.com/hiylo/startburst-backend/internal/automation"
-	"github.com/hiylo/startburst-backend/internal/config"
-	"github.com/hiylo/startburst-backend/internal/llm"
-	"github.com/hiylo/startburst-backend/internal/opencode"
-	"github.com/hiylo/startburst-backend/internal/push"
-	"github.com/hiylo/startburst-backend/internal/store"
+	"github.com/hiylo/starburst-backend/internal/auth"
+	"github.com/hiylo/starburst-backend/internal/automation"
+	"github.com/hiylo/starburst-backend/internal/config"
+	"github.com/hiylo/starburst-backend/internal/llm"
+	"github.com/hiylo/starburst-backend/internal/opencode"
+	"github.com/hiylo/starburst-backend/internal/push"
+	"github.com/hiylo/starburst-backend/internal/store"
 )
 
 // Server wires all backend components behind an HTTP/WS listener.
@@ -113,6 +113,8 @@ func (s *Server) Routes(mux *http.ServeMux) {
 	mux.HandleFunc(OpenCodeProxyPrefix+"/", s.handleOpenCodeProxy)
 	// 全局事件查询：App 看板拉取最近会话动态。
 	mux.HandleFunc("/api/events", s.handleEvents)
+	mux.HandleFunc("/api/unread", s.handleUnreadList)
+	mux.HandleFunc("/api/unread/", s.handleUnreadMarkRead)
 	mux.HandleFunc("/api/stt", s.handleSTTStatus)
 	mux.HandleFunc("/api/stt/refine", s.handleSTTRefine)
 	mux.HandleFunc("/api/stt/sessions", s.handleSTTCreate)
@@ -132,7 +134,7 @@ func (s *Server) Start(ctx context.Context) error {
 	}
 	errCh := make(chan error, 1)
 	go func() {
-		log.Printf("startburst-backend listening on %s", s.cfg.ListenAddr)
+		log.Printf("starburst-backend listening on %s", s.cfg.ListenAddr)
 		if err := s.httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			errCh <- err
 		}

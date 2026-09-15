@@ -1,4 +1,4 @@
-module github.com/hiylo/startburst-backend
+module github.com/hiylo/starburst-backend
 
 go 1.25.0
 

@@ -195,6 +195,15 @@ type Store interface {
 	ListEvents(ctx context.Context, sessionID string, since time.Time, limit int) ([]*SessionEvent, error)
 	// DeleteEventsOlderThan purges session events older than cutoff.
 	DeleteEventsOlderThan(ctx context.Context, cutoff time.Time) (int, error)
+
+	// ---- Session unread (new-message indicator, shared across Web/App) ----
+
+	// SetSessionsUnread upserts unread=1 for the given session ids.
+	SetSessionsUnread(ctx context.Context, sessionIDs []string) error
+	// ListUnread returns the set of session ids currently flagged unread.
+	ListUnread(ctx context.Context) (map[string]bool, error)
+	// MarkSessionRead clears the unread flag for a session.
+	MarkSessionRead(ctx context.Context, sessionID string) error
 }
 
 // Open opens a store for the given driver/dsn. It applies all migrations

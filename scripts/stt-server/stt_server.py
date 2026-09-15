@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """本地流式语音识别服务（sherpa-onnx 流式 Zipformer 中英双语 int8）。
 
-作为 startburst-backend 的识别引擎：客户端把 16kHz/16bit/单声道 PCM 按分片 POST，
+作为 starburst-backend 的识别引擎：客户端把 16kHz/16bit/单声道 PCM 按分片 POST，
 服务端持续返回增量文本，松手后调用 finish 返回最终文本。全本地推理，无外部 API。
 
 端点
@@ -52,7 +52,7 @@
   # {"status":"ok","model":...,"sample_rate":16000,"max_sessions":16,"model_load_seconds":7.86}
 
   # 4. 后端接入
-  startburst-backend --stt-url http://192.0.2.150:18090
+  starburst-backend --stt-url http://192.0.2.150:18090
 
   # 5. 冒烟（把任意 16k/16bit/mono WAV 切片喂进去；不带 --token 直连引擎，带则经后端）
   python3 scripts/stt-server/smoke_test.py http://127.0.0.1:18090 sample.wav

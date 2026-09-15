@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/hiylo/startburst-backend/internal/llm"
+	"github.com/hiylo/starburst-backend/internal/llm"
 )
 
 // taskStepDraft is one LLM-proposed step of a structured task plan.

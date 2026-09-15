@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/hiylo/startburst-backend/internal/store"
+	"github.com/hiylo/starburst-backend/internal/store"
 )
 
 func newTestEngine(t *testing.T) (*Engine, store.Store) {

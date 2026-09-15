@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/hiylo/startburst-backend/internal/store"
+	"github.com/hiylo/starburst-backend/internal/store"
 )
 
 // Engine evaluates automation rules and enqueues tasks when a rule fires.

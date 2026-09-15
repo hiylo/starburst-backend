@@ -10,8 +10,8 @@ import (
 
 	"github.com/gorilla/websocket"
 
-	"github.com/hiylo/startburst-backend/internal/config"
-	"github.com/hiylo/startburst-backend/internal/push"
+	"github.com/hiylo/starburst-backend/internal/config"
+	"github.com/hiylo/starburst-backend/internal/push"
 )
 
 // WebSocket keep-alive timing: we ping every wsPingInterval and drop the
@@ -77,7 +77,7 @@ func (s *Server) handleSystem(w http.ResponseWriter, r *http.Request) {
 
 	version, _ := s.openCode.GetVersion(ctx)
 	writeJSON(w, http.StatusOK, map[string]any{
-		"backend":         "startburst-backend",
+		"backend":         "starburst-backend",
 		"version":         config.Version,
 		"opencodeURL":     s.cfg.OpenCodeURL,
 		"opencodeVersion": version,

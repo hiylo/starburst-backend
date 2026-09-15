@@ -11,7 +11,7 @@ import (
 
 	"github.com/gorilla/websocket"
 
-	"github.com/hiylo/startburst-backend/internal/opencode"
+	"github.com/hiylo/starburst-backend/internal/opencode"
 )
 
 var upgrader = websocket.Upgrader{
