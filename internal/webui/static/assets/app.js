@@ -78,7 +78,7 @@ async function api(path, opts) {
 
 /* ---------- 路由 ---------- */
 const TITLES = {
-  overview: "概览", workbench: "AI 工作台", tasks: "任务", stream: "实时流", projects: "项目 / 会话",
+  workbench: "AI 工作台", tasks: "任务", stream: "实时流", projects: "项目 / 会话",
   rules: "自动化规则", archives: "会话归档", audit: "审计日志",
   tokens: "Token 管理", settings: "设置",
 };
@@ -94,14 +94,13 @@ function switchPage(name) {
   const content = document.querySelector(".content");
   if (content) content.classList.toggle("wb-tight", name === "workbench");
   // 每个页面切到时自动加载数据，避免打开就是空的、还得手动点"刷新"。
-  if (name === "overview") loadOverview();
-  else if (name === "workbench") { loadWorkbench(); loadWbEvents(); renderWbFilters(); ensureWbProviders(); }
+  if (name === "workbench") { loadWorkbench(); loadWbEvents(); renderWbFilters(); ensureWbProviders(); }
   else if (name === "tasks") loadTasks();
   else if (name === "projects") loadProjects();
   else if (name === "rules") loadRules();
   else if (name === "archives") { loadArchives(); loadArchiveSessions(); }
   else if (name === "audit") loadAudit();
-  else if (name === "tokens") loadTokens();
+  else if (name === "tokens") { loadTokens(); loadTokenUsage(); }
   else if (name === "settings") loadLLMConfig();
   else if (name === "stream") ensureStream();
 }
@@ -118,7 +117,6 @@ async function doLogin() {
   session = data.session;
   localStorage.setItem(SESSION_KEY, session);
   renderAuth();
-  loadOverview();
 }
 function doLogout() {
   session = "";
@@ -143,9 +141,9 @@ function renderAuth() {
       if (p.id !== "loginPage") p.classList.add("hidden");
     });
   } else {
-    // 恢复上次所在页面（刷新不跳回首页）；无效/无记录则回概览。
+    // 恢复上次所在页面（刷新不跳回首页）；无效/无记录则默认进 AI 工作台。
     const last = localStorage.getItem(PAGE_KEY);
-    switchPage(TITLES[last] ? last : "overview");
+    switchPage(TITLES[last] ? last : "workbench");
   }
 }
 
@@ -160,39 +158,12 @@ function saveAppToken() {
     || !document.getElementById("page-stream").classList.contains("hidden")) ensureStream(true);
 }
 
-/* ---------- 概览 ---------- */
-async function loadOverview() {
-  try {
-    const sysRes = await api("/api/system", { headers: hdr() });
-    const sys = await sysRes.json();
-    document.getElementById("sysInfo").textContent =
-      `后端 starburst-backend · 上游 ${sys.opencodeURL} · OpenCode 版本 ${sys.opencodeVersion || "未知"} · 数据库 ${sys.db}`;
-  } catch (_) { return; }
-
-  const health = await fetch("/api/health").then(r => r.json()).catch(() => ({}));
-  const up = health.upstream ? "可达 ✓" : "不可达 ✗";
-  const upOk = !!health.upstream;
-  document.getElementById("healthInfo").innerHTML =
-    `后端: <span style="color:${health.status === "ok" ? "var(--success)" : "var(--danger)"}">${health.status || "?"}</span> · ` +
-    `上游 OpenCode: <span style="color:${upOk ? "var(--success)" : "var(--danger)"}">${up}</span>`;
-  document.getElementById("uiVersion").textContent = "前端 v6 (StarBurst) · 如非此标识请硬刷新 (Ctrl+Shift+R)";
-
+/* ---------- Token 调用次数（Token 管理页） ---------- */
+async function loadTokenUsage() {
   try {
     const st = await (await api("/api/stats", { headers: hdr() })).json();
-    const t = st.tasks || {};
-    const stats = [
-      ["任务总数", t.total ?? 0, null, "M12 20h9M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"],
-      ["排队中", t.queued ?? 0, "warn", "M4 9V7a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v2M4 9h16M4 9v8a2 2 0 0 0 2 2h7"],
-      ["执行中", t.running ?? 0, "primary", "M12 2a10 10 0 1 0 10 10M12 2a10 10 0 0 1 10 10M12 2v6M22 12h-6"],
-      ["已完成", t.succeeded ?? 0, "ok", "M9 11l3 3L22 4M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"],
-      ["失败", t.failed ?? 0, "danger", "M12 9v4M12 17h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"],
-      ["重试过", t.retried ?? 0, "warn", "M1 4v6h6M23 20v-6h-6M20.5 9A9 9 0 0 0 5.6 5.6L1 10m22 4-4.6 4.4A9 9 0 0 1 3.5 15"],
-      ["归档数", st.archives ?? 0, null, "M21 8v13H3V8M1 3h22v5H1ZM10 12h4"],
-    ];
-    document.getElementById("statGrid").innerHTML = stats.map(([k, v, tone, icon]) =>
-      `<div class="stat ${tone || ""}"><div class="k"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="${icon}"/></svg>${k}</div><div class="v">${v}</div></div>`).join("");
-
     const tb = document.querySelector("#usageTable tbody");
+    if (!tb) return;
     tb.innerHTML = "";
     const usage = st.tokenUsage || [];
     if (!usage.length) {

@@ -20,7 +20,6 @@
     </div>
     <nav class="nav" id="nav">
       <div class="nav-label">控制台</div>
-      <button data-page="overview"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg><span class="txt">概览</span></button>
       <button data-page="workbench"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="14" rx="2"/><path d="M3 9h18M8 4v5M16 4v5"/><path d="M8 17h3M14 17h4"/></svg><span class="txt">AI 工作台</span></button>
       <button data-page="tasks"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg><span class="txt">任务</span></button>
       <button data-page="stream"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg><span class="txt">实时流</span></button>
@@ -42,7 +41,7 @@
 
   <div class="main">
     <header class="topbar">
-      <h1 id="pageTitle">概览</h1>
+      <h1 id="pageTitle">AI 工作台</h1>
       <span class="plate">starburst-backend</span>
     </header>
 
@@ -63,24 +62,7 @@
         </div>
       </div>
 
-      <!-- 概览 -->
-      <div id="page-overview" class="page">
-        <div class="grid" id="statGrid"></div>
-        <div class="card">
-          <h2><span class="dot"></span>系统信息</h2>
-          <div id="sysInfo" class="muted" style="font-size:13px">加载中…</div>
-          <div id="healthInfo" class="muted" style="margin-top:6px;font-size:13px"></div>
-          <div id="uiVersion" class="muted" style="margin-top:6px;font-size:12px"></div>
-        </div>
-        <div class="card">
-          <h2><span class="dot"></span>Token 使用排行</h2>
-          <div class="table-wrap">
-            <table id="usageTable"><thead><tr><th>Token</th><th>调用次数</th></tr></thead><tbody></tbody></table>
-          </div>
-        </div>
-      </div>
-
-      <!-- AI 工作台 -->
+      <!-- AI 工作台（首页） -->
       <div id="page-workbench" class="page wb-page">
         <div class="wb-stats">
           <div class="wb-stat"><div class="n" id="wbCountQ">0</div><div class="l"><span class="dot dot-q"></span>提问中</div></div>
@@ -331,6 +313,12 @@
           <div class="row"><button class="ghost" onclick="loadTokens()">刷新</button></div>
           <div class="table-wrap">
             <table id="tokenTable"><thead><tr><th>名称</th><th>ID</th><th>创建时间</th><th>最后使用</th><th>状态</th><th></th></tr></thead><tbody></tbody></table>
+          </div>
+        </div>
+        <div class="card">
+          <h2><span class="dot"></span>Token 使用排行</h2>
+          <div class="table-wrap">
+            <table id="usageTable"><thead><tr><th>Token</th><th>调用次数</th></tr></thead><tbody></tbody></table>
           </div>
         </div>
       </div>
