@@ -288,14 +288,14 @@ func (s *Server) pushSessionEvent(se *store.SessionEvent) {
 	s.hub.Broadcast(push.Message{Type: "session.event", Payload: b})
 }
 
-// handleEvents lists recorded session events for the App dashboard ("recent
-// session activity"). Requires an APP token. Query params: since (RFC3339 or
-// unix milliseconds, optional), limit (default 200, max 1000), sessionId
-// (optional). Results are ordered by created_at ascending, forming a stable
-// forward cursor.
+// handleEvents lists recorded session events for the App dashboard and the web
+// AI workbench ("recent session activity"). Requires an APP token or a web
+// session. Query params: since (RFC3339 or unix milliseconds, optional), limit
+// (default 200, max 1000), sessionId (optional). Results are ordered by
+// created_at ascending, forming a stable forward cursor.
 func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.requireToken(r); !ok {
-		writeErr(w, http.StatusUnauthorized, "invalid token")
+	if _, ok := s.requireToken(r); !ok && !s.requireWeb(r) {
+		writeErr(w, http.StatusUnauthorized, "web session or APP token required")
 		return
 	}
 	if r.Method != http.MethodGet {

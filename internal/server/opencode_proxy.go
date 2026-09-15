@@ -80,15 +80,16 @@ func isHopByHopHeader(k string) bool {
 // streamed through with a flush after every read so events reach the APP in
 // real time.
 //
-// Entry is authenticated with a backend APP token (requireToken). The client
-// Authorization header is intentionally NOT forwarded: it belongs to the
-// backend, and the upstream receives the credentials configured on the
-// opencode.Client (SetAuthToken) instead. Directory scoping headers
-// (x-startburst-directory / x-opencode-directory) and query parameters pass
-// through untouched.
+// Entry is authenticated with a backend APP token or a web session
+// (requireToken || requireWeb), so the web UI's AI workbench can operate the
+// mirror without a separately configured APP token. The client Authorization
+// header is intentionally NOT forwarded: it belongs to the backend, and the
+// upstream receives the credentials configured on the opencode.Client
+// (SetAuthToken) instead. Directory scoping headers (x-startburst-directory /
+// x-opencode-directory) and query parameters pass through untouched.
 func (s *Server) handleOpenCodeProxy(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.requireToken(r); !ok {
-		writeErr(w, http.StatusUnauthorized, "invalid token")
+	if _, ok := s.requireToken(r); !ok && !s.requireWeb(r) {
+		writeErr(w, http.StatusUnauthorized, "web session or APP token required")
 		return
 	}
 	var upstreamPath string

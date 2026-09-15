@@ -217,14 +217,22 @@ func (s *Server) handleTokenByID(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
-// handleWebSocket upgrades a token-authenticated connection and registers it
-// with the push hub for real-time notifications.
+// handleWebSocket upgrades a token- or web-session-authenticated connection and
+// registers it with the push hub for real-time notifications.
 // The token may be supplied via the Authorization header (Bearer) or the
-// ?token= query parameter, since browsers cannot set WS headers.
+// ?token= query parameter, since browsers cannot set WS headers. A web session
+// is accepted via the X-Web-Session header or the ?session= query parameter
+// (the browser can only pass query params to a WebSocket URL).
 func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.tokenFromRequest(r); !ok {
+	if _, ok := s.tokenFromRequest(r); !ok && !s.requireWeb(r) && r.URL.Query().Get("session") == "" {
 		writeErr(w, http.StatusUnauthorized, "invalid token")
 		return
+	}
+	if r.URL.Query().Get("session") != "" {
+		if _, err := s.store.GetWebSession(r.Context(), r.URL.Query().Get("session")); err != nil {
+			writeErr(w, http.StatusUnauthorized, "invalid session")
+			return
+		}
 	}
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
