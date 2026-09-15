@@ -991,11 +991,7 @@ function wbItemHtml(it) {
   const id = s.id;
   const title = (s.title || s.slug || id).toString();
   const dir = (s.directory || "").toString();
-  const sum = s.summary || {};
   const metaParts = [];
-  if (sum.files != null || sum.additions != null || sum.deletions != null) {
-    metaParts.push(`+${sum.additions ?? 0} −${sum.deletions ?? 0} · ${sum.files ?? 0} 文件`);
-  }
   if (s.time && s.time.updated) metaParts.push(new Date(s.time.updated).toLocaleTimeString());
   const q = (it.pending || []).length;
   const active = wbSelected === id ? "active" : "";
