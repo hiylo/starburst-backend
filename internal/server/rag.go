@@ -83,6 +83,17 @@ func (s *Server) buildIntelChunks(ctx context.Context, projectID int64) ([]*stor
 		return nil, err
 	}
 	chunks := make([]*store.RagChunk, 0, len(entities)+len(endpoints))
+	// The monorepo scanner can assign the same source file to multiple detected
+	// modules, producing identical entity/endpoint rows. Dedup by content so the
+	// knowledge base keeps a single copy of each distinct fragment.
+	seen := map[string]bool{}
+	add := func(c *store.RagChunk) {
+		if seen[c.Content] {
+			return
+		}
+		seen[c.Content] = true
+		chunks = append(chunks, c)
+	}
 
 	// Group entity columns by (module, table) into one chunk per table.
 	type key struct {
@@ -127,7 +138,7 @@ func (s *Server) buildIntelChunks(ctx context.Context, projectID int64) ([]*stor
 				sb.WriteString("，非空")
 			}
 		}
-		chunks = append(chunks, &store.RagChunk{
+		add(&store.RagChunk{
 			ModuleID:   k.module,
 			Kind:       "entity",
 			Title:      k.table + " 表",
@@ -136,7 +147,6 @@ func (s *Server) buildIntelChunks(ctx context.Context, projectID int64) ([]*stor
 			SourceLine: cols[0].SourceLine,
 		})
 	}
-
 	for _, ep := range endpoints {
 		var sb strings.Builder
 		sb.WriteString("接口 ")
@@ -158,7 +168,7 @@ func (s *Server) buildIntelChunks(ctx context.Context, projectID int64) ([]*stor
 			sb.WriteString("\n返回字段：")
 			sb.WriteString(ep.FieldsJSON)
 		}
-		chunks = append(chunks, &store.RagChunk{
+		add(&store.RagChunk{
 			ModuleID:   ep.ModuleID,
 			Kind:       "endpoint",
 			RefID:      ep.ID,
