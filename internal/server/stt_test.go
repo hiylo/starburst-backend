@@ -357,6 +357,21 @@ func TestSTTNotAudited(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
 		t.Fatalf("decode audit: %v", err)
 	}
+	// 审计已改为异步批量落库（StartAuditFlusher 每 500ms 批刷），轮询等待
+	// /api/projects 的审计行出现，而不是要求立即可见。
+	if !hasPath(out.Audit, "/api/projects") {
+		deadline := time.Now().Add(3 * time.Second)
+		for time.Now().Before(deadline) {
+			time.Sleep(100 * time.Millisecond)
+			rec = s.do(t, http.MethodGet, "/api/audit", "", web)
+			if rec.Code == http.StatusOK {
+				_ = json.Unmarshal(rec.Body.Bytes(), &out)
+				if hasPath(out.Audit, "/api/projects") {
+					break
+				}
+			}
+		}
+	}
 	if len(out.Audit) == 0 {
 		t.Fatalf("expected audit entries")
 	}
@@ -402,4 +417,16 @@ func TestDedupEngineTranscript(t *testing.T) {
 	if string(dedupEngineTranscript(raw)) != string(raw) {
 		t.Fatalf("bad json must pass through")
 	}
+}
+
+// hasPath reports whether any reported audit entry has the given path.
+func hasPath(entries []struct {
+	Path string `json:"Path"`
+}, path string) bool {
+	for _, e := range entries {
+		if e.Path == path {
+			return true
+		}
+	}
+	return false
 }

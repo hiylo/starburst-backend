@@ -90,6 +90,11 @@ func newTestServer(t *testing.T) *Server {
 	srv := New(cfg, st, am, oc, hub)
 	srv.SetAutomation(automation.NewEngine(st, time.Hour))
 	srv.testMux = srv.routesMux()
+	// 生产由 main.go 启动审计批量 flusher；测试服务器也要启动，否则
+	// 异步审计的行永远不会落库。
+	aCtx, aCancel := context.WithCancel(context.Background())
+	t.Cleanup(aCancel)
+	go srv.StartAuditFlusher(aCtx)
 	return srv
 }
 
@@ -837,23 +842,14 @@ func TestAuditLogging(t *testing.T) {
 		t.Fatalf("projects status %d", rec.Code)
 	}
 
-	// Audit should have an entry for this token call.
-	rec = s.do(t, http.MethodGet, "/api/audit", "", wh)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("audit status %d", rec.Code)
-	}
-	var out struct {
-		Audit []struct {
-			TokenName string `json:"TokenName"`
-			Path      string `json:"Path"`
-		} `json:"audit"`
-	}
-	_ = json.Unmarshal(rec.Body.Bytes(), &out)
-	if len(out.Audit) == 0 {
+	// Audit should have an entry for this token call (async flush → poll).
+	entries := waitForAuditEntries(t, s, wh, 1)
+	audit := entries
+	if len(audit) == 0 {
 		t.Fatalf("expected audit entries")
 	}
 	// The newest entry should be our projects call.
-	last := out.Audit[0]
+	last := audit[0]
 	if last.Path != "/api/projects" {
 		t.Fatalf("last audit path %q want /api/projects", last.Path)
 	}
@@ -957,6 +953,10 @@ func TestStatsEndpoint(t *testing.T) {
 
 	// Create a task too.
 	rec = s.do(t, http.MethodPost, "/api/tasks", `{"prompt":"x","directory":"/w"}`, th)
+
+	// 审计是异步批量落库的：先等该 token 的 3 条调用（2×projects + 1×tasks）
+	// 进入审计，否则 tokenUsage 断言会拿到空。
+	waitForAuditEntries(t, s, wh, 3)
 
 	// Stats.
 	rec = s.do(t, http.MethodGet, "/api/stats", "", wh)
@@ -1324,5 +1324,36 @@ func TestTaskCreateReturnsStoredTimestamps(t *testing.T) {
 		if f.ts.Before(before.Add(-time.Minute)) || f.ts.After(time.Now().Add(time.Minute)) {
 			t.Fatalf("%s %v is out of range", f.name, f.ts)
 		}
+	}
+}
+
+// auditEntryView is the JSON view of an audit_log row used in tests.
+type auditEntryView struct {
+	TokenName string `json:"TokenName"`
+	Path      string `json:"Path"`
+}
+
+// waitForAuditEntries polls /api/audit (web-session headers) until at least
+// min entries are visible or a deadline passes. Audit is flushed asynchronously
+// (StartAuditFlusher batches every ~500ms), so assertions must not assume the
+// row is visible immediately.
+func waitForAuditEntries(t *testing.T, s *Server, wh map[string]string, min int) []auditEntryView {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	var out struct {
+		Audit []auditEntryView `json:"audit"`
+	}
+	for {
+		rec := s.do(t, http.MethodGet, "/api/audit", "", wh)
+		if rec.Code == http.StatusOK {
+			_ = json.Unmarshal(rec.Body.Bytes(), &out)
+			if len(out.Audit) >= min {
+				return out.Audit
+			}
+		}
+		if time.Now().After(deadline) {
+			return out.Audit
+		}
+		time.Sleep(100 * time.Millisecond)
 	}
 }
