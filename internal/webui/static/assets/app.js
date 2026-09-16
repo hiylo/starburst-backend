@@ -2186,7 +2186,7 @@ function clearStream() {
 
 /* ---------- 智能测试（intel） ---------- */
 let intelCurrentProject = 0;
-const INTEL_TYPE_LABELS = { java: "Java", android: "Android", ios: "iOS", go: "Go", web: "Web", bff: "BFF", node: "Node" };
+const INTEL_TYPE_LABELS = { java: "Java", android: "Android", ios: "iOS", go: "Go", web: "Web", node: "Node" };
 
 function toggleIntelSource() {
   const src = document.getElementById("intelSource").value;
@@ -2320,6 +2320,7 @@ async function loadIntelDetail(id) {
     </tr>`);
   }
   if (!(data.modules || []).length) mtb.insertAdjacentHTML("beforeend", `<tr><td colspan="4" class="muted" style="text-align:center;padding:16px">暂无子项目（分析后自动识别）</td></tr>`);
+  document.getElementById("intelDetailStatModules").textContent = (data.modules || []).length;
   await loadIntelContracts(id);
 }
 
@@ -2331,6 +2332,13 @@ async function loadIntelContracts(id) {
   const eps = (await epRes.json()).endpoints || [];
   const ents = (await entRes.json()).entities || [];
 
+  // 统计
+  document.getElementById("intelDetailStatEndpoints").textContent = eps.length;
+  document.getElementById("intelDetailStatColumns").textContent = ents.length;
+  const tableSet = new Set(ents.map(e => e.table).filter(Boolean));
+  document.getElementById("intelDetailStatTables").textContent = tableSet.size;
+
+  // 接口契约表
   const etb = document.querySelector("#intelEndpointTable tbody");
   etb.innerHTML = "";
   for (const ep of eps) {
@@ -2345,18 +2353,43 @@ async function loadIntelContracts(id) {
   }
   if (!eps.length) etb.insertAdjacentHTML("beforeend", `<tr><td colspan="5" class="muted" style="text-align:center;padding:16px">暂无接口契约（分析后自动提取）</td></tr>`);
 
-  const ntb = document.querySelector("#intelEntityTable tbody");
-  ntb.innerHTML = "";
+  // 实体按表分组：每张表一个卡片，列出全部字段（字段名/类型/主键/可空）
+  renderIntelEntities(ents);
+}
+
+// renderIntelEntities 按表分组渲染实体：一张表 = 一张卡片，展示列契约。
+function renderIntelEntities(ents) {
+  const wrap = document.getElementById("intelEntityList");
+  wrap.innerHTML = "";
+  if (!ents.length) {
+    wrap.innerHTML = `<div class="muted" style="text-align:center;padding:16px">暂无实体映射（分析后自动提取）</div>`;
+    return;
+  }
+  // group by table
+  const groups = new Map();
   for (const e of ents) {
-    ntb.insertAdjacentHTML("beforeend", `<tr>
-      <td>${escapeHtml(e.entity)}</td>
-      <td class="mono">${escapeHtml(e.table)}</td>
-      <td class="mono">${escapeHtml(e.column)}</td>
+    const key = e.table || e.entity || "(未命名)";
+    if (!groups.has(key)) groups.set(key, { table: e.table, entity: e.entity, columns: [] });
+    groups.get(key).columns.push(e);
+  }
+  for (const [key, g] of groups) {
+    const cols = g.columns.map(e => `<tr>
+      <td class="mono">${escapeHtml(e.column)}${e.isPrimary ? ' <span class="badge warn" style="font-size:10px">PK</span>' : ''}</td>
+      <td class="mono muted">${escapeHtml(e.fieldType || "-")}</td>
       <td>${e.nullable ? '<span class="intel-status pending">可空</span>' : '<span class="intel-status analyzed">非空</span>'}</td>
       <td class="mono muted clip" title="${escapeHtml(e.sourceFile)}">${escapeHtml(shortProv(e.sourceFile, e.sourceLine))}</td>
-    </tr>`);
+    </tr>`).join("");
+    wrap.insertAdjacentHTML("beforeend", `<div class="card" style="margin:0">
+      <div class="row" style="justify-content:space-between">
+        <strong class="mono">${escapeHtml(g.table || key)}</strong>
+        <span class="muted" style="font-size:12px">${escapeHtml(g.entity)} · ${g.columns.length} 列</span>
+      </div>
+      <div class="table-wrap">
+        <table><thead><tr><th>列</th><th>类型</th><th>可空</th><th>来源</th></tr></thead>
+        <tbody>${cols}</tbody></table>
+      </div>
+    </div>`);
   }
-  if (!ents.length) ntb.insertAdjacentHTML("beforeend", `<tr><td colspan="5" class="muted" style="text-align:center;padding:16px">暂无实体映射（分析后自动提取）</td></tr>`);
 }
 
 function shortProv(file, line) {

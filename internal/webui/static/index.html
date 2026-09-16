@@ -435,6 +435,14 @@
           </div>
           <div class="row muted" style="font-size:12px" id="intelDetailMeta"></div>
 
+          <!-- 概览统计 -->
+          <div class="stat-grid" style="margin-top:var(--sp-md)">
+            <div class="stat"><div class="k">子项目</div><div class="v" id="intelDetailStatModules">0</div></div>
+            <div class="stat primary"><div class="k">接口契约</div><div class="v" id="intelDetailStatEndpoints">0</div></div>
+            <div class="stat"><div class="k">实体 / 表</div><div class="v" id="intelDetailStatTables">0</div></div>
+            <div class="stat"><div class="k">字段 / 列</div><div class="v" id="intelDetailStatColumns">0</div></div>
+          </div>
+
           <div class="intel-tabs">
             <button class="intel-tab active" data-tab="modules">子项目</button>
             <button class="intel-tab" data-tab="endpoints">接口契约</button>
@@ -452,9 +460,7 @@
             </div>
           </div>
           <div class="intel-panel hidden" id="intelPanel-entities">
-            <div class="table-wrap">
-              <table id="intelEntityTable"><thead><tr><th>实体</th><th>表</th><th>列</th><th>可空</th><th>来源</th></tr></thead><tbody></tbody></table>
-            </div>
+            <div id="intelEntityList" style="display:flex;flex-direction:column;gap:var(--sp-sm)"></div>
           </div>
         </div>
       </div>
