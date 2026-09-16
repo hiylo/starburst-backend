@@ -29,6 +29,7 @@
       <button data-page="rules"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 3a9 9 0 0 1 0 18M12 8v4l3 2"/></svg><span class="txt">自动化规则</span></button>
       <button data-page="archives"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="4" rx="1"/><path d="M5 8v10a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8M10 12h4"/></svg><span class="txt">会话归档</span></button>
       <div class="nav-label">系统</div>
+      <button data-page="intel"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg><span class="txt">智能测试</span></button>
       <button data-page="audit"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M9 13h6M9 17h6"/></svg><span class="txt">审计日志</span></button>
       <button data-page="tokens"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg><span class="txt">Token 管理</span></button>
       <button data-page="settings"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg><span class="txt">设置</span></button>
@@ -376,6 +377,84 @@
           <h2><span class="dot"></span>Token 使用排行</h2>
           <div class="table-wrap">
             <table id="usageTable"><thead><tr><th>Token</th><th>调用次数</th></tr></thead><tbody></tbody></table>
+          </div>
+        </div>
+      </div>
+
+      <!-- 智能测试（intel）——管理列表页 -->
+      <div id="page-intel" class="page">
+        <!-- 顶部统计 -->
+        <div class="stat-grid" id="intelStats">
+          <div class="stat"><div class="k">项目总数</div><div class="v" id="intelStatTotal">0</div></div>
+          <div class="stat ok"><div class="k">已分析</div><div class="v" id="intelStatAnalyzed">0</div></div>
+          <div class="stat warn"><div class="k">待分析</div><div class="v" id="intelStatPending">0</div></div>
+          <div class="stat primary"><div class="k">接口契约</div><div class="v" id="intelStatEndpoints">0</div></div>
+        </div>
+
+        <!-- 添加项目 -->
+        <div class="card">
+          <h2><span class="dot"></span>添加测试项目</h2>
+          <div class="row">
+            <input type="text" id="intelName" placeholder="项目名（可留空，自动取路径名）" style="flex:1.2">
+            <select id="intelSource" onchange="toggleIntelSource()">
+              <option value="local">本地路径</option>
+              <option value="git">Git URL</option>
+            </select>
+            <input type="text" id="intelPath" placeholder="/path/to/repo" style="flex:2.5">
+            <input type="text" id="intelGitRef" placeholder="分支/tag（可选）" style="flex:1" class="hidden">
+            <button onclick="createIntelProject()">添加项目</button>
+          </div>
+          <div id="intelMsg" class="msg"></div>
+        </div>
+
+        <!-- 项目列表（管理） -->
+        <div class="card">
+          <h2><span class="dot"></span>项目管理</h2>
+          <div class="row"><button class="ghost" onclick="loadIntelProjects()">刷新</button></div>
+          <div class="table-wrap">
+            <table id="intelProjectTable">
+              <thead><tr><th>名称</th><th>来源</th><th>路径 / URL</th><th>分析状态</th><th>操作</th></tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <!-- 智能测试 —— 项目详情（独立页面） -->
+      <div id="page-intel-detail" class="page">
+        <div class="card">
+          <div class="row" style="justify-content:space-between">
+            <div class="row">
+              <button class="ghost" onclick="backToIntelList()">← 返回</button>
+              <h2><span class="dot"></span><span id="intelDetailName" class="mono" style="font-size:16px"></span></h2>
+            </div>
+            <div class="row">
+              <button onclick="runIntelAnalyze()">执行分析</button>
+              <span id="intelAnalyzeStatus" class="muted" style="font-size:12px"></span>
+            </div>
+          </div>
+          <div class="row muted" style="font-size:12px" id="intelDetailMeta"></div>
+
+          <div class="intel-tabs">
+            <button class="intel-tab active" data-tab="modules">子项目</button>
+            <button class="intel-tab" data-tab="endpoints">接口契约</button>
+            <button class="intel-tab" data-tab="entities">实体 / 表 / 列</button>
+          </div>
+
+          <div class="intel-panel" id="intelPanel-modules">
+            <div class="table-wrap">
+              <table id="intelModuleTable"><thead><tr><th>路径</th><th>类型</th><th>角色</th><th>构建工具</th></tr></thead><tbody></tbody></table>
+            </div>
+          </div>
+          <div class="intel-panel hidden" id="intelPanel-endpoints">
+            <div class="table-wrap">
+              <table id="intelEndpointTable"><thead><tr><th>方法</th><th>路径</th><th>返回类型</th><th>请求体</th><th>来源</th></tr></thead><tbody></tbody></table>
+            </div>
+          </div>
+          <div class="intel-panel hidden" id="intelPanel-entities">
+            <div class="table-wrap">
+              <table id="intelEntityTable"><thead><tr><th>实体</th><th>表</th><th>列</th><th>可空</th><th>来源</th></tr></thead><tbody></tbody></table>
+            </div>
           </div>
         </div>
       </div>

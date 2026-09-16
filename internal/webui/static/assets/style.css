@@ -681,3 +681,23 @@ td .actions { display: inline-flex; gap: 6px; }
   .topbar { padding: var(--sp-sm) var(--sp-md); }
   .content { padding: var(--sp-sm) var(--sp-md); }
 }
+
+/* ============================== 测试智能页 ============================== */
+.stat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: var(--sp-sm); margin-bottom: var(--sp-md); }
+.intel-tabs { display: flex; gap: 4px; margin: var(--sp-md) 0 var(--sp-xs); border-bottom: 1px solid var(--hairline); }
+.intel-tab {
+  background: transparent; color: var(--ink-subtle); border: none; border-bottom: 2px solid transparent;
+  padding: 8px 14px; font-size: 13px; font-weight: 500; cursor: pointer; border-radius: 0;
+  box-shadow: none;
+}
+.intel-tab:hover { color: var(--ink); background: transparent; box-shadow: none; }
+.intel-tab.active { color: var(--primary-hover); border-bottom-color: var(--primary); }
+.intel-panel { animation: none; }
+.badge.method-get { background: var(--info-dim); color: var(--primary-hover); border-color: rgba(99,102,241,.4); }
+.badge.method-post { background: var(--success-dim); color: var(--success); border-color: rgba(39,166,68,.3); }
+.badge.method-put { background: var(--warning-dim); color: var(--warning); border-color: rgba(247,201,72,.3); }
+.badge.method-delete { background: var(--danger-dim); color: var(--danger); border-color: rgba(255,71,71,.3); }
+.badge.type-badge { background: var(--brand-gradient-soft); color: var(--ink); border-color: rgba(99,102,241,.25); }
+.intel-status { font-size: 11.5px; }
+.intel-status.analyzed { color: var(--success); }
+.intel-status.pending { color: var(--warning); }

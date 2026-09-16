@@ -80,7 +80,7 @@ async function api(path, opts) {
 const TITLES = {
   workbench: "AI 工作台", tasks: "任务", workflow: "编排", stream: "实时流", projects: "项目 / 会话",
   rules: "自动化规则", archives: "会话归档", audit: "审计日志",
-  tokens: "Token 管理", settings: "设置",
+  tokens: "Token 管理", settings: "设置", intel: "智能测试",
 };
 function switchPage(name) {
   // 记住当前页面，刷新后回到同一页而不是跳回首页。
@@ -104,6 +104,7 @@ function switchPage(name) {
   else if (name === "tokens") { loadTokens(); loadTokenUsage(); }
   else if (name === "settings") loadLLMConfig();
   else if (name === "stream") ensureStream();
+  else if (name === "intel") loadIntelProjects();
 }
 document.querySelectorAll("#nav button").forEach(b => {
   b.addEventListener("click", () => switchPage(b.dataset.page));
@@ -934,9 +935,13 @@ setInterval(() => {
   if (!page || page.id !== "page-workbench" || !session) return;
   loadWbEvents();
   if (Date.now() - wbLastListLoad > 12000) loadWorkbench();
-  // 每次轮询顺带拉取面板最新消息：内容有变才重绘（先拉后比），
-  // 从而 AI 生成期间聊天能自动跟进，无需手动刷新。
-  if (wbSelected) refreshWbPanel(wbSelected);
+  // 仅在选中会话活跃（处理中/提问/重试）时拉取面板，空闲时新消息不会有，
+  // 可省掉每个标签页每 5s 一次的消息请求。
+  if (wbSelected) {
+    const it = wbItems.find(x => x.session.id === wbSelected);
+    const live = !it || it.status === "busy" || it.status === "retry" || it.status === "question";
+    if (live) refreshWbPanel(wbSelected);
+  }
 }, 5000);
 
 /* ---------- 实时推送（任务 AI 摘要 / 状态） ---------- */
@@ -1020,6 +1025,8 @@ let wbMoreMsgs = false;
 let wbRenaming = false;
 // 有未读新消息的会话集合（后端 session_unread 为准，Web/App 共享）。
 let wbNewSet = new Set();
+// 待授权操作：sessionId → [PermissionRequest{id, permission, patterns, always, tool}]。
+let wbPermissions = {};
 // 待决问题的作答暂存：wbQAnswers[requestId][questionIndex] = [selectedLabels...]。
 // 一个 request 可包含多个 question，需全部作答后一次性提交（answers 数组按序对应）。
 let wbQAnswers = {};
@@ -1121,6 +1128,7 @@ function wbPanelSigFor(d) {
   const model = (d.session && d.session.model && d.session.model.id) || "";
   return [d.id, st, model,
     (d.pending || []).map(q => q.id).join(","),
+    (d.permissions || []).map(p => p.id).join(","),
     (d.recent || []).map(m => m.role + ":" + m.text.slice(0, 60)).join("|"),
   ].join("\u0001");
 }
@@ -1213,11 +1221,13 @@ function buildWbItems() {
   const roots = wbSessions.filter(s => !s.parentID && !(s.time && s.time.archived));
   return roots.map(s => {
     const self = wbStatuses[s.id];
+    const hasQ = (wbPending[s.id] && wbPending[s.id].length) || parentQ.has(s.id);
+    const perms = wbPermissions[s.id] || [];
     let st;
-    if ((wbPending[s.id] && wbPending[s.id].length) || parentQ.has(s.id)) st = "question";
+    if (hasQ || (perms && perms.length)) st = "question";
     else if (self && (self.type === "busy" || self.type === "retry")) st = self.type;
     else st = childBusy[s.id] || (self && self.type) || "idle";
-    return { session: s, status: st, pending: wbPending[s.id] || [] };
+    return { session: s, status: st, pending: wbPending[s.id] || [], permissions: perms };
   }).sort((a, b) => {
     const r = wbRank(a.status) - wbRank(b.status);
     if (r) return r;
@@ -1308,8 +1318,10 @@ function wbItemHtml(it) {
   const metaParts = [];
   if (s.time && s.time.updated) metaParts.push(new Date(s.time.updated).toLocaleTimeString());
   const q = (it.pending || []).length;
+  const pc = (it.permissions || []).length;
   const active = wbSelected === id ? "active" : "";
-  const wrap = q ? `<span class="qbadge">提问 ${q}</span>` : "";
+  const wrap = (q ? `<span class="qbadge">提问 ${q}</span>` : "") +
+    (pc ? `<span class="qbadge" title="待授权操作">授权 ${pc}</span>` : "");
   const newDot = wbNewSet.has(id) ? `<span class="newdot" title="有新消息"></span>` : "";
   return `<div class="wb-item ${active}" data-sid="${escapeHtml(id)}">
     <div class="t"><span class="dot ${escapeHtml(it.status)}"></span><span class="ttl">${escapeHtml(title)}</span>${newDot}${wrap}</div>
@@ -1394,6 +1406,18 @@ async function loadWorkbench() {
     for (const qs of qResps) {
       for (const q of (Array.isArray(qs) ? qs : [])) {
         if (q && q.sessionID) (wbPending[q.sessionID] = wbPending[q.sessionID] || []).push(q);
+      }
+    }
+    // 待授权操作同样按目录查询（App listPendingPermissions 同契约）。
+    wbPermissions = {};
+    const permResps = await Promise.all(dirs.map(d =>
+      api("/api/opencode/permission?directory=" + encodeURIComponent(d), { headers: appHeaders() })
+        .then(r => (r.ok ? r.json() : []))
+        .catch(() => [])
+    ));
+    for (const ps of permResps) {
+      for (const p of (Array.isArray(ps) ? ps : [])) {
+        if (p && p.sessionID) (wbPermissions[p.sessionID] = wbPermissions[p.sessionID] || []).push(p);
       }
     }
     renderWbList();
@@ -1704,7 +1728,7 @@ function openWbPanel(id) {
   document.getElementById("wbPanel").classList.remove("hidden");
   if (switched) {
     // 切会话时先清空为加载态，避免显示上一个会话的内容。
-    wbPanelData = { id, loading: true, recent: [], pending: [], status: "", session: null };
+    wbPanelData = { id, loading: true, recent: [], pending: [], permissions: [], status: "", session: null };
     // 切换会话时清掉上一会话的待决问题作答暂存。
     wbQAnswers = {};
     wbMoreMsgs = false;
@@ -1750,6 +1774,7 @@ async function refreshWbPanel(id, force) {
       id,
       recent: parsed.recent,
       pending: (item && item.pending) || [],
+      permissions: (item && item.permissions) || [],
       status: item ? item.status : "idle",
       session: item ? item.session : null,
     };
@@ -1806,6 +1831,7 @@ function renderWbPanel() {
   if (s.time && s.time.updated) metaBits.push(escapeHtml(new Date(s.time.updated).toLocaleString()));
   const statusBadgeCls = status === "question" ? "question" : (status === "busy" || status === "retry") ? "busy" : "idle";
   const qhtml = renderWbQuestions();
+  const permHtml = renderWbPermissions(d.permissions || []);
   const total = d.recent.length;
   const visCount = wbMoreMsgs ? total : Math.min(WB_RECENT_SHOW, total);
   const hiddenCount = total - visCount;
@@ -1844,6 +1870,7 @@ function renderWbPanel() {
       <div class="wb-model-row"><span class="lbl">模型</span>
         <select id="wbModelSelect" onchange="wbModelChange(this)">${wbModelOptions()}</select>
       </div>
+            ${permHtml ? `<div class="wb-block"><h4>待授权操作<span class="info">${(d.permissions || []).length} 项</span></h4>${permHtml}</div>` : ""}
       ${qhtml ? `<div class="wb-block"><h4>待决问题<span class="info">${(d.pending || []).reduce((n, q) => n + (q.questions || []).length, 0)} 个</span></h4>${qhtml}</div>` : ""}
       <div class="wb-block wb-msg-block"><h4>最近对话<span class="info">${wbMoreMsgs ? `全部 ${d.recent.length} 条` : `最新 ${visCount} / ${d.recent.length} 条`}</span></h4>
         ${moreBtn}
@@ -1858,6 +1885,8 @@ function renderWbPanel() {
       </div>
     </div>`;
   panel.onclick = (e) => {
+    const pbp = e.target.closest("[data-wb-perm]");
+    if (pbp) { wbPermReply(pbp.dataset.wbPerm, pbp.dataset.reply); return; }
     const ren = e.target.closest("[data-wb-rename]");
     if (ren) {
       wbRenaming = true;
@@ -1911,6 +1940,40 @@ function renderWbPanel() {
 // 渲染待决问题。一个 request 可含多个 question，answers 数组须按序一一对应，
 // 因此把同一 request 的问题聚合成一组，逐题选择后一次性提交全部作答。
 // 点选项只做本地暂存/高亮，绝不立即提交（避免误触导致 request 提前被消费）。
+// 渲染待授权操作。每条权限显示 permission 类型 + patterns，提供 允许一次 /
+// 始终允许 / 拒绝 三个动作（与 App replyToPermission 契约一致）。
+function renderWbPermissions(perms) {
+  return (perms || []).map(p => {
+    const patterns = (p.patterns || []).join("、") || "-";
+    const tool = (p.tool && (p.tool.type || p.tool.id || p.tool.name)) ? ` · ${escapeHtml(p.tool.type || p.tool.id || p.tool.name)}` : "";
+    const always = (p.always || []).join("、");
+    return `<div class="wb-qcard" data-wb-permcard>
+      <div class="qhead">待授权 · ${escapeHtml(p.permission || "操作")}${tool}<span class="info" style="float:right;text-transform:none">${escapeHtml(p.id || "")}</span></div>
+      <div class="q">${escapeHtml(patterns)}</div>
+      ${always ? `<div class="muted" style="font-size:11px;margin-top:4px">已始终允许：${escapeHtml(always)}</div>` : ""}
+      <div class="wb-qopts">
+        <button data-wb-perm="${escapeHtml(p.id)}" data-reply="once">允许一次</button>
+        <button data-wb-perm="${escapeHtml(p.id)}" data-reply="always">始终允许</button>
+        <button class="reject" data-wb-perm="${escapeHtml(p.id)}" data-reply="reject">拒绝</button>
+      </div>
+    </div>`;
+  }).join("");
+}
+// 处理待授权操作：allowed once / always / reject。
+async function wbPermReply(reqId, reply) {
+  const item = wbItems.find(x => x.session.id === wbSelected);
+  const dir = (item && item.session && item.session.directory) || "";
+  const url = `/api/opencode/permission/${encodeURIComponent(reqId)}/reply` + (dir ? "?directory=" + encodeURIComponent(dir) : "");
+  const res = await api(url, { method: "POST", headers: appHeaders(), body: JSON.stringify({ reply }) });
+  if (!res.ok) { toast("授权失败", "权限回复未送达 (" + res.status + ")", "crit"); return; }
+  toast("已处理", reply === "reject" ? "已拒绝该操作" : (reply === "always" ? "已始终允许" : "已允许一次"), "info");
+  if (wbPanelData && wbPanelData.permissions) {
+    wbPanelData.permissions = wbPanelData.permissions.filter(p => p.id !== reqId);
+  }
+  wbRerenderPanel();
+  loadWorkbench();
+}
+
 function renderWbQuestions() {
   const pending = wbPanelData.pending || [];
   // 清理已不在待决列表里的 request 的暂存作答，避免旧选择残留。
@@ -2119,6 +2182,211 @@ function toggleStream() {
 }
 function clearStream() {
   document.getElementById("streamBox").innerHTML = "";
+}
+
+/* ---------- 智能测试（intel） ---------- */
+let intelCurrentProject = 0;
+const INTEL_TYPE_LABELS = { java: "Java", android: "Android", ios: "iOS", go: "Go", web: "Web", bff: "BFF", node: "Node" };
+
+function toggleIntelSource() {
+  const src = document.getElementById("intelSource").value;
+  const ph = document.getElementById("intelPath");
+  const refInput = document.getElementById("intelGitRef");
+  ph.placeholder = src === "git" ? "https://gitlab.example.com/group/repo.git" : "/path/to/repo";
+  refInput.classList.toggle("hidden", src !== "git");
+}
+
+// intel tab switcher
+document.addEventListener("DOMContentLoaded", () => {
+  document.querySelectorAll(".intel-tab").forEach(t => {
+    t.addEventListener("click", () => {
+      document.querySelectorAll(".intel-tab").forEach(b => b.classList.remove("active"));
+      t.classList.add("active");
+      document.querySelectorAll(".intel-panel").forEach(p => p.classList.add("hidden"));
+      const panel = document.getElementById("intelPanel-" + t.dataset.tab);
+      if (panel) panel.classList.remove("hidden");
+    });
+  });
+});
+
+async function loadIntelProjects() {
+  const res = await api("/api/intel/projects", { headers: appHeaders() });
+  const data = await res.json();
+  if (!res.ok) { show(document.getElementById("intelMsg"), data.error || "加载失败"); return; }
+  const list = data.projects || [];
+  const tb = document.querySelector("#intelProjectTable tbody");
+  tb.innerHTML = "";
+  let analyzed = 0;
+  for (const p of list) {
+    const loc = p.source === "git" ? p.gitUrl : p.localPath;
+    if (p.analyzedAt) analyzed++;
+    const isAnalyzed = !!p.analyzedAt;
+    tb.insertAdjacentHTML("beforeend", `<tr>
+      <td class="clip" title="${escapeHtml(p.name)}"><strong>${escapeHtml(p.name)}</strong></td>
+      <td><span class="badge">${escapeHtml(p.source)}</span></td>
+      <td class="mono clip muted" title="${escapeHtml(loc)}">${escapeHtml(loc || "-")}</td>
+      <td><span class="intel-status ${isAnalyzed ? "analyzed" : "pending"}">${isAnalyzed ? "已分析" : "待分析"}</span></td>
+      <td>
+        <button class="ghost sm" data-id="${p.id}">详情</button>
+        <button class="ghost sm" data-analyze="${p.id}">分析</button>
+        <button class="tertiary sm" data-del="${p.id}">删除</button>
+      </td>
+    </tr>`);
+  }
+  tb.onclick = (e) => {
+    const btn = e.target.closest("button[data-id]");
+    if (btn) { openIntelDetail(Number(btn.dataset.id)); return; }
+    const az = e.target.closest("button[data-analyze]");
+    if (az) { runIntelAnalyze(Number(az.dataset.analyze)); return; }
+    const del = e.target.closest("button[data-del]");
+    if (del) { deleteIntelProject(Number(del.dataset.del)); }
+  };
+  if (!list.length) tb.insertAdjacentHTML("beforeend", `<tr><td colspan="5" class="muted" style="text-align:center;padding:24px">暂无测试项目，请在上方添加</td></tr>`);
+  // stats
+  document.getElementById("intelStatTotal").textContent = list.length;
+  document.getElementById("intelStatAnalyzed").textContent = analyzed;
+  document.getElementById("intelStatPending").textContent = list.length - analyzed;
+}
+
+async function createIntelProject() {
+  const src = document.getElementById("intelSource").value;
+  const body = {
+    name: document.getElementById("intelName").value.trim(),
+    source: src,
+    localPath: src === "local" ? document.getElementById("intelPath").value.trim() : "",
+    gitUrl: src === "git" ? document.getElementById("intelPath").value.trim() : "",
+    gitRef: src === "git" ? document.getElementById("intelGitRef").value.trim() : "",
+  };
+  if (src === "local" && !body.localPath) { show(document.getElementById("intelMsg"), "请填写本地路径"); return; }
+  if (src === "git" && !body.gitUrl) { show(document.getElementById("intelMsg"), "请填写 Git URL"); return; }
+  const res = await api("/api/intel/projects", { method: "POST", headers: appHeaders(), body: JSON.stringify(body) });
+  const data = await res.json();
+  if (!res.ok) { show(document.getElementById("intelMsg"), data.error || "添加失败"); return; }
+  show(document.getElementById("intelMsg"), "已添加：" + escapeHtml(data.name));
+  document.getElementById("intelMsg").classList.add("ok");
+  document.getElementById("intelName").value = "";
+  document.getElementById("intelPath").value = "";
+  document.getElementById("intelGitRef").value = "";
+  loadIntelProjects();
+}
+
+async function deleteIntelProject(id) {
+  if (!confirm("删除该项目及其全部测试情报？此操作不可撤销。")) return;
+  await api("/api/intel/projects/" + id, { method: "DELETE", headers: appHeaders() });
+  loadIntelProjects();
+}
+
+// 列表页「详情」→ 跳转到独立的项目详情页
+function openIntelDetail(id) {
+  intelCurrentProject = id;
+  localStorage.setItem("intelDetailProject", String(id));
+  showPageIntelDetail();
+  loadIntelDetail(id);
+}
+
+// 直接切换到详情页（不经过左侧导航高亮）
+function showPageIntelDetail() {
+  document.querySelectorAll(".page").forEach(p => p.classList.add("hidden"));
+  document.getElementById("page-intel-detail").classList.remove("hidden");
+  document.getElementById("pageTitle").textContent = "智能测试 · 项目详情";
+  document.querySelectorAll("#nav button").forEach(b => b.classList.remove("active"));
+}
+
+// 返回列表页
+function backToIntelList() {
+  localStorage.removeItem("intelDetailProject");
+  intelCurrentProject = 0;
+  switchPage("intel");
+}
+
+async function loadIntelDetail(id) {
+  const res = await api("/api/intel/projects/" + id, { headers: appHeaders() });
+  const data = await res.json();
+  if (!res.ok) { document.getElementById("intelDetailName").textContent = "加载失败"; return; }
+  const p = data.project || {};
+  document.getElementById("intelDetailName").textContent = p.name || "";
+  const loc = p.source === "git" ? p.gitUrl : p.localPath;
+  document.getElementById("intelDetailMeta").textContent =
+    `来源：${p.source || "-"}  ·  路径：${loc || "-"}  ·  最近分析：${p.analyzedAt ? new Date(p.analyzedAt).toLocaleString() : "未分析"}`;
+
+  const mtb = document.querySelector("#intelModuleTable tbody");
+  mtb.innerHTML = "";
+  for (const m of data.modules || []) {
+    mtb.insertAdjacentHTML("beforeend", `<tr>
+      <td class="mono clip" title="${escapeHtml(m.relPath)}">${escapeHtml(m.relPath || ".")}</td>
+      <td><span class="badge type-badge">${escapeHtml(INTEL_TYPE_LABELS[m.kindType] || m.kindType || "-")}</span></td>
+      <td>${escapeHtml(m.kindRole || "-")}</td>
+      <td>${escapeHtml(m.buildTool || "-")}</td>
+    </tr>`);
+  }
+  if (!(data.modules || []).length) mtb.insertAdjacentHTML("beforeend", `<tr><td colspan="4" class="muted" style="text-align:center;padding:16px">暂无子项目（分析后自动识别）</td></tr>`);
+  await loadIntelContracts(id);
+}
+
+async function loadIntelContracts(id) {
+  const [epRes, entRes] = await Promise.all([
+    api("/api/intel/endpoints?projectId=" + id, { headers: appHeaders() }),
+    api("/api/intel/entities?projectId=" + id, { headers: appHeaders() }),
+  ]);
+  const eps = (await epRes.json()).endpoints || [];
+  const ents = (await entRes.json()).entities || [];
+
+  const etb = document.querySelector("#intelEndpointTable tbody");
+  etb.innerHTML = "";
+  for (const ep of eps) {
+    const mc = (ep.method || "").toLowerCase();
+    etb.insertAdjacentHTML("beforeend", `<tr>
+      <td><span class="badge method-${mc}">${escapeHtml(ep.method)}</span></td>
+      <td class="mono">${escapeHtml(ep.path)}</td>
+      <td class="clip">${escapeHtml(ep.responseType || "-")}</td>
+      <td class="clip muted">${escapeHtml(ep.requestJson || "-")}</td>
+      <td class="mono muted clip" title="${escapeHtml(ep.sourceFile)}">${escapeHtml(shortProv(ep.sourceFile, ep.sourceLine))}</td>
+    </tr>`);
+  }
+  if (!eps.length) etb.insertAdjacentHTML("beforeend", `<tr><td colspan="5" class="muted" style="text-align:center;padding:16px">暂无接口契约（分析后自动提取）</td></tr>`);
+
+  const ntb = document.querySelector("#intelEntityTable tbody");
+  ntb.innerHTML = "";
+  for (const e of ents) {
+    ntb.insertAdjacentHTML("beforeend", `<tr>
+      <td>${escapeHtml(e.entity)}</td>
+      <td class="mono">${escapeHtml(e.table)}</td>
+      <td class="mono">${escapeHtml(e.column)}</td>
+      <td>${e.nullable ? '<span class="intel-status pending">可空</span>' : '<span class="intel-status analyzed">非空</span>'}</td>
+      <td class="mono muted clip" title="${escapeHtml(e.sourceFile)}">${escapeHtml(shortProv(e.sourceFile, e.sourceLine))}</td>
+    </tr>`);
+  }
+  if (!ents.length) ntb.insertAdjacentHTML("beforeend", `<tr><td colspan="5" class="muted" style="text-align:center;padding:16px">暂无实体映射（分析后自动提取）</td></tr>`);
+}
+
+function shortProv(file, line) {
+  if (!file) return "-";
+  const name = file.split("/").pop().split("\\").pop();
+  return name + ":" + (line || 0);
+}
+
+// 执行分析（不跳转）；在详情页时分析后原地刷新详情
+async function runIntelAnalyze(projectId) {
+  const id = projectId || intelCurrentProject;
+  if (!id) return;
+  const statusEl = document.getElementById("intelAnalyzeStatus");
+  const onDetail = !!document.getElementById("page-intel-detail").classList.contains("hidden") === false;
+  if (statusEl && onDetail) statusEl.textContent = "分析中…";
+  const res = await api("/api/intel/analyze", { method: "POST", headers: appHeaders(), body: JSON.stringify({ projectId: id }) });
+  const data = await res.json();
+  if (!res.ok) {
+    if (statusEl && onDetail) statusEl.textContent = "";
+    show(document.getElementById("intelMsg"), data.error || "分析失败");
+    return;
+  }
+  if (onDetail) {
+    if (statusEl) statusEl.textContent = "分析完成";
+    loadIntelDetail(id);
+  } else {
+    show(document.getElementById("intelMsg"), "分析完成");
+    document.getElementById("intelMsg").classList.add("ok");
+  }
+  loadIntelProjects();
 }
 
 /* ---------- 启动 ---------- */
