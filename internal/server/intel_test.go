@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -171,6 +172,131 @@ public class UserEntity {
 	}
 }
 
+// TestIntelAnalyzeDeterministicOutputs verifies the deterministic analyze
+// enrichments beyond the M1 scan: sensitive-field findings, gateway routes and
+// the dependency/environment/SBOM overview.
+func TestIntelAnalyzeDeterministicOutputs(t *testing.T) {
+	s := newTestServer(t)
+	wh := loginWeb(t, s)
+
+	root := t.TempDir()
+	writeTestFile(t, filepath.Join(root, "pom.xml"), `<project>
+  <properties><mysql.version>8.0.33</mysql.version></properties>
+  <dependencies>
+    <dependency>
+      <groupId>mysql</groupId>
+      <artifactId>mysql-connector-java</artifactId>
+      <version>${mysql.version}</version>
+    </dependency>
+  </dependencies>
+</project>`)
+	writeTestFile(t, filepath.Join(root, "src/main/resources/bootstrap.yml"), `spring:
+  application:
+    name: user-service
+  cloud:
+    nacos:
+      discovery:
+        metadata:
+          gateway.paths: /api/users/**
+`)
+	writeTestFile(t, filepath.Join(root, "src/main/java/demo/UserEntity.java"), `package demo;
+import javax.persistence.*;
+@Entity
+@Table(name = "sys_user")
+public class UserEntity {
+    @Id
+    @Column(name = "id", nullable = false)
+    private Long id;
+    @Column(name = "password")
+    private String password;
+}`)
+
+	rec := s.do(t, http.MethodPost, "/api/intel/projects",
+		`{"name":"demo","source":"local","localPath":"`+filepath.ToSlash(root)+`"}`, wh)
+	var proj struct {
+		ID int64 `json:"id"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &proj); err != nil || proj.ID == 0 {
+		t.Fatalf("create project response: %s", rec.Body.String())
+	}
+
+	rec = s.do(t, http.MethodPost, "/api/intel/analyze",
+		`{"projectId":`+jsonInt(proj.ID)+`}`, wh)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("analyze status %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// Security finding: the password column is detected as sensitive.
+	rec = s.do(t, http.MethodGet, "/api/intel/findings?projectId="+jsonInt(proj.ID), "", wh)
+	var fResp struct {
+		Findings []struct {
+			Detector  string `json:"detector"`
+			Category  string `json:"category"`
+			Severity  string `json:"severity"`
+			Location  string `json:"location"`
+			CveOrRule string `json:"cveOrRuleId"`
+		} `json:"findings"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &fResp); err != nil {
+		t.Fatalf("findings parse: %v", err)
+	}
+	foundPassword := false
+	for _, f := range fResp.Findings {
+		if f.Detector == "security" && f.CveOrRule == "password" && f.Severity == "critical" {
+			foundPassword = true
+		}
+	}
+	if !foundPassword {
+		t.Errorf("no security finding for password, got %+v", fResp.Findings)
+	}
+
+	// Gateway routes: user-service → /api/users/**.
+	rec = s.do(t, http.MethodGet, "/api/intel/gateway-routes?projectId="+jsonInt(proj.ID), "", wh)
+	var gResp struct {
+		GatewayRoutes []struct {
+			Service   string `json:"service"`
+			PathsJSON string `json:"pathsJson"`
+		} `json:"gatewayRoutes"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &gResp); err != nil {
+		t.Fatalf("gateway parse: %v", err)
+	}
+	foundRoute := false
+	for _, r := range gResp.GatewayRoutes {
+		if r.Service == "user-service" && stringsContains(r.PathsJSON, "/api/users/**") {
+			foundRoute = true
+		}
+	}
+	if !foundRoute {
+		t.Errorf("no user-service gateway route, got %+v", gResp.GatewayRoutes)
+	}
+
+	// Overview: deps (mysql-connector-java) + env (mysql/nacos) + sbom.
+	rec = s.do(t, http.MethodGet, "/api/intel/overview?projectId="+jsonInt(proj.ID), "", wh)
+	var oResp struct {
+		Overview *struct {
+			DepsJSON string `json:"depsJson"`
+			EnvJSON  string `json:"envJson"`
+			SbomJSON string `json:"sbomJson"`
+		} `json:"overview"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &oResp); err != nil {
+		t.Fatalf("overview parse: %v", err)
+	}
+	if oResp.Overview == nil {
+		t.Fatal("overview is nil")
+	}
+	if !stringsContains(oResp.Overview.DepsJSON, "mysql-connector-java") {
+		t.Errorf("deps missing mysql-connector-java: %s", oResp.Overview.DepsJSON)
+	}
+	if !stringsContains(oResp.Overview.EnvJSON, "mysql") {
+		t.Errorf("env missing mysql: %s", oResp.Overview.EnvJSON)
+	}
+	if oResp.Overview.SbomJSON == "" {
+		t.Error("sbom is empty")
+	}
+}
+
 // loginWeb logs in as the web admin and returns the auth header map.
 func loginWeb(t *testing.T, s *Server) map[string]string {
 	t.Helper()
@@ -205,4 +331,8 @@ func itoa2(n int64) string {
 func jsonInt(n int64) string {
 	b, _ := json.Marshal(n)
 	return string(b)
+}
+
+func stringsContains(s, sub string) bool {
+	return strings.Contains(s, sub)
 }
