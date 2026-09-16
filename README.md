@@ -49,21 +49,21 @@ go build -o starburst-backend ./cmd/starburst-backend
 
 | flag | 环境变量 | 默认 | 说明 |
 |------|---------|------|------|
-| `--listen` | `OCB_LISTEN` | `:18880` | HTTP 监听地址 |
-| `--opencode-url` | `OCB_OPENCODE_URL` | `http://127.0.0.1:4096` | 本机 OpenCode 地址 |
-| `--db` | `OCB_DB` | `sqlite` | `sqlite` 或 `postgres` |
-| `--sqlite-path` | `OCB_SQLITE_PATH` | `starburst-backend.db` | SQLite 数据库文件 |
-| `--pg-dsn` | `OCB_PG_DSN` | — | PostgreSQL 连接串 |
-| `--default-admin-password` | `OCB_ADMIN_PASSWORD` | `admin` | 首次初始化密码（可后改） |
-| `--default-token` | `OCB_DEFAULT_TOKEN` | — | 首次运行时预置的 API token（只落哈希，明文只在日志里打一次） |
-| `--llm-url` | `OCB_LLM_URL` | — | OpenAI 兼容编排大模型地址（如 LiteLLM 网关），空 = 关闭智能编排 |
-| `--llm-key` | `OCB_LLM_KEY` | — | `--llm-url` 的 API key |
-| `--llm-model` | `OCB_LLM_MODEL` | — | 编排决策使用的模型名 |
-| `--workers` | `OCB_WORKERS` | `4` | 并发执行的任务数（`1` = 串行） |
-| `--task-retention` | `OCB_TASK_RETENTION` | — | 已完成任务保留时长（Go duration，如 `168h0m`），不设置 = 永久保留 |
-| `--stt-url` | `OCB_STT_URL` | — | 流式语音识别引擎地址（如 `http://192.0.2.150:18090`），空 = 关闭 `/api/stt` |
-| `--stt-timeout` | `OCB_STT_TIMEOUT` | `30s` | 单次引擎往返超时 |
-| `--stt-max-chunk-bytes` | `OCB_STT_MAX_CHUNK_BYTES` | `2097152` | 单个音频分片上限（字节） |
+| `--listen` | `STARBURST_LISTEN` | `:18880` | HTTP 监听地址 |
+| `--opencode-url` | `STARBURST_OPENCODE_URL` | `http://127.0.0.1:4096` | 本机 OpenCode 地址 |
+| `--db` | `STARBURST_DB` | `sqlite` | `sqlite` 或 `postgres` |
+| `--sqlite-path` | `STARBURST_SQLITE_PATH` | `starburst-backend.db` | SQLite 数据库文件 |
+| `--pg-dsn` | `STARBURST_PG_DSN` | — | PostgreSQL 连接串 |
+| `--default-admin-password` | `STARBURST_ADMIN_PASSWORD` | `admin` | 首次初始化密码（可后改） |
+| `--default-token` | `STARBURST_DEFAULT_TOKEN` | — | 首次运行时预置的 API token（只落哈希，明文只在日志里打一次） |
+| `--llm-url` | `STARBURST_LLM_URL` | — | OpenAI 兼容编排大模型地址（如 LiteLLM 网关），空 = 关闭智能编排 |
+| `--llm-key` | `STARBURST_LLM_KEY` | — | `--llm-url` 的 API key |
+| `--llm-model` | `STARBURST_LLM_MODEL` | — | 编排决策使用的模型名 |
+| `--workers` | `STARBURST_WORKERS` | `4` | 并发执行的任务数（`1` = 串行） |
+| `--task-retention` | `STARBURST_TASK_RETENTION` | — | 已完成任务保留时长（Go duration，如 `168h0m`），不设置 = 永久保留 |
+| `--stt-url` | `STARBURST_STT_URL` | — | 流式语音识别引擎地址（如 `http://192.0.2.150:18090`），空 = 关闭 `/api/stt` |
+| `--stt-timeout` | `STARBURST_STT_TIMEOUT` | `30s` | 单次引擎往返超时 |
+| `--stt-max-chunk-bytes` | `STARBURST_STT_MAX_CHUNK_BYTES` | `2097152` | 单个音频分片上限（字节） |
 | `--version` | — | — | 打印版本号退出 |
 | `--health-check` | — | — | 检查数据库/上游连通性后退出 |
 
@@ -83,7 +83,7 @@ go test -race ./...      # 并发回归（推送中枢等）
 
 # PostgreSQL 方言回归（可选，默认跳过）
 # 自建 ocb_test_<pid> 临时库，测试结束自动删除
-OCB_PG_DSN='postgres://user:pass@host/db?sslmode=disable' \
+STARBURST_PG_DSN='postgres://user:pass@host/db?sslmode=disable' \
     go test -tags pgtest -run Postgres ./internal/store/
 ```
 
@@ -96,19 +96,19 @@ curl -fsSL https://<host>/install.sh | bash
 或本地 `bash scripts/install.sh [--port 8080] [--db sqlite|postgres] [--pg-dsn "..."] [--admin-password "..."] [--workers 4]`。
 安装为 systemd 服务，数据存 `/var/lib/starburst-backend`。
 
-加 `--default-token <值>`（或 `OCB_DEFAULT_TOKEN`）可在首次启动时预置一个固定 API token，客户端直接拿它调 API/WS/SSE，不用再登网页建 token。该值只在首次运行生效一次（仅保存哈希，日志里打印一次明文），之后改配置不重建；在配置页删除它则彻底取消。
+加 `--default-token <值>`（或 `STARBURST_DEFAULT_TOKEN`）可在首次启动时预置一个固定 API token，客户端直接拿它调 API/WS/SSE，不用再登网页建 token。该值只在首次运行生效一次（仅保存哈希，日志里打印一次明文），之后改配置不重建；在配置页删除它则彻底取消。
 
-只验证脚本、不触碰真实系统时加 `--prefix <目录>`（沙箱模式）：二进制、配置、unit 全部写到该目录下并跳过 systemctl，配合 `OCB_BIN_URL=file:///本地二进制` 可跳过下载：
+只验证脚本、不触碰真实系统时加 `--prefix <目录>`（沙箱模式）：二进制、配置、unit 全部写到该目录下并跳过 systemctl，配合 `STARBURST_BIN_URL=file:///本地二进制` 可跳过下载：
 
 ```bash
-OCB_BIN_URL="file://$(pwd)/starburst-backend" bash scripts/install.sh --prefix /tmp/sandbox --db postgres --pg-dsn "$OCB_PG_DSN"
+STARBURST_BIN_URL="file://$(pwd)/starburst-backend" bash scripts/install.sh --prefix /tmp/sandbox --db postgres --pg-dsn "$STARBURST_PG_DSN"
 ```
 
 ## Docker
 
 ```bash
 docker compose up -d              # 仅后端（SQLite）
-docker compose --profile postgres up -d   # 附带 PG，可用 OCB_PG_DSN 切换
+docker compose --profile postgres up -d   # 附带 PG，可用 STARBURST_PG_DSN 切换
 ```
 
 ## API

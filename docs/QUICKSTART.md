@@ -25,7 +25,7 @@ go build -o starburst-backend ./cmd/starburst-backend
 - **任务列表**（填入 APP Token 后可查看/加载任务）
 - **编排项目**（本机 OpenCode 的会话聚合）
 
-> 生产环境务必：① 改默认密码；② 用 `--listen` 绑定到非 0.0.0.0 或加防火墙；③ 通过 `OCB_ADMIN_PASSWORD` 设置初始密码而非明文 flag。
+> 生产环境务必：① 改默认密码；② 用 `--listen` 绑定到非 0.0.0.0 或加防火墙；③ 通过 `STARBURST_ADMIN_PASSWORD` 设置初始密码而非明文 flag。
 
 ## 3. 用 Token 调 API
 

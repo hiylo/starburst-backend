@@ -20,7 +20,7 @@ import (
 // PostgreSQL is an optional backend that CI never exercises, so its dialect path
 // is only covered when a developer opts in explicitly:
 //
-//	OCB_PG_DSN='postgres://user:pass@host:5432/db?sslmode=disable' \
+//	STARBURST_PG_DSN='postgres://user:pass@host:5432/db?sslmode=disable' \
 //	    go test -tags pgtest -run Postgres ./internal/store/
 //
 // Each test creates and drops its own scratch database, so the shared server is
@@ -33,9 +33,9 @@ var scratchSeq int64
 // cleanup that drops the database again.
 func openScratchStore(t *testing.T) Store {
 	t.Helper()
-	dsn := os.Getenv("OCB_PG_DSN")
+	dsn := os.Getenv("STARBURST_PG_DSN")
 	if dsn == "" {
-		t.Skip("OCB_PG_DSN not set; PostgreSQL dialect not tested")
+		t.Skip("STARBURST_PG_DSN not set; PostgreSQL dialect not tested")
 	}
 	ctx := context.Background()
 

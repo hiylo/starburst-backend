@@ -99,7 +99,7 @@ func main() {
 		log.Fatalf("provision default token: %v", err)
 	} else if raw != "" {
 		// 只打掩码：完整 token 一旦进入日志/监控就等同泄露一把全权钥匙。
-		log.Printf("provisioned default API token: %s**** (retrieve/rotate via OCB_DEFAULT_TOKEN if lost)", maskToken(raw))
+		log.Printf("provisioned default API token: %s**** (retrieve/rotate via STARBURST_DEFAULT_TOKEN if lost)", maskToken(raw))
 	}
 
 	oc := opencode.New(cfg.OpenCodeURL)

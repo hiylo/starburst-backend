@@ -13,33 +13,33 @@
 #   4. 启动并开机自启
 #
 #   通过环境变量/参数覆盖默认值:
-#   OCB_PORT / --port
-#   OCB_DB / --db (sqlite|postgres)
-#   OCB_PG_DSN / --pg-dsn
-#   OCB_ADMIN_PASSWORD / --admin-password
-#   OCB_DEFAULT_TOKEN / --default-token (首次运行预置的 API token，客户端可免登录调用)
-#   OCB_WORKERS / --workers (并发执行的任务数，默认 4)
-#   OCB_TASK_RETENTION / --task-retention (保留已完成任务的时长，Go duration 语法，
+#   STARBURST_PORT / --port
+#   STARBURST_DB / --db (sqlite|postgres)
+#   STARBURST_PG_DSN / --pg-dsn
+#   STARBURST_ADMIN_PASSWORD / --admin-password
+#   STARBURST_DEFAULT_TOKEN / --default-token (首次运行预置的 API token，客户端可免登录调用)
+#   STARBURST_WORKERS / --workers (并发执行的任务数，默认 4)
+#   STARBURST_TASK_RETENTION / --task-retention (保留已完成任务的时长，Go duration 语法，
 #     例如 168h0m=7 天；不设置则永久保留)
-#   OCB_PREFIX / --prefix
+#   STARBURST_PREFIX / --prefix
 #     安装根目录，默认 /（即 /usr/local/bin、/etc/...、/var/lib/...）。
 #     设成非根目录即"沙箱模式"：所有文件写到该目录下、跳过 systemctl，
 #     用于非 root 或 CI 里验证脚本，不动真实系统。例:
-#       OCB_BIN_URL=file:///tmp/ocb bash scripts/install.sh --prefix /tmp/sandbox
+#       STARBURST_BIN_URL=file:///tmp/ocb bash scripts/install.sh --prefix /tmp/sandbox
 set -euo pipefail
 
 # ---------- 参数解析 ----------
-PORT="${OCB_PORT:-18880}"
-DB="${OCB_DB:-sqlite}"
-PG_DSN="${OCB_PG_DSN:-}"
-ADMIN_PASSWORD="${OCB_ADMIN_PASSWORD:-}"
-DEFAULT_TOKEN="${OCB_DEFAULT_TOKEN:-}"
-WORKERS="${OCB_WORKERS:-4}"
-TASK_RETENTION="${OCB_TASK_RETENTION:-}"
-STT_URL="${OCB_STT_URL:-}"
-STT_TIMEOUT="${OCB_STT_TIMEOUT:-}"
-STT_MAX_CHUNK_BYTES="${OCB_STT_MAX_CHUNK_BYTES:-}"
-PREFIX="${OCB_PREFIX:-/}"
+PORT="${STARBURST_PORT:-18880}"
+DB="${STARBURST_DB:-sqlite}"
+PG_DSN="${STARBURST_PG_DSN:-}"
+ADMIN_PASSWORD="${STARBURST_ADMIN_PASSWORD:-}"
+DEFAULT_TOKEN="${STARBURST_DEFAULT_TOKEN:-}"
+WORKERS="${STARBURST_WORKERS:-4}"
+TASK_RETENTION="${STARBURST_TASK_RETENTION:-}"
+STT_URL="${STARBURST_STT_URL:-}"
+STT_TIMEOUT="${STARBURST_STT_TIMEOUT:-}"
+STT_MAX_CHUNK_BYTES="${STARBURST_STT_MAX_CHUNK_BYTES:-}"
+PREFIX="${STARBURST_PREFIX:-/}"
 
 while [[ $# -gt 0 ]]; do
   opt="$1"
@@ -146,7 +146,7 @@ case "$ARCH" in
   *) echo "!! 不支持的架构: $ARCH" >&2; exit 1 ;;
 esac
 
-BIN_URL="${OCB_BIN_URL:-https://github.com/hiylo/starburst-backend/releases/latest/download/starburst-backend-${OS}-${ARCH}}"
+BIN_URL="${STARBURST_BIN_URL:-https://github.com/hiylo/starburst-backend/releases/latest/download/starburst-backend-${OS}-${ARCH}}"
 if [[ "$SYSTEMD" -eq 1 ]]; then
   INSTALL_DIR="/usr/local/bin"
   CONFIG_DIR="/etc/starburst-backend"
@@ -213,7 +213,7 @@ done
     "Restart=on-failure" \
     "RestartSec=5" \
     "User=root"
-  printf 'Environment=OCB_OPENCODE_URL=%s\n' "${OCB_OPENCODE_URL:-http://127.0.0.1:4096}"
+  printf 'Environment=STARBURST_OPENCODE_URL=%s\n' "${STARBURST_OPENCODE_URL:-http://127.0.0.1:4096}"
   printf 'WorkingDirectory=%s\n' "$DATA_DIR"
   printf '%s\n' "" "[Install]" "WantedBy=multi-user.target"
 } > "$SERVICE_FILE"
@@ -241,7 +241,7 @@ if [[ -n "$STT_URL" ]]; then
   echo "  - 语音识别: 已接入 $STT_URL"
 else
   echo "  - 语音识别: 未配置（App 需要它在端侧模型不可用时兜底）"
-  echo "    追加: systemctl edit starburst-backend 加 OCB_STT_URL，或重跑本脚本带 --stt-url"
+  echo "    追加: systemctl edit starburst-backend 加 STARBURST_STT_URL，或重跑本脚本带 --stt-url"
 fi
 # App 侧默认按 opencode 同主机 :18880 推导 backend 地址；端口不一致时必须
 # 在 App 的服务器配置里显式填 backendUrl，否则 App 找不到后端。
