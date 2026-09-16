@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	mrand "math/rand/v2"
 	"net/http"
 	"runtime/debug"
 	"strings"
@@ -696,22 +697,14 @@ func randSuffix(n int) string {
 	return hex.EncodeToString(buf)
 }
 
-// randIntN returns a non-negative int in [0,n) using crypto/rand (rejection
-// sampling avoids modulo bias). Returns 0 when n <= 0.
+// randIntN returns a non-negative int in [0,n) using math/rand/v2 (non-crypto
+// source: this is jitter for idle-claim backoff, not security). Returns 0 when
+// n <= 0.
 func randIntN(n int) int {
 	if n <= 0 {
 		return 0
 	}
-	max := int(1 << 30)
-	lim := (max / n) * n
-	buf := make([]byte, 4)
-	for {
-		_, _ = rand.Read(buf)
-		v := int(buf[0])<<24 | int(buf[1])<<16 | int(buf[2])<<8 | int(buf[3])
-		if v < lim {
-			return v % n
-		}
-	}
+	return mrand.IntN(n)
 }
 
 // minDuration returns the smaller of a and b.

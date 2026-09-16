@@ -62,6 +62,19 @@ func (s *Server) StartEventCollector(ctx context.Context) {
 	backoff := time.Second
 	for {
 		err := s.openCode.StreamEvents(ctx, func(ev opencode.SSEEvent) error {
+			// 高频 delta/progress 事件占流量 90%+，只用来维护会话活跃心跳。
+			// 先做轻量解析（只取 type+sessionID，不物化大 payload、几乎零分配），
+			// 命中高频则直接返回，避免完整 json.Unmarshal 触发 GC 抖动。
+			eventType, sessionID, ok := lightParseEvent(ev)
+			if !ok {
+				return nil
+			}
+			if isHighFrequencyEvent(eventType) {
+				if sessionID != "" && isMessageActivityEvent(eventType) {
+					s.sessionActivity.Store(sessionID, time.Now())
+				}
+				return nil
+			}
 			se, ok := parseSessionEvent(ev)
 			if !ok {
 				return nil
@@ -87,9 +100,7 @@ func (s *Server) StartEventCollector(ctx context.Context) {
 				// 事件流本就是可再拉取的遥测数据。
 				log.Printf("events: queue full, dropping %s for session %s", se.EventType, se.SessionID)
 			}
-			if !isHighFrequencyEvent(se.EventType) {
-				s.pushSessionEvent(se)
-			}
+			s.pushSessionEvent(se)
 			return nil
 		})
 		if err != nil {
@@ -283,6 +294,42 @@ func payloadObject(p map[string]any) map[string]any {
 // delta. These are persisted but not broadcast, so the live /api/ws path is
 // not flooded with per-chunk updates; the App already treats the same set as
 // high-frequency.
+// lightParseEvent 从原始 SSE 事件中只取 type 与 sessionID，不物化大的
+// payload（delta 文本等），用于高频事件热路径，几乎零分配。
+func lightParseEvent(ev opencode.SSEEvent) (eventType, sessionID string, ok bool) {
+	var body struct {
+		Type    string `json:"type"`
+		Session string `json:"sessionID"`
+		Props   struct {
+			Session string `json:"sessionID"`
+		} `json:"properties"`
+		Data struct {
+			Session string `json:"sessionID"`
+		} `json:"data"`
+		Payload struct {
+			Type string `json:"type"`
+		} `json:"payload"`
+	}
+	if err := json.Unmarshal(ev.Data, &body); err != nil {
+		return "", "", false
+	}
+	eventType = strings.TrimSpace(body.Type)
+	if eventType == "" {
+		eventType = strings.TrimSpace(body.Payload.Type)
+	}
+	if eventType == "" {
+		eventType = "unknown"
+	}
+	sessionID = strings.TrimSpace(body.Session)
+	if sessionID == "" {
+		sessionID = strings.TrimSpace(body.Props.Session)
+	}
+	if sessionID == "" {
+		sessionID = strings.TrimSpace(body.Data.Session)
+	}
+	return eventType, sessionID, true
+}
+
 func isHighFrequencyEvent(eventType string) bool {
 	return strings.HasSuffix(eventType, ".delta") ||
 		strings.Contains(eventType, "progress") ||
