@@ -271,7 +271,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	defer close(pingDone)
 
 	// Notify the client it is subscribed.
-	_ = hc.Write(push.Message{Type: "subscribed"})
+	hc.Write(push.Message{Type: "subscribed"})
 
 	// Read loop: discard inbound frames (keep-alive pings); on error exit.
 	for {

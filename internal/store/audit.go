@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"strings"
 	"time"
 )
 
@@ -23,6 +24,26 @@ func (s *sqlStore) RecordAudit(ctx context.Context, e *AuditEntry) error {
 		INSERT INTO audit_log (token_id, token_name, method, path, status, created_at)
 		VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`),
 		e.TokenID, e.TokenName, e.Method, e.Path, e.Status)
+	return err
+}
+
+// RecordAudits inserts many audit rows in one multi-row INSERT, used by the
+// async audit flusher to keep write amplification low under polling.
+func (s *sqlStore) RecordAudits(ctx context.Context, entries []*AuditEntry) error {
+	if len(entries) == 0 {
+		return nil
+	}
+	var sb strings.Builder
+	sb.WriteString(`INSERT INTO audit_log (token_id, token_name, method, path, status, created_at) VALUES `)
+	args := make([]any, 0, len(entries)*5)
+	for i, e := range entries {
+		if i > 0 {
+			sb.WriteString(",")
+		}
+		sb.WriteString("(?, ?, ?, ?, ?, CURRENT_TIMESTAMP)")
+		args = append(args, e.TokenID, e.TokenName, e.Method, e.Path, e.Status)
+	}
+	_, err := s.db.ExecContext(ctx, s.q(sb.String()), args...)
 	return err
 }
 

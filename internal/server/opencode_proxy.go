@@ -42,6 +42,10 @@ func proxyIsSensitive(path string) bool {
 	if path == "/global/dispose" || strings.HasPrefix(path, "/global/dispose/") {
 		return true
 	}
+	// /global/config 与 /config 同族：含 provider key / 模型等敏感全局配置，必须 admin-only。
+	if path == "/global/config" || strings.HasPrefix(path, "/global/config/") {
+		return true
+	}
 	if path == "/config" || strings.HasPrefix(path, "/config/") {
 		return true
 	}

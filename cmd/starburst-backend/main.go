@@ -155,6 +155,9 @@ func main() {
 	// 全局会话事件采集器：常驻订阅 opencode 全局 SSE → 写 PG session_events（看板历史）。
 	go srv.StartEventCollector(ctx)
 
+	// 异步审计批量落库（避免轮询流量同步 INSERT）。
+	go srv.StartAuditFlusher(ctx)
+
 	// Task scheduler: promotes due one-shot scheduled tasks to queued and
 	// clones recurring cron templates into concrete tasks.
 	go srv.RunScheduler(ctx)

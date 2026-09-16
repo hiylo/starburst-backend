@@ -97,6 +97,10 @@ type Store interface {
 	RequeueTasks(ctx context.Context, ids []string) (int, error)
 	// ListDependentsOf returns tasks waiting on upstreamID.
 	ListDependentsOf(ctx context.Context, upstreamID string) ([]*Task, error)
+	// ListStuckRunning returns running tasks with no progress since the given time.
+	ListStuckRunning(ctx context.Context, noProgressSince time.Time) ([]*Task, error)
+	// RequeueRunning marks a single running task back to queued.
+	RequeueRunning(ctx context.Context, id string) (bool, error)
 	// TaskStatsDetailed aggregates task outcomes over the trailing window days.
 	TaskStatsDetailed(ctx context.Context, windowDays int) (*TaskStatsWindow, error)
 	// UpdateTaskProgress records a progress note for a running task.
@@ -166,6 +170,8 @@ type Store interface {
 
 	// RecordAudit inserts an API access audit entry.
 	RecordAudit(ctx context.Context, e *AuditEntry) error
+	// RecordAudits inserts many audit rows in one multi-row INSERT.
+	RecordAudits(ctx context.Context, entries []*AuditEntry) error
 	// ListAudit returns recent audit entries, newest first.
 	ListAudit(ctx context.Context, tokenID string, limit int) ([]*AuditEntry, error)
 	// DeleteAuditOlderThan purges audit entries older than the given cutoff.
@@ -222,6 +228,33 @@ type Store interface {
 	ListUnread(ctx context.Context) (map[string]bool, error)
 	// MarkSessionRead clears the unread flag for a session.
 	MarkSessionRead(ctx context.Context, sessionID string) error
+
+	// ---- Test Intelligence (intel subsystem) ----
+
+	// CreateIntelProject persists a new test-intelligence project.
+	CreateIntelProject(ctx context.Context, p *IntelProject) error
+	// ListIntelProjects returns all registered projects, newest first.
+	ListIntelProjects(ctx context.Context) ([]*IntelProject, error)
+	// GetIntelProject loads a single project by id.
+	GetIntelProject(ctx context.Context, id int64) (*IntelProject, error)
+	// UpdateIntelProject persists the mutable project fields.
+	UpdateIntelProject(ctx context.Context, p *IntelProject) error
+	// MarkIntelProjectAnalyzed records the snapshot sha and analyzed timestamp.
+	MarkIntelProjectAnalyzed(ctx context.Context, id int64, snapshotSHA string) error
+	// DeleteIntelProject removes a project and all its intel data.
+	DeleteIntelProject(ctx context.Context, id int64) error
+	// ReplaceIntelModules replaces the project's module list (full rescan).
+	ReplaceIntelModules(ctx context.Context, projectID int64, mods []*IntelModule) error
+	// ListIntelModules returns the project's sub-project modules.
+	ListIntelModules(ctx context.Context, projectID int64) ([]*IntelModule, error)
+	// ReplaceIntelEntities replaces a module's entity↔table↔column mappings.
+	ReplaceIntelEntities(ctx context.Context, projectID, moduleID int64, ents []*IntelEntity) error
+	// ListIntelEntities returns entity mappings for a project/module.
+	ListIntelEntities(ctx context.Context, projectID, moduleID int64) ([]*IntelEntity, error)
+	// ReplaceIntelEndpoints replaces a module's endpoint contracts.
+	ReplaceIntelEndpoints(ctx context.Context, projectID, moduleID int64, eps []*IntelEndpoint) error
+	// ListIntelEndpoints returns endpoint contracts for a project/module.
+	ListIntelEndpoints(ctx context.Context, projectID, moduleID int64) ([]*IntelEndpoint, error)
 }
 
 // Open opens a store for the given driver/dsn. It applies all migrations

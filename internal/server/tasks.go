@@ -97,6 +97,10 @@ func (s *Server) handleTaskBatchAction(w http.ResponseWriter, r *http.Request) {
 		}
 		for _, id := range req.IDs {
 			s.pushTaskEvent(store.TaskCanceled, map[string]any{"id": id, "status": store.TaskCanceled, "reason": "batch cancel"})
+			// 取消的上游要级联阻塞其下游，避免下游 pending 永远等不到。
+			if s.blockDependents(ctx, id, "upstream task canceled") > 0 {
+				s.pushTaskEvent(store.TaskBlocked, map[string]any{"id": id, "status": store.TaskBlocked, "reason": "batch cancel downstream"})
+			}
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "affected": n})
 	case "retry":
@@ -172,6 +176,11 @@ func (s *Server) createTask(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Prompt == "" {
 		writeErr(w, http.StatusBadRequest, "prompt is required")
+		return
+	}
+	// sessionId 会拼进 executor 的上游 URL，必须走白名单防路径混淆/注入。
+	if req.SessionID != "" && !isValidSessionID(req.SessionID) {
+		writeErr(w, http.StatusBadRequest, "invalid sessionId")
 		return
 	}
 

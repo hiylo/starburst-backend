@@ -5,10 +5,19 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"sync/atomic"
 	"time"
 
 	"github.com/hiylo/starburst-backend/internal/opencode"
 )
+
+// sseMaxStreams caps concurrent /api/stream connections so a pile-up of wedged
+// clients cannot exhaust goroutines or upstream SSE links.
+const sseMaxStreams = 64
+
+// sseIdleTimeout bounds one SSE write; a client that stops reading will time
+// out the write and free the goroutine + upstream connection.
+const sseIdleTimeout = 30 * time.Second
 
 // handleStream relays the upstream OpenCode global SSE event stream to the
 // client verbatim. It exists so the APP talks to one stable connection (this
@@ -20,6 +29,13 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
+	// 并发上限：超限直接 429，避免慢客户端堆积。
+	if atomic.AddInt32(&s.activeStreams, 1) > sseMaxStreams {
+		atomic.AddInt32(&s.activeStreams, -1)
+		writeErr(w, http.StatusTooManyRequests, "too many active event streams")
+		return
+	}
+	defer atomic.AddInt32(&s.activeStreams, -1)
 	// EventSource cannot set custom headers, so the web UI passes its admin
 	// session via ?session= when no APP token is configured. Accept either a
 	// Bearer/query token or a web session, mirroring the other web endpoints.
@@ -40,6 +56,9 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 每次写前设置写超时，慢客户端（不读但 TCP 未断）会在超时后被回收。
+	rc := http.NewResponseController(w)
+
 	// SSE headers.
 	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -51,6 +70,7 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 
 	// Signal client the stream is ready.
+	_ = rc.SetWriteDeadline(time.Now().Add(sseIdleTimeout))
 	if _, err := fmt.Fprint(w, "event: connected\ndata: {}\n\n"); err != nil {
 		return
 	}
@@ -60,6 +80,7 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 	backoff := time.Second
 	for {
 		err := s.openCode.StreamEvents(ctx, func(ev opencode.SSEEvent) error {
+			_ = rc.SetWriteDeadline(time.Now().Add(sseIdleTimeout))
 			if _, werr := fmt.Fprintf(w, "data: %s\n\n", ev.Data); werr != nil {
 				return werr // client gone; stop streaming
 			}

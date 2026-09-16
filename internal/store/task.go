@@ -365,6 +365,39 @@ func (s *sqlStore) RecoverStaleRunning(ctx context.Context) (int, error) {
 	return int(n), nil
 }
 
+// RequeueRunning marks a single running task back to queued (used when a worker
+// is shutting down before it started executing a claimed task, so the task is
+// not left stranded in running until the next restart).
+func (s *sqlStore) RequeueRunning(ctx context.Context, id string) (bool, error) {
+	res, err := s.db.ExecContext(ctx, s.q(`
+		UPDATE tasks SET status = ?, available_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+		WHERE id = ? AND status = ?`),
+		TaskQueued, id, TaskRunning)
+	if err != nil {
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
+}
+
+// ListStuckRunning returns running tasks whose progress/updated_at has not
+// moved since noProgressSince — i.e. the executor's busy-poll heartbeat is
+// silent, which means the run is stuck (or the worker died mid-run).
+func (s *sqlStore) ListStuckRunning(ctx context.Context, noProgressSince time.Time) ([]*Task, error) {
+	// updated_at is stored as CURRENT_TIMESTAMP text (UTC without zone); pass
+	// the cutoff in the same format so the comparison is not thrown off by the
+	// driver's timezone formatting.
+	cutoff := noProgressSince.UTC().Format("2006-01-02 15:04:05")
+	rows, err := s.db.QueryContext(ctx, s.q(`
+		SELECT `+taskColumns+` FROM tasks
+		WHERE status = ? AND updated_at < ? ORDER BY updated_at ASC`), TaskRunning, cutoff)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanTasks(rows)
+}
+
 // RequeueTask manually re-queues a terminal task (failed/canceled) for another
 // run immediately (available_at = now), clearing the error. Returns false when
 // the task is not in a terminal state.
@@ -441,38 +474,41 @@ func (s *sqlStore) CancelWorkflow(ctx context.Context, workflowID string) (int, 
 	return int(n), nil
 }
 
-// RerunWorkflowFromFailed restarts an orchestration from its first unfinished
-// step: that step is re-queued (full retry budget) and every later step returns
-// to pending, waiting on the chain. Already-succeeded steps are kept. Returns
-// how many steps were reset.
+// RerunWorkflowFromFailed restarts an orchestration from its first finished
+// step that did not succeed (failed/canceled/blocked): that step is re-queued
+// (full retry budget) and every later finished step returns to pending, waiting
+// on the chain. Already-succeeded steps are kept. Steps still in progress
+// (queued/running/scheduled/retrying/pending) are left untouched so a mid-run
+// rerun never double-executes a live step. Returns how many steps were reset.
 func (s *sqlStore) RerunWorkflowFromFailed(ctx context.Context, workflowID string) (int, error) {
 	tasks, err := s.ListTasksByWorkflow(ctx, workflowID)
 	if err != nil {
 		return 0, err
 	}
-	started := false
 	n := 0
-	prevOK := true
+	prevSucceeded := true
 	for _, t := range tasks {
-		if t.Status == TaskSucceeded {
-			prevOK = true
-			continue
+		switch t.Status {
+		case TaskSucceeded:
+			prevSucceeded = true
+		case TaskRunning, TaskQueued, TaskScheduled, "retrying", TaskPending:
+			// 进行中/未被上游阻塞最终化：不动它；其下游仍需等待。
+			prevSucceeded = false
+		default: // failed / canceled / blocked → 从这里恢复
+			status := TaskQueued
+			if !prevSucceeded {
+				status = TaskPending
+			}
+			if _, err := s.db.ExecContext(ctx, s.q(`
+				UPDATE tasks SET status = ?, error = '', result = '', progress = '',
+					attempts = 0, started_at = NULL, finished_at = NULL,
+					available_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+				WHERE id = ?`), status, t.ID); err != nil {
+				return n, err
+			}
+			n++
+			prevSucceeded = false
 		}
-		// The first unfinished step runs now; anything after waits on the chain.
-		status := TaskQueued
-		if started || !prevOK {
-			status = TaskPending
-		}
-		started = true
-		prevOK = false
-		if _, err := s.db.ExecContext(ctx, s.q(`
-			UPDATE tasks SET status = ?, error = '', result = '', progress = '',
-				attempts = 0, started_at = NULL, finished_at = NULL,
-				available_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
-			WHERE id = ?`), status, t.ID); err != nil {
-			return n, err
-		}
-		n++
 	}
 	return n, nil
 }
@@ -766,19 +802,27 @@ func (s *sqlStore) PurgeFinishedTasks(ctx context.Context, olderThan time.Durati
 	secs := int(olderThan.Seconds())
 	// The timestamp column holds CURRENT_TIMESTAMP output, so the cutoff must be
 	// computed in SQL with the same format rather than passed as a time.Time.
-	var cutoff string
+	var cutoff, recent string
 	if isPostgres(s.driver) {
 		cutoff = "updated_at < CURRENT_TIMESTAMP - (? || ' seconds')::interval"
+		recent = "CURRENT_TIMESTAMP - (? || ' seconds')::interval"
 	} else {
 		cutoff = "updated_at < datetime('now', '-' || ? || ' seconds')"
+		recent = "datetime('now', '-' || ? || ' seconds')"
 	}
 	// activeStatuses lists statuses that still need their upstream to exist.
 	activeStatuses := []any{TaskQueued, TaskRunning, TaskPending, TaskBlocked, TaskScheduled}
 	statuses := []any{TaskSucceeded, TaskFailed, TaskCanceled}
 	activeSet := "?, ?, ?, ?, ?"
-	args := make([]any, 0, 9)
+	args := make([]any, 0, 10)
 	args = append(args, statuses[0], statuses[1], statuses[2], itoa(secs))
 	args = append(args, activeStatuses...)
+	args = append(args, itoa(secs))
+	// A terminal step of a still-recent orchestration is kept (NOT deleted) so
+	// the workflow page keeps showing it until the whole workflow ages out; the
+	// per-group subquery uses the same retention window.
+	workflowKeep := `AND NOT (workflow_id <> '' AND EXISTS (
+		SELECT 1 FROM tasks wg WHERE wg.workflow_id = tasks.workflow_id AND wg.updated_at >= ` + recent + `))`
 	// The limit lives in the inner select: SQLite refuses DELETE ... LIMIT. The
 	// seconds are bound as text (pgx cannot encode an int where || expects
 	// text) and the limit is inlined like the other paged queries.
@@ -788,6 +832,7 @@ func (s *sqlStore) PurgeFinishedTasks(ctx context.Context, olderThan time.Durati
 			SELECT id FROM tasks
 			WHERE status IN (?, ?, ?) AND `+cutoff+`
 			  AND id NOT IN (SELECT depends_on FROM tasks WHERE depends_on <> '' AND status IN (`+activeSet+`))
+			  `+workflowKeep+`
 			ORDER BY updated_at ASC
 			LIMIT `+itoa(limit)+`
 		)`), args...)
@@ -797,11 +842,13 @@ func (s *sqlStore) PurgeFinishedTasks(ctx context.Context, olderThan time.Durati
 	deleted, _ := res.RowsAffected()
 
 	var kept int
+	keptArgs := append([]any{}, statuses[0], statuses[1], statuses[2], itoa(secs))
+	keptArgs = append(keptArgs, activeStatuses...)
 	if err := s.db.QueryRowContext(ctx, s.q(`
 		SELECT COUNT(*) FROM tasks
 		WHERE status IN (?, ?, ?) AND `+cutoff+`
 		  AND id IN (SELECT depends_on FROM tasks WHERE depends_on <> '' AND status IN (`+activeSet+`))`),
-		args...).Scan(&kept); err != nil {
+		keptArgs...).Scan(&kept); err != nil {
 		return 0, 0, err
 	}
 	return int(deleted), kept, nil

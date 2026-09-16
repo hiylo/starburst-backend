@@ -92,6 +92,76 @@ var migrations = []migration{
 	{name: "session_unread", apply: migrationSessionUnread},
 	{name: "tasks_priority_timeout_workflow", apply: migrationTasksPriorityTimeoutWorkflow},
 	{name: "rules_session_id", apply: migrationRulesSessionID},
+	{name: "tasks_workflow_index", apply: migrationTasksWorkflowIndex},
+	{name: "intel", apply: migrationIntel},
+}
+
+// migrationIntel creates the Test Intelligence subsystem tables: flat project
+// registry, monorepo sub-project (module) detection results, entity/table/column
+// mappings and API endpoint contracts. All intel_* rows carry provenance
+// (source_file + source_line) per the deterministic-first design.
+func migrationIntel(ctx context.Context, driver string, db *sql.DB) error {
+	stmts := []string{
+		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS projects (
+			%s,
+			name TEXT NOT NULL DEFAULT '',
+			source TEXT NOT NULL DEFAULT 'local',
+			local_path TEXT NOT NULL DEFAULT '',
+			git_url TEXT NOT NULL DEFAULT '',
+			git_ref TEXT NOT NULL DEFAULT '',
+			last_tested_sha TEXT NOT NULL DEFAULT '',
+			snapshot_sha TEXT NOT NULL DEFAULT '',
+			commands_json TEXT NOT NULL DEFAULT '',
+			env_name TEXT NOT NULL DEFAULT '',
+			analyzed_at TIMESTAMP NULL,
+			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+		)`, idColumn(driver)),
+		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS project_modules (
+			%s,
+			project_id INTEGER NOT NULL DEFAULT 0,
+			rel_path TEXT NOT NULL DEFAULT '',
+			kind_type TEXT NOT NULL DEFAULT '',
+			kind_role TEXT NOT NULL DEFAULT '',
+			build_tool TEXT NOT NULL DEFAULT '',
+			commands_json TEXT NOT NULL DEFAULT '',
+			last_tested_sha TEXT NOT NULL DEFAULT '',
+			analyzed_at TIMESTAMP NULL,
+			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+		)`, idColumn(driver)),
+		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS intel_entities (
+			%s,
+			project_id INTEGER NOT NULL DEFAULT 0,
+			module_id INTEGER NOT NULL DEFAULT 0,
+			entity TEXT NOT NULL DEFAULT '',
+			table_name TEXT NOT NULL DEFAULT '',
+			column_name TEXT NOT NULL DEFAULT '',
+			nullable BOOLEAN NOT NULL DEFAULT TRUE,
+			source_file TEXT NOT NULL DEFAULT '',
+			source_line INTEGER NOT NULL DEFAULT 0
+		)`, idColumn(driver)),
+		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS intel_endpoints (
+			%s,
+			project_id INTEGER NOT NULL DEFAULT 0,
+			module_id INTEGER NOT NULL DEFAULT 0,
+			method TEXT NOT NULL DEFAULT '',
+			path TEXT NOT NULL DEFAULT '',
+			response_type TEXT NOT NULL DEFAULT '',
+			request_json TEXT NOT NULL DEFAULT '',
+			fields_json TEXT NOT NULL DEFAULT '',
+			source_file TEXT NOT NULL DEFAULT '',
+			source_line INTEGER NOT NULL DEFAULT 0
+		)`, idColumn(driver)),
+		`CREATE INDEX IF NOT EXISTS idx_project_modules_project ON project_modules(project_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_intel_entities_project ON intel_entities(project_id, module_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_intel_endpoints_project ON intel_endpoints(project_id, module_id)`,
+	}
+	for _, s := range stmts {
+		if _, err := db.ExecContext(ctx, s); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // migrationArchivesRawMessages adds the raw_messages column storing an
@@ -316,6 +386,22 @@ func migrationTasksPriorityTimeoutWorkflow(ctx context.Context, driver string, d
 		`ALTER TABLE tasks ADD COLUMN timeout_seconds INTEGER NOT NULL DEFAULT 0`,
 		`ALTER TABLE tasks ADD COLUMN workflow_id TEXT NOT NULL DEFAULT ''`,
 		`CREATE INDEX IF NOT EXISTS idx_tasks_claim ON tasks(status, available_at, priority, created_at)`,
+	}
+	for _, s := range stmts {
+		if _, err := db.ExecContext(ctx, s); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// migrationTasksWorkflowIndex adds indexes for the orchestration queries that
+// group/filter by workflow_id and for the newest-first task listing, avoiding
+// full-table scans once the tasks table grows.
+func migrationTasksWorkflowIndex(ctx context.Context, driver string, db *sql.DB) error {
+	stmts := []string{
+		`CREATE INDEX IF NOT EXISTS idx_tasks_workflow ON tasks(workflow_id, created_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_tasks_created_at ON tasks(created_at)`,
 	}
 	for _, s := range stmts {
 		if _, err := db.ExecContext(ctx, s); err != nil {

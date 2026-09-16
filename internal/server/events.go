@@ -449,6 +449,7 @@ func (s *Server) handleSessionStatusAgg(w http.ResponseWriter) {
 		}
 		_ = resp.Body.Close()
 	}
+	now := time.Now()
 	s.sessionStatuses.Range(func(k, v any) bool {
 		id, ok := k.(string)
 		if !ok {
@@ -461,12 +462,20 @@ func (s *Server) handleSessionStatusAgg(w http.ResponseWriter) {
 		if ok && st != "" {
 			out[id] = st
 		}
+		// 清理：已 idle 且无近期活动、也不在上游快照里的陈旧状态，否则 map 无界增长。
+		if st == "idle" {
+			if last, ok := s.sessionActivity.Load(id); ok {
+				if t, ok := last.(time.Time); ok && now.Sub(t) < time.Hour {
+					return true // 仍有近期活动，保留
+				}
+			}
+			s.sessionStatuses.Delete(k)
+		}
 		return true
 	})
 	// 上游 status 事件并不可靠：会话被标 idle 后仍可能继续流式输出。最近有消息
 	// 活动的会话若状态是 idle，纠正为 busy，避免「处理中显示空闲」。
 	const activeWindow = 30 * time.Second
-	now := time.Now()
 	s.sessionActivity.Range(func(k, v any) bool {
 		id, ok := k.(string)
 		if !ok {
@@ -477,6 +486,8 @@ func (s *Server) handleSessionStatusAgg(w http.ResponseWriter) {
 			return true
 		}
 		if now.Sub(last) > activeWindow {
+			// 超出活动窗口即无意义，顺手淘汰，避免 activity map 无界增长。
+			s.sessionActivity.Delete(k)
 			return true
 		}
 		if out[id] == "idle" || out[id] == "" {

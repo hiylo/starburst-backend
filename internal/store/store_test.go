@@ -421,6 +421,117 @@ func TestTaskUnblockAndRepromote(t *testing.T) {
 	}
 }
 
+func TestRerunWorkflowFromFailed(t *testing.T) {
+	ctx := context.Background()
+	st := newTestStore(t)
+	wf := "wf1"
+	steps := []struct {
+		id     string
+		status string
+	}{
+		{"s1", TaskSucceeded},
+		{"s2", "failed"},
+		{"s3", TaskBlocked},
+	}
+	for _, s := range steps {
+		if err := st.CreateTaskWithStatus(ctx, &Task{ID: s.id, Prompt: s.id, WorkflowID: wf}, s.status); err != nil {
+			t.Fatalf("create %s: %v", s.id, err)
+		}
+	}
+	// 一个还在执行的步骤应当保持原状（mid-run rerun 不能打扰它）。
+	if err := st.CreateTaskWithStatus(ctx, &Task{ID: "s4", Prompt: "s4", WorkflowID: wf}, TaskRunning); err != nil {
+		t.Fatalf("create s4: %v", err)
+	}
+	// 第一步未成功：s2 → queued，s3 → pending。
+	if n, err := st.RerunWorkflowFromFailed(ctx, wf); err != nil || n != 2 {
+		t.Fatalf("rerun: n=%d err=%v (want 2)", n, err)
+	}
+	got := map[string]string{}
+	for _, s := range []string{"s1", "s2", "s3", "s4"} {
+		tk, err := st.GetTask(ctx, s)
+		if err != nil {
+			t.Fatalf("get %s: %v", s, err)
+		}
+		got[s] = tk.Status
+	}
+	if got["s1"] != TaskSucceeded { t.Fatalf("s1 = %q want succeeded (kept)", got["s1"]) }
+	if got["s2"] != TaskQueued { t.Fatalf("s2 = %q want queued (rerun from here)", got["s2"]) }
+	if got["s3"] != TaskPending { t.Fatalf("s3 = %q want pending (waits on s2)", got["s3"]) }
+	if got["s4"] != TaskRunning { t.Fatalf("s4 = %q want running (untouched)", got["s4"]) }
+	// 全部成功后 rerun 是 no-op。
+	for _, s := range []string{"s1", "s2", "s3"} {
+		if err := st.CompleteTask(ctx, s, "ok"); err != nil {
+			t.Fatalf("complete %s: %v", s, err)
+		}
+	}
+	if n, err := st.RerunWorkflowFromFailed(ctx, wf); err != nil || n != 0 {
+		t.Fatalf("rerun all-succeeded: n=%d err=%v (want 0)", n, err)
+	}
+}
+
+func TestPurgeKeepsRecentWorkflowSteps(t *testing.T) {
+	ctx := context.Background()
+	st := newTestStore(t)
+	raw, ok := st.(*sqlStore)
+	if !ok {
+		t.Fatalf("expected *sqlStore, got %T", st)
+	}
+	wf := "wfkeep"
+	// 一个很老的已完成步骤 + 一个仍然新鲜的运行中步骤（同一编排）。
+	if err := st.CreateTaskWithStatus(ctx, &Task{ID: "old", WorkflowID: wf, Prompt: "p"}, TaskSucceeded); err != nil {
+		t.Fatalf("create old: %v", err)
+	}
+	if err := st.CreateTaskWithStatus(ctx, &Task{ID: "nb", WorkflowID: wf, Prompt: "p"}, TaskRunning); err != nil {
+		t.Fatalf("create new: %v", err)
+	}
+	if _, err := raw.db.ExecContext(ctx, `UPDATE tasks SET updated_at = datetime('now','-2 hours') WHERE id = 'old'`); err != nil {
+		t.Fatalf("age old: %v", err)
+	}
+	if deleted, _, err := st.PurgeFinishedTasks(ctx, time.Hour, 10); err != nil {
+		t.Fatalf("purge: %v", err)
+	} else if deleted != 0 {
+		t.Fatalf("purged %d, want 0 (workflow step kept while group fresh)", deleted)
+	}
+	// 编排整体变老后整组可清。
+	if _, err := raw.db.ExecContext(ctx, `UPDATE tasks SET updated_at = datetime('now','-2 hours') WHERE id = 'nb'`); err != nil {
+		t.Fatalf("age nb: %v", err)
+	}
+	if deleted, _, err := st.PurgeFinishedTasks(ctx, time.Hour, 10); err != nil {
+		t.Fatalf("purge2: %v", err)
+	} else if deleted == 0 {
+		t.Fatalf("expected workflow group to be purged after aging, got 0")
+	}
+}
+
+func TestListStuckRunning(t *testing.T) {
+	ctx := context.Background()
+	st := newTestStore(t)
+	if err := st.CreateTaskWithStatus(ctx, &Task{ID: "fresh", Prompt: "p"}, TaskRunning); err != nil {
+		t.Fatalf("create fresh: %v", err)
+	}
+	raw, ok := st.(*sqlStore)
+	if !ok {
+		t.Fatalf("expected *sqlStore, got %T", st)
+	}
+	if _, err := raw.db.ExecContext(ctx, `UPDATE tasks SET updated_at = datetime('now','-30 minutes') WHERE id = 'fresh'`); err != nil {
+		t.Fatalf("age fresh: %v", err)
+	}
+	if err := st.CreateTaskWithStatus(ctx, &Task{ID: "recent", Prompt: "p"}, TaskRunning); err != nil {
+		t.Fatalf("create recent: %v", err)
+	}
+	stuck, err := st.ListStuckRunning(ctx, time.Now().Add(-15*time.Minute))
+	if err != nil {
+		t.Fatalf("list stuck: %v", err)
+	}
+	got := map[string]bool{}
+	for _, s := range stuck {
+		got[s.ID] = true
+	}
+	if !got["fresh"] || got["recent"] {
+		t.Fatalf("stuck set = %v, want only fresh", got)
+	}
+}
+
 // TestMigrateDialectHelpers guards the DDL emitted per backend. PostgreSQL is
 // reached under the registered database/sql name "pgx" (OpenFromConfig maps
 // the logical name to it), so both spellings must be recognised — otherwise the

@@ -1,7 +1,6 @@
 package push
 
 import (
-	"fmt"
 	"net"
 	"net/http"
 	"testing"
@@ -22,7 +21,7 @@ func newHubServer(t *testing.T, hub *Hub) string {
 		}
 		hc := hub.Register(conn)
 		defer hub.Unregister(hc)
-		_ = hc.Write(Message{Type: "subscribed"})
+		hc.Write(Message{Type: "subscribed"})
 		for {
 			if _, _, err := conn.ReadMessage(); err != nil {
 				return
@@ -40,5 +39,3 @@ func newHubServer(t *testing.T, hub *Hub) string {
 
 	return ln.Addr().String()
 }
-
-var _ = fmt.Sprintf // keep fmt import if unused in future edits

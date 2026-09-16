@@ -52,6 +52,12 @@ type Server struct {
 	sessionActivity sync.Map
 	// maxConcurrency 全局任务并发上限（0 = 仅受 worker 数限制），供状态页展示占用。
 	maxConcurrency int
+	// activeStreams counts live /api/stream SSE connections (capped to avoid a
+	// pile-up of goroutines + upstream connections from wedged clients).
+	activeStreams int32
+	// auditCh buffers audit entries written off the request path and drained by
+	// StartAuditFlusher, so polling traffic does not pay a synchronous INSERT.
+	auditCh chan *store.AuditEntry
 }
 
 // SetMaxConcurrency records the global task concurrency cap for observability.
@@ -68,6 +74,46 @@ func New(cfg *config.Config, st store.Store, am *auth.Manager, oc *opencode.Clie
 		loginLimit: newLoginLimiter(5, 5*time.Minute),
 		genLimit:   newLoginLimiter(20, time.Minute),
 		touchSeen:  make(map[string]time.Time),
+		auditCh:    make(chan *store.AuditEntry, 512),
+	}
+}
+
+// StartAuditFlusher drains the async audit queue and batches entries into
+// multi-row INSERTs, keeping polling traffic off the request hot path. Call it
+// once in a goroutine with the process lifecycle context.
+func (s *Server) StartAuditFlusher(ctx context.Context) {
+	const (
+		flushTick   = 500 * time.Millisecond
+		maxBatch    = 256
+		flushWindow = 3 * time.Second
+	)
+	ticker := time.NewTicker(flushTick)
+	defer ticker.Stop()
+	batch := make([]*store.AuditEntry, 0, maxBatch)
+	flush := func() {
+		if len(batch) == 0 {
+			return
+		}
+		fctx, cancel := context.WithTimeout(context.Background(), flushWindow)
+		if err := s.store.RecordAudits(fctx, batch); err != nil {
+			log.Printf("audit: batch insert %d rows: %v", len(batch), err)
+		}
+		cancel()
+		batch = batch[:0]
+	}
+	for {
+		select {
+		case <-ctx.Done():
+			flush()
+			return
+		case e := <-s.auditCh:
+			batch = append(batch, e)
+			if len(batch) >= maxBatch {
+				flush()
+			}
+		case <-ticker.C:
+			flush()
+		}
 	}
 }
 
@@ -130,6 +176,13 @@ func (s *Server) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/stt/sessions", s.handleSTTCreate)
 	mux.HandleFunc("/api/stt/sessions/", s.handleSTTSession)
 	mux.HandleFunc("/api/webhook", s.handleRuleWebhook)
+	// Test Intelligence (intel) subsystem routes.
+	mux.HandleFunc("/api/intel/projects", s.handleIntelProjects)
+	mux.HandleFunc("/api/intel/projects/", s.handleIntelProjectByID)
+	mux.HandleFunc("/api/intel/analyze", s.handleIntelAnalyze)
+	mux.HandleFunc("/api/intel/endpoints", s.handleIntelEndpoints)
+	mux.HandleFunc("/api/intel/entities", s.handleIntelEntities)
+	mux.HandleFunc("/api/intel/modules", s.handleIntelModules)
 	mux.HandleFunc("/", s.handleIndex)
 }
 
@@ -185,15 +238,19 @@ func (s *Server) logMiddleware(next http.Handler) http.Handler {
 			return
 		}
 		if rec, ok := s.tokenFromRequest(r); ok {
-			ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
-			defer cancel()
-			_ = s.store.RecordAudit(ctx, &store.AuditEntry{
+			// 异步审计：仅入队，由 StartAuditFlusher 批量落库，避免每个
+			// token 请求（含 App/Web 的轮询）都同步一次 INSERT。
+			select {
+			case s.auditCh <- &store.AuditEntry{
 				TokenID:   rec.ID,
 				TokenName: rec.Name,
 				Method:    r.Method,
 				Path:      r.URL.Path,
 				Status:    ww.status,
-			})
+			}:
+			default:
+				// 队列满则丢弃（审计是尽力而为的记账），不阻塞请求。
+			}
 		}
 	})
 }

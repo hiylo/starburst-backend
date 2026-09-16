@@ -37,6 +37,17 @@ type Executor struct {
 	gateMu       sync.Mutex    // guards gates
 	gates        map[string]*sessionGate
 	dirGates     map[string]*sessionGate // per-directory gates for new-session tasks
+	busyMu       sync.Mutex              // guards busyCache
+	busyCache    map[string]busyEntry    // session busy-status short TTL
+}
+
+// busyTTL bounds how long a /session/status lookup is cached, so a busy task
+// polling every 3s does not hammer the upstream status endpoint.
+const busyTTL = 2 * time.Second
+
+type busyEntry struct {
+	at   time.Time
+	busy bool
 }
 
 // sessionGate serializes concurrent executions that target the same upstream
@@ -60,6 +71,7 @@ func NewExecutor(st store.Store, hub *push.Hub, openCodeBase string) *Executor {
 		workers:      4,
 		gates:        make(map[string]*sessionGate),
 		dirGates:     make(map[string]*sessionGate),
+		busyCache:    make(map[string]busyEntry),
 	}
 }
 
@@ -143,6 +155,7 @@ func (e *Executor) Run(ctx context.Context) {
 
 // worker is the claim-execute loop of a single worker goroutine.
 func (e *Executor) worker(ctx context.Context) {
+	backoff := 2 * time.Second
 	for {
 		select {
 		case <-ctx.Done():
@@ -153,10 +166,13 @@ func (e *Executor) worker(ctx context.Context) {
 		t, err := e.store.ClaimNextTask(ctx)
 		if err != nil {
 			if errors.Is(err, store.ErrNotFound) {
-				// No work: back off before polling again.
-				if !sleep(ctx, 2*time.Second) {
+				// No work: exponential backoff (max 10s) with jitter, so idle
+				// workers do not hammer the claim query.
+				if !sleep(ctx, backoff) {
 					return
 				}
+				delay := backoff*2 + time.Duration(randIntN(int(backoff)))
+				backoff = minDuration(delay, 10*time.Second)
 				continue
 			}
 			log.Printf("tasks: claim failed: %v", err)
@@ -165,6 +181,7 @@ func (e *Executor) worker(ctx context.Context) {
 			}
 			continue
 		}
+		backoff = 2 * time.Second
 		e.runClaimed(ctx, t)
 	}
 }
@@ -182,8 +199,13 @@ func (e *Executor) runClaimed(ctx context.Context, t *store.Task) {
 			defer func() { <-e.sem }()
 		case <-ctx.Done():
 			// Canceled while waiting for a slot: return the task to the queue.
+			// The claimed task is still 'running'; requeue it explicitly.
 			ctx2, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			_ = e.store.RetryTask(ctx2, t.ID, 0)
+			if ok, err := e.store.RequeueRunning(ctx2, t.ID); err == nil && ok {
+				e.pushTaskEvent(store.TaskQueued, map[string]any{"id": t.ID, "status": store.TaskQueued, "reason": "shutdown requeue"})
+			} else if err != nil {
+				log.Printf("tasks: requeue %s on shutdown: %v", t.ID, err)
+			}
 			cancel()
 			return
 		}
@@ -325,7 +347,7 @@ func (e *Executor) execute(ctx context.Context, t *store.Task) {
 		return err == nil && c
 	}
 
-	// Step 1: ensure a session exists to run the prompt in.
+	// 提前取消（会话还没创建）：直接收尾。
 	sessionID := t.SessionID
 	if sessionID == "" {
 		if canceled() {
@@ -333,14 +355,21 @@ func (e *Executor) execute(ctx context.Context, t *store.Task) {
 			pushTask("canceled", t)
 			return
 		}
-		created, err := e.createSession(runCtx, t.Directory)
-		if err != nil {
-			failWithRetry("create session: " + err.Error())
-			return
+		// 同目录存在空闲会话则复用，避免每次任务都新建会话造成会话膨胀。
+		sessionID, _ = e.findIdleSession(runCtx, t.Directory)
+		if sessionID == "" {
+			created, err := e.createSession(runCtx, t.Directory)
+			if err != nil {
+				failWithRetry("create session: " + err.Error())
+				return
+			}
+			sessionID = created
+			_ = e.store.SetTaskSession(ctx, t.ID, sessionID)
+			_ = e.store.UpdateTaskProgress(ctx, t.ID, "session created")
+		} else {
+			_ = e.store.SetTaskSession(ctx, t.ID, sessionID)
+			_ = e.store.UpdateTaskProgress(ctx, t.ID, "reused idle session")
 		}
-		sessionID = created
-		_ = e.store.SetTaskSession(ctx, t.ID, sessionID)
-		_ = e.store.UpdateTaskProgress(ctx, t.ID, "session created")
 	}
 
 	// Step 2: prompt the session and drain the response.
@@ -353,6 +382,8 @@ func (e *Executor) execute(ctx context.Context, t *store.Task) {
 			return
 		}
 		if errors.Is(err, errCanceled) {
+			// 让上游真正停止生成，避免留下孤儿任务继续跑。
+			e.abortSession(sessionID, t.Directory)
 			e.resolveDependents(ctx, t.ID, false, "upstream task canceled")
 			pushTask("canceled", t)
 			return
@@ -479,6 +510,7 @@ func (e *Executor) promptSession(ctx context.Context, sessionID, prompt, directo
 
 	// Wait for the session to stop generating, then pull the last assistant text.
 	deadline := time.Now().Add(10 * time.Minute)
+	heartbeat := 0
 	for time.Now().Before(deadline) {
 		if err := ctx.Err(); err != nil {
 			return "", err
@@ -494,7 +526,9 @@ func (e *Executor) promptSession(ctx context.Context, sessionID, prompt, directo
 		if !busy {
 			break
 		}
-		if onProgress != nil {
+		// 更新进度心跳，但仅约每 15s 一次，避免每轮忙等都写一次 DB。
+		heartbeat++
+		if onProgress != nil && heartbeat%5 == 0 {
 			onProgress("agent working...")
 		}
 	}
@@ -509,6 +543,14 @@ func (e *Executor) promptSession(ctx context.Context, sessionID, prompt, directo
 // isSessionBusy reports whether a session is currently generating, by reading
 // the /session/status map.
 func (e *Executor) isSessionBusy(ctx context.Context, sessionID string) (bool, error) {
+	e.busyMu.Lock()
+	if entry, ok := e.busyCache[sessionID]; ok && time.Since(entry.at) < busyTTL {
+		b := entry.busy
+		e.busyMu.Unlock()
+		return b, nil
+	}
+	e.busyMu.Unlock()
+
 	resp, err := e.httpClient.Get(e.openCodeBase + "/session/status")
 	if err != nil {
 		return false, err
@@ -522,10 +564,79 @@ func (e *Executor) isSessionBusy(ctx context.Context, sessionID string) (bool, e
 		return false, err
 	}
 	st, ok := statuses[sessionID]
-	if !ok {
-		return false, nil
+	busy := ok && st.Type == "busy"
+	e.busyMu.Lock()
+	e.busyCache[sessionID] = busyEntry{at: time.Now(), busy: busy}
+	// 防止缓存无界增长：仅保留最近访问的少量条目。
+	if len(e.busyCache) > 4096 {
+		now := time.Now()
+		for k, v := range e.busyCache {
+			if now.Sub(v.at) > busyTTL {
+				delete(e.busyCache, k)
+			}
+		}
 	}
-	return st.Type == "busy", nil
+	e.busyMu.Unlock()
+	return busy, nil
+}
+
+// abortSession asks the upstream to stop generating for a session
+// (POST /session/{id}/abort). Best-effort: a cancel that fails to abort just
+// leaves the orphan generation running; the task itself is already terminal.
+func (e *Executor) abortSession(sessionID, directory string) {
+	aCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(aCtx, http.MethodPost, e.openCodeBase+"/session/"+sessionID+"/abort", nil)
+	if err != nil {
+		return
+	}
+	if directory != "" {
+		req.Header.Set("x-starburst-directory", directory)
+	}
+	resp, err := e.httpClient.Do(req)
+	if err == nil {
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+		resp.Body.Close()
+	}
+}
+
+// findIdleSession looks for an existing idle session in the same working
+// directory so a directory-scoped task can reuse it instead of spawning yet
+// another session (avoids session sprawl). Only sessions that report idle AND
+// whose status is not busy are considered. Returns "" when nothing is reusable.
+func (e *Executor) findIdleSession(ctx context.Context, directory string) (string, error) {
+	if directory == "" {
+		return "", nil
+	}
+	resp, err := e.httpClient.Get(e.openCodeBase + "/session")
+	if err != nil {
+		return "", err
+	}
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+	resp.Body.Close()
+
+	var sessions []struct {
+		ID        string `json:"id"`
+		Directory string `json:"directory"`
+		Status    struct {
+			Type string `json:"type"`
+		} `json:"status"`
+	}
+	if err := json.Unmarshal(raw, &sessions); err != nil {
+		return "", nil // 列表解析失败保守降级为「新建」
+	}
+	for _, s := range sessions {
+		if s.ID == "" || s.Directory != directory {
+			continue
+		}
+		if s.Status.Type == "busy" {
+			continue
+		}
+		if busy, err := e.isSessionBusy(ctx, s.ID); err == nil && !busy {
+			return s.ID, nil
+		}
+	}
+	return "", nil
 }
 
 // lastAssistantText loads a session's messages from /session/{id}/message and
@@ -583,6 +694,32 @@ func randSuffix(n int) string {
 	buf := make([]byte, n)
 	_, _ = rand.Read(buf)
 	return hex.EncodeToString(buf)
+}
+
+// randIntN returns a non-negative int in [0,n) using crypto/rand (rejection
+// sampling avoids modulo bias). Returns 0 when n <= 0.
+func randIntN(n int) int {
+	if n <= 0 {
+		return 0
+	}
+	max := int(1 << 30)
+	lim := (max / n) * n
+	buf := make([]byte, 4)
+	for {
+		_, _ = rand.Read(buf)
+		v := int(buf[0])<<24 | int(buf[1])<<16 | int(buf[2])<<8 | int(buf[3])
+		if v < lim {
+			return v % n
+		}
+	}
+}
+
+// minDuration returns the smaller of a and b.
+func minDuration(a, b time.Duration) time.Duration {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 // failureDecision is the LLM's self-healing verdict for a failed task.
