@@ -40,8 +40,9 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"tasks":       taskStats,
-		"tokenUsage":  tokenUsage,
-		"archives":    archives,
+		"tasks":          taskStats,
+		"tokenUsage":     tokenUsage,
+		"archives":       archives,
+		"maxConcurrency": s.maxConcurrency,
 	})
 }

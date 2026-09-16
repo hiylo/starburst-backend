@@ -90,6 +90,8 @@ var migrations = []migration{
 	{name: "session_events", apply: migrationSessionEvents},
 	{name: "archives_raw_messages", apply: migrationArchivesRawMessages},
 	{name: "session_unread", apply: migrationSessionUnread},
+	{name: "tasks_priority_timeout_workflow", apply: migrationTasksPriorityTimeoutWorkflow},
+	{name: "rules_session_id", apply: migrationRulesSessionID},
 }
 
 // migrationArchivesRawMessages adds the raw_messages column storing an
@@ -303,6 +305,32 @@ func migrationSessionEvents(ctx context.Context, driver string, db *sql.DB) erro
 		}
 	}
 	return nil
+}
+
+// migrationTasksPriorityTimeoutWorkflow adds orchestration columns:
+// priority (0-100, higher runs first), timeout_seconds (0 = no timeout), and
+// workflow_id (groups chained steps of a multi-step orchestration).
+func migrationTasksPriorityTimeoutWorkflow(ctx context.Context, driver string, db *sql.DB) error {
+	stmts := []string{
+		`ALTER TABLE tasks ADD COLUMN priority INTEGER NOT NULL DEFAULT 50`,
+		`ALTER TABLE tasks ADD COLUMN timeout_seconds INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE tasks ADD COLUMN workflow_id TEXT NOT NULL DEFAULT ''`,
+		`CREATE INDEX IF NOT EXISTS idx_tasks_claim ON tasks(status, available_at, priority, created_at)`,
+	}
+	for _, s := range stmts {
+		if _, err := db.ExecContext(ctx, s); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// migrationRulesSessionID lets a rule fire into a fixed, pre-bound session
+// instead of creating a fresh session per execution. Old rows keep '' (new
+// session per run, previous behavior).
+func migrationRulesSessionID(ctx context.Context, driver string, db *sql.DB) error {
+	_, err := db.ExecContext(ctx, `ALTER TABLE rules ADD COLUMN session_id TEXT NOT NULL DEFAULT ''`)
+	return err
 }
 
 // migrationSessionUnread adds the session unread table used by the shared

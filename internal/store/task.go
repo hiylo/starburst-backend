@@ -22,7 +22,7 @@ const (
 
 // taskColumns is the canonical SELECT/RETURNING column list, kept in a single
 // place so scanTask and every query stay in lockstep.
-const taskColumns = "id, session_id, directory, name, prompt, depends_on, status, error, result, progress, ai_summary, attempts, created_at, updated_at, started_at, finished_at, available_at, scheduled_at, cron, last_fired_at"
+const taskColumns = "id, session_id, directory, name, prompt, depends_on, status, error, result, progress, ai_summary, attempts, priority, timeout_seconds, workflow_id, created_at, updated_at, started_at, finished_at, available_at, scheduled_at, cron, last_fired_at"
 
 // Task is an asynchronous orchestration job submitted by a client.
 type Task struct {
@@ -38,6 +38,9 @@ type Task struct {
 	Progress    string     `json:"progress"`
 	AISummary   string     `json:"aiSummary"` // LLM result summary (success) or root-cause analysis (failure)
 	Attempts    int        `json:"attempts"`
+	Priority    int        `json:"priority"`        // 0-100，越高越先执行（默认 50）
+	TimeoutSec  int        `json:"timeoutSeconds"`  // 单次执行超时（秒），0=不限制
+	WorkflowID  string     `json:"workflowId"`      // 多步编排分组 id（空=独立任务）
 	CreatedAt   time.Time  `json:"createdAt"`
 	UpdatedAt   time.Time  `json:"updatedAt"`
 	StartedAt   *time.Time `json:"startedAt"`
@@ -59,9 +62,10 @@ func (s *sqlStore) CreateTask(ctx context.Context, t *Task) error {
 func (s *sqlStore) CreateTaskWithStatus(ctx context.Context, t *Task, status string) error {
 	t.Status = status
 	_, err := s.db.ExecContext(ctx, s.q(`
-		INSERT INTO tasks (id, session_id, directory, name, prompt, depends_on, status, error, result, progress, attempts, created_at, updated_at, available_at, scheduled_at, cron)
-		VALUES (?, ?, ?, ?, ?, ?, ?, '', '', '', 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, ?, ?)`),
-		t.ID, t.SessionID, t.Directory, t.Name, t.Prompt, t.DependsOn, status, t.ScheduledAt, t.Cron,
+		INSERT INTO tasks (id, session_id, directory, name, prompt, depends_on, status, error, result, progress, attempts, priority, timeout_seconds, workflow_id, created_at, updated_at, available_at, scheduled_at, cron)
+		VALUES (?, ?, ?, ?, ?, ?, ?, '', '', '', 0, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, ?, ?)`),
+		t.ID, t.SessionID, t.Directory, t.Name, t.Prompt, t.DependsOn, status,
+		t.Priority, t.TimeoutSec, t.WorkflowID, t.ScheduledAt, t.Cron,
 	)
 	return err
 }
@@ -133,14 +137,14 @@ func (s *sqlStore) ClaimNextTask(ctx context.Context) (*Task, error) {
 		query = `
 		UPDATE tasks SET status = ?, attempts = attempts + 1, started_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
 		WHERE id = (
-			SELECT id FROM tasks WHERE status = ? AND available_at <= CURRENT_TIMESTAMP ORDER BY created_at ASC LIMIT 1 FOR UPDATE SKIP LOCKED
+			SELECT id FROM tasks WHERE status = ? AND available_at <= CURRENT_TIMESTAMP ORDER BY priority DESC, created_at ASC LIMIT 1 FOR UPDATE SKIP LOCKED
 		)
 		RETURNING ` + taskColumns
 	} else {
 		query = `
 		UPDATE tasks SET status = ?, attempts = attempts + 1, started_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
 		WHERE id = (
-			SELECT id FROM tasks WHERE status = ? AND available_at <= CURRENT_TIMESTAMP ORDER BY created_at ASC LIMIT 1
+			SELECT id FROM tasks WHERE status = ? AND available_at <= CURRENT_TIMESTAMP ORDER BY priority DESC, created_at ASC LIMIT 1
 		)
 		RETURNING ` + taskColumns
 	}
@@ -361,6 +365,285 @@ func (s *sqlStore) RecoverStaleRunning(ctx context.Context) (int, error) {
 	return int(n), nil
 }
 
+// RequeueTask manually re-queues a terminal task (failed/canceled) for another
+// run immediately (available_at = now), clearing the error. Returns false when
+// the task is not in a terminal state.
+func (s *sqlStore) RequeueTask(ctx context.Context, id string) (bool, error) {
+	res, err := s.db.ExecContext(ctx, s.q(`
+		UPDATE tasks SET status = ?, error = '', finished_at = NULL,
+			available_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+		WHERE id = ? AND status IN (?, ?)`),
+		TaskQueued, id, TaskFailed, TaskCanceled)
+	if err != nil {
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
+}
+
+// CancelTasks batch-cancels non-terminal tasks (queued/pending/running/
+// retrying). Returns how many were actually transitioned.
+func (s *sqlStore) CancelTasks(ctx context.Context, ids []string) (int, error) {
+	if len(ids) == 0 {
+		return 0, nil
+	}
+	placeholders := strings.TrimRight(strings.Repeat("?,", len(ids)), ",")
+	args := make([]any, 0, len(ids)+5)
+	args = append(args, TaskCanceled)
+	for _, id := range ids {
+		args = append(args, id)
+	}
+	args = append(args, TaskQueued, TaskPending, TaskRunning, "retrying")
+	res, err := s.db.ExecContext(ctx, s.q(`
+		UPDATE tasks SET status = ?, finished_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+		WHERE id IN (`+placeholders+`) AND status IN (?, ?, ?, ?)`), args...)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return int(n), nil
+}
+
+// RequeueTasks batch-requeues terminal tasks (failed/canceled) immediately.
+// Returns how many were actually transitioned.
+func (s *sqlStore) RequeueTasks(ctx context.Context, ids []string) (int, error) {
+	if len(ids) == 0 {
+		return 0, nil
+	}
+	placeholders := strings.TrimRight(strings.Repeat("?,", len(ids)), ",")
+	args := make([]any, 0, 3+len(ids))
+	args = append(args, TaskQueued)
+	for _, id := range ids {
+		args = append(args, id)
+	}
+	args = append(args, TaskFailed, TaskCanceled)
+	res, err := s.db.ExecContext(ctx, s.q(`
+		UPDATE tasks SET status = ?, error = '', finished_at = NULL,
+			available_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+		WHERE id IN (`+placeholders+`) AND status IN (?, ?)`), args...)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return int(n), nil
+}
+
+// CancelWorkflow cancels every non-terminal task of an orchestration.
+func (s *sqlStore) CancelWorkflow(ctx context.Context, workflowID string) (int, error) {
+	res, err := s.db.ExecContext(ctx, s.q(`
+		UPDATE tasks SET status = ?, finished_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+		WHERE workflow_id = ? AND status IN (?, ?, ?, ?)`),
+		TaskCanceled, workflowID, TaskQueued, TaskPending, TaskRunning, "retrying")
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return int(n), nil
+}
+
+// RerunWorkflowFromFailed restarts an orchestration from its first unfinished
+// step: that step is re-queued (full retry budget) and every later step returns
+// to pending, waiting on the chain. Already-succeeded steps are kept. Returns
+// how many steps were reset.
+func (s *sqlStore) RerunWorkflowFromFailed(ctx context.Context, workflowID string) (int, error) {
+	tasks, err := s.ListTasksByWorkflow(ctx, workflowID)
+	if err != nil {
+		return 0, err
+	}
+	started := false
+	n := 0
+	prevOK := true
+	for _, t := range tasks {
+		if t.Status == TaskSucceeded {
+			prevOK = true
+			continue
+		}
+		// The first unfinished step runs now; anything after waits on the chain.
+		status := TaskQueued
+		if started || !prevOK {
+			status = TaskPending
+		}
+		started = true
+		prevOK = false
+		if _, err := s.db.ExecContext(ctx, s.q(`
+			UPDATE tasks SET status = ?, error = '', result = '', progress = '',
+				attempts = 0, started_at = NULL, finished_at = NULL,
+				available_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+			WHERE id = ?`), status, t.ID); err != nil {
+			return n, err
+		}
+		n++
+	}
+	return n, nil
+}
+
+// ListDependentsOf returns the tasks waiting on upstreamID (for the dependency
+// view in a task's detail).
+func (s *sqlStore) ListDependentsOf(ctx context.Context, upstreamID string) ([]*Task, error) {
+	rows, err := s.db.QueryContext(ctx, s.q(`
+		SELECT `+taskColumns+` FROM tasks WHERE depends_on = ? ORDER BY created_at ASC`), upstreamID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanTasks(rows)
+}
+
+// ListTasksByWorkflow returns all tasks sharing a workflow id (oldest first),
+// used by the orchestration page to render the chained steps with live status.
+func (s *sqlStore) ListTasksByWorkflow(ctx context.Context, workflowID string) ([]*Task, error) {
+	rows, err := s.db.QueryContext(ctx, s.q(`
+		SELECT `+taskColumns+` FROM tasks WHERE workflow_id = ? ORDER BY created_at ASC`), workflowID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanTasks(rows)
+}
+
+// WorkflowSummary is one orchestration's rollup shown in the orchestration page.
+type WorkflowSummary struct {
+	WorkflowID string    `json:"workflowId"`
+	Name       string    `json:"name"`
+	Steps      int       `json:"steps"`
+	Succeeded  int       `json:"succeeded"`
+	Failed     int       `json:"failed"`
+	Running    int       `json:"running"` // queued/running/pending/retrying
+	CreatedAt  time.Time `json:"createdAt"`
+}
+
+// ListWorkflowSummaries returns recent multi-step orchestrations (newest
+// first) with a step status rollup for the orchestration page.
+func (s *sqlStore) ListWorkflowSummaries(ctx context.Context, limit int) ([]*WorkflowSummary, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	sum := func(status string) string {
+		return `SUM(CASE WHEN status = '` + status + `' THEN 1 ELSE 0 END)`
+	}
+	rows, err := s.db.QueryContext(ctx, s.q(`
+		SELECT workflow_id,
+			(SELECT name FROM tasks t2 WHERE t2.workflow_id = t.workflow_id ORDER BY created_at ASC LIMIT 1) AS name,
+			COUNT(*) AS steps,
+			`+sum(TaskSucceeded)+` AS succeeded,
+			`+sum(TaskFailed)+` AS failed,
+			`+sum(TaskRunning)+`+`+sum(TaskQueued)+`+`+sum(TaskPending)+`+`+sum("retrying")+` AS running,
+			MIN(created_at) AS created_at
+		FROM tasks t WHERE workflow_id <> '' GROUP BY workflow_id
+		ORDER BY MIN(created_at) DESC LIMIT `+itoa(limit)))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]*WorkflowSummary, 0)
+	for rows.Next() {
+		var ws WorkflowSummary
+		if err := rows.Scan(&ws.WorkflowID, &ws.Name, &ws.Steps, &ws.Succeeded, &ws.Failed, &ws.Running, &ws.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, &ws)
+	}
+	return out, rows.Err()
+}
+
+// TaskStatsWindow aggregates task outcomes over the trailing windowDays days:
+// per-status counts, success rate and average run duration, plus a per-day
+// trend (created vs succeeded/failed) for the overview chart.
+type TaskStatsWindow struct {
+	StatusCounts map[string]int `json:"statusCounts"`
+	Total        int            `json:"total"`
+	Completed    int            `json:"completed"`
+	Succeeded    int            `json:"succeeded"`
+	Failed       int            `json:"failed"`
+	SuccessRate  float64        `json:"successRate"` // 0..1
+	AvgDurationSec float64      `json:"avgDurationSec"`
+	Trend        []DayTrend     `json:"trend"`
+}
+
+// DayTrend is one day bucket of the task volume/success trend.
+type DayTrend struct {
+	Day       string `json:"day"` // YYYY-MM-DD
+	Created   int    `json:"created"`
+	Succeeded int    `json:"succeeded"`
+	Failed    int    `json:"failed"`
+}
+
+// TaskStatsDetailed computes the task statistics window for the stats page.
+func (s *sqlStore) TaskStatsDetailed(ctx context.Context, windowDays int) (*TaskStatsWindow, error) {
+	if windowDays <= 0 {
+		windowDays = 7
+	}
+	out := &TaskStatsWindow{StatusCounts: map[string]int{}}
+	var cutoff string
+	if isPostgres(s.driver) {
+		cutoff = "created_at >= CURRENT_TIMESTAMP - (? || ' days')::interval"
+	} else {
+		cutoff = "created_at >= datetime('now', '-' || ? || ' days')"
+	}
+	// Per-status counts.
+	rows, err := s.db.QueryContext(ctx, s.q(`
+		SELECT status, COUNT(*) FROM tasks WHERE `+cutoff+` GROUP BY status`), itoa(windowDays))
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var st string
+		var n int
+		if err := rows.Scan(&st, &n); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		out.StatusCounts[st] = n
+		out.Total += n
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	// Success/failure + avg duration over finished tasks.
+	if err := s.db.QueryRowContext(ctx, s.q(`
+		SELECT
+			COUNT(*) FILTER (WHERE status = ?),
+			COUNT(*) FILTER (WHERE status = ?),
+			AVG(EXTRACT(EPOCH FROM (finished_at - started_at)))
+		FROM tasks
+		WHERE `+cutoff+` AND status IN (?, ?) AND started_at IS NOT NULL AND finished_at IS NOT NULL`),
+		TaskSucceeded, TaskFailed, itoa(windowDays), TaskSucceeded, TaskFailed).Scan(
+		&out.Succeeded, &out.Failed, &out.AvgDurationSec); err != nil {
+		return nil, err
+	}
+	out.Completed = out.Succeeded + out.Failed
+	if out.Completed > 0 {
+		out.SuccessRate = float64(out.Succeeded) / float64(out.Completed)
+	}
+	// Per-day trend for the trailing window.
+	var dayExpr string
+	if isPostgres(s.driver) {
+		dayExpr = "to_char(created_at, 'YYYY-MM-DD')"
+	} else {
+		dayExpr = "strftime('%Y-%m-%d', created_at)"
+	}
+	rows2, err := s.db.QueryContext(ctx, s.q(`
+		SELECT `+dayExpr+`,
+			COUNT(*),
+			COUNT(*) FILTER (WHERE status = ?),
+			COUNT(*) FILTER (WHERE status = ?)
+		FROM tasks WHERE `+cutoff+` GROUP BY `+dayExpr+` ORDER BY `+dayExpr+` ASC`),
+		TaskSucceeded, TaskFailed, itoa(windowDays))
+	if err != nil {
+		return nil, err
+	}
+	defer rows2.Close()
+	for rows2.Next() {
+		var d DayTrend
+		if err := rows2.Scan(&d.Day, &d.Created, &d.Succeeded, &d.Failed); err != nil {
+			return nil, err
+		}
+		out.Trend = append(out.Trend, d)
+	}
+	return out, rows2.Err()
+}
+
 // ListScheduledTasks returns all tasks currently in the scheduled state
 // (both one-shot future tasks and recurring cron templates).
 func (s *sqlStore) ListScheduledTasks(ctx context.Context) ([]*Task, error) {
@@ -445,7 +728,8 @@ func scanTask(row rowScanner) (*Task, error) {
 	t := &Task{}
 	var started, finished, scheduled, lastFired *time.Time
 	err := row.Scan(&t.ID, &t.SessionID, &t.Directory, &t.Name, &t.Prompt, &t.DependsOn, &t.Status,
-		&t.Error, &t.Result, &t.Progress, &t.AISummary, &t.Attempts, &t.CreatedAt, &t.UpdatedAt, &started, &finished, &t.AvailableAt, &scheduled, &t.Cron, &lastFired)
+		&t.Error, &t.Result, &t.Progress, &t.AISummary, &t.Attempts, &t.Priority, &t.TimeoutSec, &t.WorkflowID,
+		&t.CreatedAt, &t.UpdatedAt, &started, &finished, &t.AvailableAt, &scheduled, &t.Cron, &lastFired)
 	if err != nil {
 		return nil, err
 	}

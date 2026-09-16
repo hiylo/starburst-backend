@@ -9,6 +9,7 @@ import (
 	"log"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/hiylo/starburst-backend/internal/automation"
@@ -62,6 +63,57 @@ func (s *Server) purgeFinishedTasks(w http.ResponseWriter, r *http.Request) {
 // ?status= filters, ?limit= (default 50, max 500) and ?offset= (default 0)
 // page; total is the unfiltered-by-page count so a client knows whether a
 // next page exists.
+// handleTaskBatchAction applies an action (cancel|retry) to many tasks at once
+// (POST /api/tasks/action, body {"ids":[...],"action":"cancel"}). Requires a
+// web session or APP token.
+func (s *Server) handleTaskBatchAction(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.requireToken(r); !ok && !s.requireWeb(r) {
+		writeErr(w, http.StatusUnauthorized, "web session or APP token required")
+		return
+	}
+	if r.Method != http.MethodPost {
+		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	var req struct {
+		IDs    []string `json:"ids"`
+		Action string   `json:"action"`
+	}
+	if !readBody(w, r, &req) {
+		return
+	}
+	if len(req.IDs) == 0 {
+		writeErr(w, http.StatusBadRequest, "ids are required")
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+	switch req.Action {
+	case "cancel":
+		n, err := s.store.CancelTasks(ctx, req.IDs)
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, "batch cancel failed")
+			return
+		}
+		for _, id := range req.IDs {
+			s.pushTaskEvent(store.TaskCanceled, map[string]any{"id": id, "status": store.TaskCanceled, "reason": "batch cancel"})
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "affected": n})
+	case "retry":
+		n, err := s.store.RequeueTasks(ctx, req.IDs)
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, "batch retry failed")
+			return
+		}
+		for _, id := range req.IDs {
+			s.pushTaskEvent(store.TaskQueued, map[string]any{"id": id, "status": store.TaskQueued, "reason": "batch retry"})
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "affected": n})
+	default:
+		writeErr(w, http.StatusBadRequest, "action must be cancel or retry")
+	}
+}
+
 func (s *Server) listTasks(w http.ResponseWriter, r *http.Request) {
 	status := r.URL.Query().Get("status")
 	limit := 50
@@ -104,13 +156,16 @@ func (s *Server) listTasks(w http.ResponseWriter, r *http.Request) {
 // the new task is created as pending and is only re-queued once upstream succeeds.
 func (s *Server) createTask(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Name        string `json:"name"`
-		Prompt      string `json:"prompt"`
-		SessionID   string `json:"sessionId"`
-		Directory   string `json:"directory"`
-		DependsOn   string `json:"dependsOn"`
-		ScheduledAt string `json:"scheduledAt"`
-		Cron        string `json:"cron"`
+		Name          string `json:"name"`
+		Prompt        string `json:"prompt"`
+		SessionID     string `json:"sessionId"`
+		Directory     string `json:"directory"`
+		DependsOn     string `json:"dependsOn"`
+		Priority      int    `json:"priority"`
+		TimeoutSec    int    `json:"timeoutSeconds"`
+		WorkflowID    string `json:"workflowId"`
+		ScheduledAt   string `json:"scheduledAt"`
+		Cron          string `json:"cron"`
 	}
 	if !readBody(w, r, &req) {
 		return
@@ -146,6 +201,9 @@ func (s *Server) createTask(w http.ResponseWriter, r *http.Request) {
 		Name:        req.Name,
 		Prompt:      req.Prompt,
 		DependsOn:   req.DependsOn,
+		Priority:    req.Priority,
+		TimeoutSec:  req.TimeoutSec,
+		WorkflowID:  req.WorkflowID,
 		ScheduledAt: scheduledAt,
 		Cron:        req.Cron,
 	}
@@ -199,17 +257,63 @@ func (s *Server) createTask(w http.ResponseWriter, r *http.Request) {
 // handleTaskByID reads (GET), cancels (DELETE) or manually unblocks (POST) a
 // single task.
 func (s *Server) handleTaskByID(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.requireToken(r); !ok {
-		writeErr(w, http.StatusUnauthorized, "invalid token")
+	if _, ok := s.requireToken(r); !ok && !s.requireWeb(r) {
+		writeErr(w, http.StatusUnauthorized, "web session or APP token required")
 		return
 	}
-	id := r.URL.Path[len("/api/tasks/"):]
+	rest := strings.TrimPrefix(r.URL.Path, "/api/tasks/")
+	// POST /api/tasks/{id}/retry 手动重试已失败/已取消的任务。
+	isRetry := false
+	if strings.HasSuffix(rest, "/retry") {
+		isRetry = true
+		rest = strings.TrimSuffix(rest, "/retry")
+	}
+	isDependents := false
+	if strings.HasSuffix(rest, "/dependents") {
+		isDependents = true
+		rest = strings.TrimSuffix(rest, "/dependents")
+	}
+	id := rest
 	if id == "" {
 		writeErr(w, http.StatusBadRequest, "missing task id")
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
+	if isRetry {
+		if r.Method != http.MethodPost {
+			writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		changed, err := s.store.RequeueTask(ctx, id)
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, "retry failed")
+			return
+		}
+		if !changed {
+			writeErr(w, http.StatusConflict, "task is not in a retriable state")
+			return
+		}
+		s.pushTaskEvent(store.TaskQueued, map[string]any{"id": id, "status": store.TaskQueued, "reason": "manual retry"})
+		writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+		return
+	}
+	if isDependents {
+		if r.Method != http.MethodGet {
+			writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		deps, err := s.store.ListDependentsOf(ctx, id)
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, "list dependents failed")
+			return
+		}
+		if deps == nil {
+			deps = []*store.Task{}
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"dependents": deps})
+		return
+	}
 	switch r.Method {
 	case http.MethodGet:
 		t, err := s.store.GetTask(ctx, id)

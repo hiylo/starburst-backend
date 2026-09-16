@@ -50,7 +50,12 @@ type Server struct {
 	// sessionActivity 记录每个会话最近一次消息类事件的时间（用于把「状态已标
 	// idle 但仍在流式输出」的会话正确识别为处理中，上游 status 事件本身并不可靠）。
 	sessionActivity sync.Map
+	// maxConcurrency 全局任务并发上限（0 = 仅受 worker 数限制），供状态页展示占用。
+	maxConcurrency int
 }
+
+// SetMaxConcurrency records the global task concurrency cap for observability.
+func (s *Server) SetMaxConcurrency(n int) { s.maxConcurrency = n }
 
 // New assembles the server with its dependencies.
 func New(cfg *config.Config, st store.Store, am *auth.Manager, oc *opencode.Client, hub *push.Hub) *Server {
@@ -96,6 +101,11 @@ func (s *Server) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/projects", s.handleProjects)
 	mux.HandleFunc("/api/projects/", s.handleProjectSessions)
 	mux.HandleFunc("/api/tasks", s.handleTasks)
+	mux.HandleFunc("/api/tasks/action", s.handleTaskBatchAction)
+	mux.HandleFunc("/api/tasks/stats", s.handleTaskStats)
+	mux.HandleFunc("/api/workflow", s.handleWorkflowCreate)
+	mux.HandleFunc("/api/workflows", s.handleWorkflowList)
+	mux.HandleFunc("/api/workflow/", s.handleWorkflowSteps)
 	mux.HandleFunc("/api/tasks/generate", s.handleTaskGenerate)
 	mux.HandleFunc("/api/tasks/", s.handleTaskByID)
 	mux.HandleFunc("/api/batch", s.handleBatch)

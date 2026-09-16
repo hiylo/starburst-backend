@@ -81,6 +81,24 @@ type Store interface {
 	BlockDependents(ctx context.Context, upstreamID, reason string) ([]string, error)
 	// UnblockTask manually re-queues a blocked task. Returns true if changed.
 	UnblockTask(ctx context.Context, id string) (bool, error)
+	// RequeueTask re-queues a terminal task (failed/canceled) immediately.
+	RequeueTask(ctx context.Context, id string) (bool, error)
+	// ListTasksByWorkflow returns a multi-step orchestration's tasks (oldest first).
+	ListTasksByWorkflow(ctx context.Context, workflowID string) ([]*Task, error)
+	// ListWorkflowSummaries returns recent orchestrations with a step status rollup.
+	ListWorkflowSummaries(ctx context.Context, limit int) ([]*WorkflowSummary, error)
+	// CancelWorkflow cancels every non-terminal task of an orchestration.
+	CancelWorkflow(ctx context.Context, workflowID string) (int, error)
+	// RerunWorkflowFromFailed restarts an orchestration from its first unfinished step.
+	RerunWorkflowFromFailed(ctx context.Context, workflowID string) (int, error)
+	// CancelTasks batch-cancels non-terminal tasks.
+	CancelTasks(ctx context.Context, ids []string) (int, error)
+	// RequeueTasks batch-requeues terminal (failed/canceled) tasks.
+	RequeueTasks(ctx context.Context, ids []string) (int, error)
+	// ListDependentsOf returns tasks waiting on upstreamID.
+	ListDependentsOf(ctx context.Context, upstreamID string) ([]*Task, error)
+	// TaskStatsDetailed aggregates task outcomes over the trailing window days.
+	TaskStatsDetailed(ctx context.Context, windowDays int) (*TaskStatsWindow, error)
 	// UpdateTaskProgress records a progress note for a running task.
 	UpdateTaskProgress(ctx context.Context, id, progress string) error
 	// SetTaskSession records the resolved session id for a task.

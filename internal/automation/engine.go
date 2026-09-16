@@ -139,6 +139,7 @@ func (e *Engine) Fire(ctx context.Context, ruleID string) error {
 	}
 	t := &store.Task{
 		ID:        newRuleTaskID(ruleID),
+		SessionID: rule.SessionID,
 		Directory: rule.Directory,
 		Prompt:    rule.Prompt,
 	}

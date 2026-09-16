@@ -33,8 +33,10 @@ type Executor struct {
 	maxRetries   int           // additional attempts after the first failure
 	workers      int           // concurrent task executions
 	retention    time.Duration // finished-task retention; 0 keeps them forever
+	sem          chan struct{} // global concurrency cap; nil = no extra cap beyond workers
 	gateMu       sync.Mutex    // guards gates
 	gates        map[string]*sessionGate
+	dirGates     map[string]*sessionGate // per-directory gates for new-session tasks
 }
 
 // sessionGate serializes concurrent executions that target the same upstream
@@ -57,7 +59,17 @@ func NewExecutor(st store.Store, hub *push.Hub, openCodeBase string) *Executor {
 		maxRetries:   2,
 		workers:      4,
 		gates:        make(map[string]*sessionGate),
+		dirGates:     make(map[string]*sessionGate),
 	}
+}
+
+// WithConcurrencyCap caps the number of concurrently running tasks across all
+// workers. A value <= 0 leaves the worker count as the only limit.
+func (e *Executor) WithConcurrencyCap(n int) *Executor {
+	if n > 0 {
+		e.sem = make(chan struct{}, n)
+	}
+	return e
 }
 
 // WithMaxRetries sets how many times a failed task is re-queued before it is
@@ -158,15 +170,39 @@ func (e *Executor) worker(ctx context.Context) {
 }
 
 // runClaimed drives one claimed task to completion. Tasks that explicitly
-// share an upstream session id are serialized against each other.
+// share an upstream session id are serialized against each other; tasks that
+// create a new session are serialized per working directory; a global
+// concurrency cap may additionally limit simultaneous executions.
 func (e *Executor) runClaimed(ctx context.Context, t *store.Task) {
-	g := e.hold(t.SessionID)
+	// Global concurrency cap (if configured): acquire before the session gate so
+	// a low cap does not let many goroutines pile up holding per-session locks.
+	if e.sem != nil {
+		select {
+		case e.sem <- struct{}{}:
+			defer func() { <-e.sem }()
+		case <-ctx.Done():
+			// Canceled while waiting for a slot: return the task to the queue.
+			ctx2, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			_ = e.store.RetryTask(ctx2, t.ID, 0)
+			cancel()
+			return
+		}
+	}
+	// Serialize by session id (explicit shared session) ...
+	g := e.hold(t.SessionID, e.gates)
 	if g != nil {
-		// Deferred in this order so release runs only after mu.Unlock: the gate
-		// must not be dropped from the map while an execution still holds it.
-		defer e.release(g)
+		defer e.release(e.gates, g)
 		g.mu.Lock()
 		defer g.mu.Unlock()
+	}
+	// ... or by directory when the task creates its own session in a repo.
+	if t.SessionID == "" && t.Directory != "" {
+		dg := e.hold(t.Directory, e.dirGates)
+		if dg != nil {
+			defer e.release(e.dirGates, dg)
+			dg.mu.Lock()
+			defer dg.mu.Unlock()
+		}
 	}
 	// A panic in execute must not kill the whole process (Go does not isolate
 	// goroutine panics): mark the task failed so it can be inspected and retried,
@@ -182,19 +218,19 @@ func (e *Executor) runClaimed(ctx context.Context, t *store.Task) {
 	e.execute(ctx, t)
 }
 
-// hold returns the serialization gate for sessionID, registering one holder.
-// Tasks without an explicit session id create their own upstream session and
-// therefore need no serialization.
-func (e *Executor) hold(sessionID string) *sessionGate {
-	if sessionID == "" {
+// hold returns the serialization gate for key in the given map (session id or
+// directory), registering one holder. Tasks without an explicit session id or
+// directory create their own upstream session and need no serialization.
+func (e *Executor) hold(key string, m map[string]*sessionGate) *sessionGate {
+	if key == "" {
 		return nil
 	}
 	e.gateMu.Lock()
 	defer e.gateMu.Unlock()
-	g, ok := e.gates[sessionID]
+	g, ok := m[key]
 	if !ok {
-		g = &sessionGate{sessionID: sessionID}
-		e.gates[sessionID] = g
+		g = &sessionGate{sessionID: key}
+		m[key] = g
 	}
 	g.holders++
 	return g
@@ -202,12 +238,12 @@ func (e *Executor) hold(sessionID string) *sessionGate {
 
 // release drops one holder registered by hold, freeing the gate once no worker
 // is waiting on it any more.
-func (e *Executor) release(g *sessionGate) {
+func (e *Executor) release(m map[string]*sessionGate, g *sessionGate) {
 	e.gateMu.Lock()
 	defer e.gateMu.Unlock()
 	g.holders--
 	if g.holders <= 0 {
-		delete(e.gates, g.sessionID)
+		delete(m, g.sessionID)
 	}
 }
 
@@ -275,6 +311,14 @@ func (e *Executor) execute(ctx context.Context, t *store.Task) {
 
 	pushTask("running", t)
 
+	// 单任务超时：timeout_seconds > 0 时限制本次执行总时长（超时按失败重试处理）。
+	runCtx := ctx
+	var cancelRun context.CancelFunc
+	if t.TimeoutSec > 0 {
+		runCtx, cancelRun = context.WithTimeout(ctx, time.Duration(t.TimeoutSec)*time.Second)
+		defer cancelRun()
+	}
+
 	// canceled reports whether this task was canceled mid-execution.
 	canceled := func() bool {
 		c, err := e.store.IsTaskCanceled(ctx, t.ID)
@@ -289,7 +333,7 @@ func (e *Executor) execute(ctx context.Context, t *store.Task) {
 			pushTask("canceled", t)
 			return
 		}
-		created, err := e.createSession(ctx, t.Directory)
+		created, err := e.createSession(runCtx, t.Directory)
 		if err != nil {
 			failWithRetry("create session: " + err.Error())
 			return
@@ -300,10 +344,14 @@ func (e *Executor) execute(ctx context.Context, t *store.Task) {
 	}
 
 	// Step 2: prompt the session and drain the response.
-	result, err := e.promptSession(ctx, sessionID, t.Prompt, t.Directory, canceled, func(partial string) {
+	result, err := e.promptSession(runCtx, sessionID, t.Prompt, t.Directory, canceled, func(partial string) {
 		_ = e.store.UpdateTaskProgress(ctx, t.ID, partial)
 	})
 	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			failWithRetry(fmt.Sprintf("任务超时（%d 秒）", t.TimeoutSec))
+			return
+		}
 		if errors.Is(err, errCanceled) {
 			e.resolveDependents(ctx, t.ID, false, "upstream task canceled")
 			pushTask("canceled", t)

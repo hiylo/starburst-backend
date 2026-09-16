@@ -110,6 +110,7 @@ func main() {
 
 	srv := server.New(cfg, st, am, oc, hub)
 	srv.SetWebUI(webui.New())
+	srv.SetMaxConcurrency(cfg.MaxConcurrency)
 
 	// Optional orchestration LLM: powers natural-language rule generation and
 	// (later) result summaries and failure self-healing. Configuration is
@@ -135,7 +136,11 @@ func main() {
 	exec.WithLLM(llmClient)
 	exec.WithWorkers(cfg.Workers)
 	exec.WithRetention(cfg.TaskRetention)
+	exec.WithConcurrencyCap(cfg.MaxConcurrency)
 	log.Printf("orchestration workers: %d", cfg.Workers)
+	if cfg.MaxConcurrency > 0 {
+		log.Printf("orchestration global concurrency cap: %d", cfg.MaxConcurrency)
+	}
 	if cfg.TaskRetention > 0 {
 		log.Printf("finished task retention: %s", cfg.TaskRetention)
 	}

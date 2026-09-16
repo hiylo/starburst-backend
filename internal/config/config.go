@@ -34,6 +34,9 @@ type Config struct {
 	// Workers is how many orchestration tasks may run concurrently. 1 restores
 	// serial execution.
 	Workers int
+	// MaxConcurrency caps the number of concurrently running tasks across all
+	// workers (<=0 leaves Control by Workers only).
+	MaxConcurrency int
 	// TaskRetention is how long finished tasks are kept before the janitor
 	// deletes them. Zero keeps them forever.
 	TaskRetention time.Duration
@@ -76,6 +79,7 @@ func Parse(args []string) (*Config, error) {
 	defaultToken := fs.String("default-token", os.Getenv("OCB_DEFAULT_TOKEN"), "optional pre-provisioned API token registered on first run (empty = off)")
 	webhookSecret := fs.String("webhook-secret", os.Getenv("OCB_WEBHOOK_SECRET"), "optional shared secret protecting /api/webhook (empty = off)")
 	workers := fs.Int("workers", envInt("OCB_WORKERS", 4), "concurrent task executions (1 = serial)")
+	maxConcurrency := fs.Int("max-concurrency", envInt("OCB_MAX_CONCURRENCY", 0), "global running task cap across workers (0 = unlimited within workers)")
 	taskRetention := fs.Duration("task-retention", envDuration("OCB_TASK_RETENTION", 0), "finished task retention, 0 = forever")
 	llmURL := fs.String("llm-url", envOr("OCB_LLM_URL", ""), "OpenAI-compatible base URL for orchestration LLM (empty = disabled)")
 	llmKey := fs.String("llm-key", os.Getenv("OCB_LLM_KEY"), "API key for --llm-url")
@@ -108,6 +112,7 @@ func Parse(args []string) (*Config, error) {
 		DefaultToken:         *defaultToken,
 		WebhookSecret:        *webhookSecret,
 		Workers:              clampInt(*workers, 1, 64),
+		MaxConcurrency:       clampInt(*maxConcurrency, 0, 64),
 		TaskRetention:        *taskRetention,
 		LLMURL:               strings.TrimRight(*llmURL, "/"),
 		LLMKey:               *llmKey,

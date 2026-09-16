@@ -433,7 +433,8 @@ func TestExecutorRunsTasksInParallel(t *testing.T) {
 
 	const n = 4
 	for i := 1; i <= n; i++ {
-		if err := st.CreateTask(ctx, &store.Task{ID: fmt.Sprintf("task_par%d", i), Directory: "/w", Prompt: "parallel"}); err != nil {
+		// 不同目录才能并行（同目录已被目录互斥串行化）。
+		if err := st.CreateTask(ctx, &store.Task{ID: fmt.Sprintf("task_par%d", i), Directory: fmt.Sprintf("/w%d", i), Prompt: "parallel"}); err != nil {
 			t.Fatalf("create task: %v", err)
 		}
 	}
@@ -463,6 +464,91 @@ func TestExecutorRunsTasksInParallel(t *testing.T) {
 	}
 }
 
+// TestExecutorSerializesSameDirectory verifies that tasks creating a new
+// session in the SAME working directory never overlap (per-directory mutex).
+func TestExecutorSerializesSameDirectory(t *testing.T) {
+	var probe concurrencyProbe
+	upstream := func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/session":
+			_, _ = fmt.Fprintf(w, `{"id":"ses_x","directory":"/w"}`)
+		case strings.HasPrefix(r.URL.Path, "/api/session/") && strings.HasSuffix(r.URL.Path, "/prompt"):
+			probe.enter()
+			time.Sleep(200 * time.Millisecond)
+			probe.leave()
+			_, _ = w.Write([]byte(`{"data":{"admittedSeq":1,"id":"m","sessionID":"ses_x"}}`))
+		default:
+			_, _ = w.Write([]byte(`[{"role":"assistant","content":[{"type":"text","text":"ok"}]}]`))
+		}
+	}
+	exec, st, _ := newTestEnv(t, upstream)
+	exec.WithWorkers(4)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	for i := 1; i <= 3; i++ {
+		if err := st.CreateTask(ctx, &store.Task{ID: fmt.Sprintf("task_dir%d", i), Directory: "/w", Prompt: "p"}); err != nil {
+			t.Fatalf("create task: %v", err)
+		}
+	}
+	done := make(chan struct{})
+	go func() { defer close(done); exec.Run(ctx) }()
+	deadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) {
+		stats, err := st.TaskStats(ctx)
+		if err == nil && stats.Succeeded == 3 {
+			break
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	cancel()
+	<-done
+	if got := probe.Peak(); got > 1 {
+		t.Fatalf("same-directory tasks overlapped: peak concurrent executions = %d", got)
+	}
+}
+
+// TestExecutorConcurrencyCap verifies the global running-task cap.
+func TestExecutorConcurrencyCap(t *testing.T) {
+	var probe concurrencyProbe
+	upstream := func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/session":
+			_, _ = fmt.Fprintf(w, `{"id":"ses_cap","directory":"/w"}`)
+		case strings.HasPrefix(r.URL.Path, "/api/session/") && strings.HasSuffix(r.URL.Path, "/prompt"):
+			probe.enter()
+			time.Sleep(200 * time.Millisecond)
+			probe.leave()
+			_, _ = w.Write([]byte(`{"data":{"admittedSeq":1,"id":"m","sessionID":"ses_cap"}}`))
+		default:
+			_, _ = w.Write([]byte(`[{"role":"assistant","content":[{"type":"text","text":"ok"}]}]`))
+		}
+	}
+	exec, st, _ := newTestEnv(t, upstream)
+	exec.WithWorkers(6).WithConcurrencyCap(2)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	for i := 1; i <= 4; i++ {
+		if err := st.CreateTask(ctx, &store.Task{ID: fmt.Sprintf("task_cap%d", i), Directory: fmt.Sprintf("/w%d", i), Prompt: "p"}); err != nil {
+			t.Fatalf("create task: %v", err)
+		}
+	}
+	done := make(chan struct{})
+	go func() { defer close(done); exec.Run(ctx) }()
+	deadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) {
+		stats, err := st.TaskStats(ctx)
+		if err == nil && stats.Succeeded == 4 {
+			break
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	cancel()
+	<-done
+	if got := probe.Peak(); got > 2 {
+		t.Fatalf("global concurrency cap = 2 but observed peak %d", got)
+	}
+}
+
 // TestSessionGateSerializes verifies that executions sharing one upstream
 // session id never overlap, and that released gates are dropped from the map so
 // it does not grow without bound.
@@ -474,8 +560,8 @@ func TestSessionGateSerializes(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			g := exec.hold("ses_shared")
-			defer exec.release(g)
+			g := exec.hold("ses_shared", exec.gates)
+			defer exec.release(exec.gates, g)
 			g.mu.Lock()
 			defer g.mu.Unlock()
 			probe.enter()
@@ -494,7 +580,7 @@ func TestSessionGateSerializes(t *testing.T) {
 	if left != 0 {
 		t.Fatalf("%d session gate(s) left after all holders released", left)
 	}
-	if g := exec.hold(""); g != nil {
+	if g := exec.hold("", exec.gates); g != nil {
 		t.Fatal("tasks without an explicit session id must not be serialized")
 	}
 }

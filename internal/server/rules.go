@@ -57,6 +57,7 @@ func (s *Server) createRule(w http.ResponseWriter, r *http.Request) {
 		Kind      string `json:"kind"`
 		Schedule  string `json:"schedule"`
 		Directory string `json:"directory"`
+		SessionID string `json:"sessionId"`
 		Prompt    string `json:"prompt"`
 		Enabled   bool   `json:"enabled"`
 	}
@@ -79,6 +80,7 @@ func (s *Server) createRule(w http.ResponseWriter, r *http.Request) {
 		Kind:      req.Kind,
 		Schedule:  req.Schedule,
 		Directory: req.Directory,
+		SessionID: req.SessionID,
 		Prompt:    req.Prompt,
 		Enabled:   req.Enabled,
 	}
