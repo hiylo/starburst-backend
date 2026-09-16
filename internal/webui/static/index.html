@@ -483,6 +483,21 @@
           <div id="llmMsg" class="msg"></div>
         </div>
         <div class="card">
+          <h2><span class="dot"></span>嵌入模型配置（项目知识库）</h2>
+          <p class="muted" style="font-size:12px;margin-top:0">用于把项目代码/文档向量化，支撑知识库语义检索与提问。留空 API 地址则关闭向量检索。</p>
+          <label>API 地址（OpenAI 兼容，如 http://192.0.2.150:11434/v1）</label>
+          <input type="text" id="embedUrl" placeholder="留空表示禁用">
+          <label>API Key</label>
+          <input type="password" id="embedKey" placeholder="API Key">
+          <label>模型名（如 bge-m3）</label>
+          <input type="text" id="embedModel" placeholder="模型名">
+          <div class="row" style="margin-top:12px">
+            <button onclick="saveEmbedConfig()">保存</button>
+            <span id="embedStatus" class="muted" style="font-size:12px"></span>
+          </div>
+          <div id="embedMsg" class="msg"></div>
+        </div>
+        <div class="card">
           <h2><span class="dot"></span>修改管理密码</h2>
           <label>新密码</label>
           <input type="password" id="newpw" placeholder="至少 4 位">

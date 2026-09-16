@@ -102,7 +102,7 @@ function switchPage(name) {
   else if (name === "archives") { loadArchives(); loadArchiveSessions(); }
   else if (name === "audit") loadAudit();
   else if (name === "tokens") { loadTokens(); loadTokenUsage(); }
-  else if (name === "settings") loadLLMConfig();
+  else if (name === "settings") { loadLLMConfig(); loadEmbedConfig(); }
   else if (name === "stream") ensureStream();
   else if (name === "intel") loadIntelProjects();
 }
@@ -914,6 +914,31 @@ async function saveLLMConfig() {
   if (!res.ok) { show(document.getElementById("llmMsg"), data.error || "保存失败"); return; }
   show(document.getElementById("llmMsg"), "已保存" + (data.enabled ? "（已启用）" : "（已禁用）"), true);
   loadLLMConfig();
+}
+async function loadEmbedConfig() {
+  try {
+    const res = await api("/api/embed", { headers: hdr() });
+    const data = await res.json();
+    document.getElementById("embedUrl").value = data.url || "";
+    document.getElementById("embedModel").value = data.model || "";
+    document.getElementById("embedKey").placeholder = data.keySet ? "已设置（留空不修改）" : "API Key";
+    document.getElementById("embedKey").value = "";
+    const st = document.getElementById("embedStatus");
+    st.textContent = data.enabled ? "已启用" : "未启用";
+    st.style.color = data.enabled ? "var(--success)" : "var(--ink-subtle)";
+  } catch (_) {}
+}
+async function saveEmbedConfig() {
+  const body = {
+    url: document.getElementById("embedUrl").value.trim(),
+    key: document.getElementById("embedKey").value,
+    model: document.getElementById("embedModel").value.trim(),
+  };
+  const res = await api("/api/embed", { method: "POST", headers: hdr(), body: JSON.stringify(body) });
+  const data = await res.json();
+  if (!res.ok) { show(document.getElementById("embedMsg"), data.error || "保存失败"); return; }
+  show(document.getElementById("embedMsg"), "已保存" + (data.enabled ? "（已启用）" : "（已禁用）"), true);
+  loadEmbedConfig();
 }
 async function doChangePassword() {
   const np = document.getElementById("newpw").value;
