@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/hiylo/starburst-backend/internal/intel/compliance"
+	"github.com/hiylo/starburst-backend/internal/intel/security"
 	"github.com/hiylo/starburst-backend/internal/store"
 )
 
@@ -190,6 +191,44 @@ func (s *Server) runIntelComplianceScan(ctx context.Context, projectID int64, ro
 		}
 		if err := s.store.CreateIntelFinding(ctx, finding); err != nil {
 			log.Printf("intel compliance finding: %v", err)
+		}
+	}
+	return nil
+}
+
+// runIntelSecurityScan runs the deterministic sensitive-field detector over the
+// scanned entity columns and records security findings (detector=security) so
+// password/token/id-card/bank-card/mobile/amount fields are surfaced in the
+// audit view. Findings are deduplicated by location+summary.
+func (s *Server) runIntelSecurityScan(ctx context.Context, projectID int64, entities []*store.IntelEntity) error {
+	if len(entities) == 0 {
+		return nil
+	}
+	seen := make(map[string]bool)
+	for _, e := range entities {
+		w := security.DetectField(security.Field{Name: e.ColumnName, Type: e.FieldType})
+		if w == nil {
+			continue
+		}
+		loc := fmt.Sprintf("%s:%d", e.SourceFile, e.SourceLine)
+		key := loc + "|" + w.Field + "|" + w.Kind
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		finding := &store.IntelFinding{
+			ProjectID:  projectID,
+			ModuleID:   e.ModuleID,
+			Detector:   "security",
+			Severity:   string(w.Severity),
+			Category:   "sensitive_field",
+			CveOrRuleID: w.Kind,
+			Location:   loc,
+			Summary:    w.Message,
+			Status:     "open",
+		}
+		if err := s.store.CreateIntelFinding(ctx, finding); err != nil {
+			log.Printf("intel security finding: %v", err)
 		}
 	}
 	return nil

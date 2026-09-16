@@ -424,6 +424,7 @@ func (s *Server) runIntelAnalyze(ctx context.Context, projectID int64) error {
 	}
 	mods, _ = s.store.ListIntelModules(ctx, projectID)
 	var allEndpoints []*store.IntelEndpoint
+	var allEntities []*store.IntelEntity
 	for _, m := range mods {
 		sum, err := intel.ScanModule(root, m.RelPath)
 		if err != nil {
@@ -433,6 +434,7 @@ func (s *Server) runIntelAnalyze(ctx context.Context, projectID int64) error {
 			if err := s.store.ReplaceIntelEntities(ctx, projectID, m.ID, sum.Entities); err != nil {
 				return err
 			}
+			allEntities = append(allEntities, sum.Entities...)
 		}
 		if len(sum.Endpoints) > 0 {
 			if err := s.store.ReplaceIntelEndpoints(ctx, projectID, m.ID, sum.Endpoints); err != nil {
@@ -457,6 +459,9 @@ func (s *Server) runIntelAnalyze(ctx context.Context, projectID int64) error {
 	}
 	if err := s.runIntelComplianceScan(ctx, projectID, root); err != nil {
 		log.Printf("intel compliance scan project %d: %v", projectID, err)
+	}
+	if err := s.runIntelSecurityScan(ctx, projectID, allEntities); err != nil {
+		log.Printf("intel security scan project %d: %v", projectID, err)
 	}
 	return s.store.MarkIntelProjectAnalyzed(ctx, projectID, sha)
 }

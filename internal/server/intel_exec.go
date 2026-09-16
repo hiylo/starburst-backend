@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/hiylo/starburst-backend/internal/intel/report"
+	"github.com/hiylo/starburst-backend/internal/intel/rootcause"
 	"github.com/hiylo/starburst-backend/internal/store"
 )
 
@@ -319,12 +320,16 @@ func parseReport(reportKind, dir string, output []byte) []*store.TestResult {
 	out := make([]*store.TestResult, 0, len(cases))
 	for _, c := range cases {
 		passed := c.Status == "passed"
-		out = append(out, &store.TestResult{
+		res := &store.TestResult{
 			Kind:         reportKind,
 			Passed:       passed,
 			Endpoint:     c.Class + "." + c.Name,
 			FailuresJSON: encodeJSON(map[string]any{"suite": c.Suite, "error": c.ErrorXML}),
-		})
+		}
+		if !passed {
+			res.RootcauseJSON = encodeJSON(rootcause.Analyze(c.ErrorXML, nil))
+		}
+		out = append(out, res)
 	}
 	return out
 }
