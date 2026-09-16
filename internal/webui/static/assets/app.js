@@ -1023,6 +1023,8 @@ let wbFilterOption = "all";
 let wbMoreMsgs = false;
 // 决策面板是否处于「改名」编辑态。
 let wbRenaming = false;
+// 会话是否正在压缩（压缩为同步长耗时操作，期间禁用操作按钮）。
+let wbCompacting = false;
 // 有未读新消息的会话集合（后端 session_unread 为准，Web/App 共享）。
 let wbNewSet = new Set();
 // 待授权操作：sessionId → [PermissionRequest{id, permission, patterns, always, tool}]。
@@ -1733,6 +1735,7 @@ function openWbPanel(id) {
     wbQAnswers = {};
     wbMoreMsgs = false;
     wbRenaming = false;
+    wbCompacting = false;
     wbPanelScrollBottom = true;
     renderWbPanel();
   }
@@ -1856,6 +1859,7 @@ function renderWbPanel() {
         <span class="badge ${statusBadgeCls}">${wbStatusLabel(status)}</span>
         <div style="display:flex;gap:6px">
           <button class="ghost sm" data-wb-rename="1" title="修改会话标题">改名</button>
+          <button class="ghost sm" data-wb-compact="1" title="压缩会话：把历史对话汇总为摘要以释放上下文（耗时较长）" ${wbCompacting ? "disabled" : ""}>${wbCompacting ? "压缩中…" : "压缩"}</button>
           <button class="danger sm" data-wb-del="${escapeHtml(d.id)}">删除</button>
         </div>
       </div>
@@ -1885,6 +1889,8 @@ function renderWbPanel() {
       </div>
     </div>`;
   panel.onclick = (e) => {
+    const cp = e.target.closest("[data-wb-compact]");
+    if (cp) { wbCompactSession(d.id); return; }
     const pbp = e.target.closest("[data-wb-perm]");
     if (pbp) { wbPermReply(pbp.dataset.wbPerm, pbp.dataset.reply); return; }
     const ren = e.target.closest("[data-wb-rename]");
@@ -2092,6 +2098,45 @@ async function sendWbReply() {
   }
 }
 // 修改会话标题（PATCH /session/{id}，与 App updateSession 契约一致）。
+// 压缩会话：POST /session/{id}/summarize（App summarizeSession 同契约）。
+// 该操作需 LLM 生成摘要，属同步长耗时（可数分钟），期间按钮置灰、不阻塞其它操作。
+async function wbCompactSession(id) {
+  if (wbCompacting) return;
+  if (!confirm("确认压缩该会话？\n会把历史对话汇总为一条摘要以释放上下文，耗时可能较长。")) return;
+  const item = wbItems.find(x => x.session.id === id);
+  const session = (item && item.session) || (wbPanelData && wbPanelData.session) || {};
+  const model = session.model || {};
+  const providerID = model.providerID || "litellm";
+  const modelID = model.id || "";
+  if (!modelID) { toast("压缩失败", "未知会话模型，无法压缩", "crit"); return; }
+  const dir = session.directory || "";
+  const headers = appHeaders();
+  if (dir) headers["x-opencode-directory"] = dir;
+  wbCompacting = true;
+  wbRerenderPanel();
+  toast("压缩中…", "正在生成会话摘要，可能需要几分钟放下不管", "info");
+  try {
+    const res = await api(`/api/opencode/session/${encodeURIComponent(id)}/summarize`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ providerID, modelID }),
+    });
+    if (!res.ok) { toast("压缩失败", "压缩未生效 (" + res.status + ")", "crit"); return; }
+    toast("已压缩", "会话已压缩为摘要", "info");
+    renderWbList();
+    refreshWbPanel(id, true);
+  } catch (e) {
+    if (e.message !== "unauthorized") toast("压缩失败", e.message || "未知错误", "crit");
+  } finally {
+    wbCompacting = false;
+    if (wbSelected === id) {
+      const snap = wbSnapshotPanel();
+      renderWbPanel();
+      wbRestorePanel(snap);
+    }
+  }
+}
+
 async function wbRenameSession(id) {
   const input = document.getElementById("wbRenameInput");
   const title = input ? input.value.trim() : "";
