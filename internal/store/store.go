@@ -255,6 +255,51 @@ type Store interface {
 	ReplaceIntelEndpoints(ctx context.Context, projectID, moduleID int64, eps []*IntelEndpoint) error
 	// ListIntelEndpoints returns endpoint contracts for a project/module.
 	ListIntelEndpoints(ctx context.Context, projectID, moduleID int64) ([]*IntelEndpoint, error)
+
+	// ---- Test Intelligence: test assets & execution ----
+
+	// ReplaceIntelTestCases replaces a module's discovered test cases.
+	ReplaceIntelTestCases(ctx context.Context, projectID, moduleID int64, cases []*TestCase) error
+	// ListIntelTestCases returns test cases for a project/module.
+	ListIntelTestCases(ctx context.Context, projectID, moduleID int64) ([]*TestCase, error)
+	// CreateIntelTestRun persists a new test run and populates its id.
+	CreateIntelTestRun(ctx context.Context, run *TestRun) error
+	// GetIntelTestRun loads a single test run.
+	GetIntelTestRun(ctx context.Context, id int64) (*TestRun, error)
+	// ListIntelTestRuns returns test runs for a project, newest first.
+	ListIntelTestRuns(ctx context.Context, projectID int64) ([]*TestRun, error)
+	// UpdateIntelTestRun persists mutable run fields (status/timestamps/log).
+	UpdateIntelTestRun(ctx context.Context, run *TestRun) error
+	// AddIntelTestResults appends per-case results to a run.
+	AddIntelTestResults(ctx context.Context, results []*TestResult) error
+	// ListIntelTestResults returns results for a run.
+	ListIntelTestResults(ctx context.Context, runID int64) ([]*TestResult, error)
+
+	// ---- Test Intelligence: issues & features ----
+
+	// CreateIntelIssue persists a new issue (closed-loop tracking).
+	CreateIntelIssue(ctx context.Context, issue *IntelIssue) error
+	// ListIntelIssues returns issues for a project, optionally by status.
+	ListIntelIssues(ctx context.Context, projectID int64, status string) ([]*IntelIssue, error)
+	// UpdateIntelIssue persists mutable issue fields (status/resolution).
+	UpdateIntelIssue(ctx context.Context, issue *IntelIssue) error
+	// ReplaceIntelFeatures replaces a project's feature-point set (rescan).
+	ReplaceIntelFeatures(ctx context.Context, projectID int64, feats []*IntelFeature) error
+	// ListIntelFeatures returns feature points for a project.
+	ListIntelFeatures(ctx context.Context, projectID int64) ([]*IntelFeature, error)
+	// UpdateIntelFeature persists mutable feature fields.
+	UpdateIntelFeature(ctx context.Context, feat *IntelFeature) error
+
+	// ---- Test Intelligence: knowledge base (RAG) ----
+
+	// ReplaceProjectChunks rebuilds a project's knowledge-base vector chunks.
+	ReplaceProjectChunks(ctx context.Context, projectID int64, chunks []*RagChunk) error
+	// SearchRagChunks returns the chunks most similar to a query embedding.
+	SearchRagChunks(ctx context.Context, projectID, moduleID int64, embedding []float32, limit int) ([]*RagChunk, error)
+	// CountProjectChunks returns the number of indexed chunks for a project.
+	CountProjectChunks(ctx context.Context, projectID int64) (int64, error)
+	// DeleteProjectChunks removes a project's knowledge-base chunks.
+	DeleteProjectChunks(ctx context.Context, projectID int64) error
 }
 
 // Open opens a store for the given driver/dsn. It applies all migrations

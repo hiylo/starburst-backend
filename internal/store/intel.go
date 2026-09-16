@@ -169,6 +169,9 @@ func (s *sqlStore) DeleteIntelProject(ctx context.Context, id int64) error {
 	if _, err := s.db.ExecContext(ctx, s.q(`DELETE FROM intel_endpoints WHERE project_id = ?`), id); err != nil {
 		return err
 	}
+	if _, err := s.db.ExecContext(ctx, s.q(`DELETE FROM intel_chunks WHERE project_id = ?`), id); err != nil {
+		return err
+	}
 	if _, err := s.db.ExecContext(ctx, s.q(`DELETE FROM projects WHERE id = ?`), id); err != nil {
 		return err
 	}

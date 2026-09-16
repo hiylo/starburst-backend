@@ -187,9 +187,16 @@ func (s *Server) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/intel/projects", s.handleIntelProjects)
 	mux.HandleFunc("/api/intel/projects/", s.handleIntelProjectByID)
 	mux.HandleFunc("/api/intel/analyze", s.handleIntelAnalyze)
+	mux.HandleFunc("/api/intel/index", s.handleIntelIndex)
+	mux.HandleFunc("/api/intel/ask", s.handleIntelAsk)
 	mux.HandleFunc("/api/intel/endpoints", s.handleIntelEndpoints)
 	mux.HandleFunc("/api/intel/entities", s.handleIntelEntities)
 	mux.HandleFunc("/api/intel/modules", s.handleIntelModules)
+	mux.HandleFunc("/api/intel/test-cases", s.handleIntelTestCases)
+	mux.HandleFunc("/api/intel/features", s.handleIntelFeatures)
+	mux.HandleFunc("/api/intel/issues", s.handleIntelIssues)
+	mux.HandleFunc("/api/intel/run", s.handleIntelRun)
+	mux.HandleFunc("/api/intel/runs/", s.handleIntelRunByID)
 	mux.HandleFunc("/", s.handleIndex)
 }
 

@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"log"
 	"net/http"
 	"os"
@@ -11,6 +12,8 @@ import (
 	"time"
 
 	"github.com/hiylo/starburst-backend/internal/intel"
+	"github.com/hiylo/starburst-backend/internal/intel/feature"
+	"github.com/hiylo/starburst-backend/internal/intel/testassets"
 	"github.com/hiylo/starburst-backend/internal/store"
 )
 
@@ -367,6 +370,7 @@ func (s *Server) runIntelAnalyze(ctx context.Context, projectID int64) error {
 		return err
 	}
 	mods, _ = s.store.ListIntelModules(ctx, projectID)
+	var allEndpoints []*store.IntelEndpoint
 	for _, m := range mods {
 		sum, err := intel.ScanModule(root, m.RelPath)
 		if err != nil {
@@ -381,13 +385,67 @@ func (s *Server) runIntelAnalyze(ctx context.Context, projectID int64) error {
 			if err := s.store.ReplaceIntelEndpoints(ctx, projectID, m.ID, sum.Endpoints); err != nil {
 				return err
 			}
+			allEndpoints = append(allEndpoints, sum.Endpoints...)
 		}
+		if err := s.persistTestAssets(ctx, projectID, m, root); err != nil {
+			return err
+		}
+	}
+	if err := s.persistFeatures(ctx, projectID, allEndpoints); err != nil {
+		return err
 	}
 	sha, err := snapshotSHA(root)
 	if err != nil {
 		sha = ""
 	}
 	return s.store.MarkIntelProjectAnalyzed(ctx, projectID, sha)
+}
+
+// persistTestAssets discovers and stores a module's test assets.
+func (s *Server) persistTestAssets(ctx context.Context, projectID int64, m *store.IntelModule, root string) error {
+	assets, err := testassets.Discover(root, m.RelPath)
+	if err != nil || len(assets) == 0 {
+		return nil
+	}
+	cases := make([]*store.TestCase, 0, len(assets))
+	for _, a := range assets {
+		tags := "[]"
+		if b, err := json.Marshal(a.Tags); err == nil {
+			tags = string(b)
+		}
+		cases = append(cases, &store.TestCase{
+			Module:    m.RelPath,
+			Kind:      a.Kind,
+			Framework: a.Framework,
+			Class:     a.Class,
+			Method:    a.Method,
+			Path:      a.Path,
+			Tags:      tags,
+		})
+	}
+	return s.store.ReplaceIntelTestCases(ctx, projectID, m.ID, cases)
+}
+
+// persistFeatures clusters the extracted endpoints into candidate feature
+// points and stores them (human rename/merge/split/order comes later).
+func (s *Server) persistFeatures(ctx context.Context, projectID int64, endpoints []*store.IntelEndpoint) error {
+	feats := feature.Cluster(endpoints)
+	if len(feats) == 0 {
+		return nil
+	}
+	storeFeats := make([]*store.IntelFeature, 0, len(feats))
+	for i, f := range feats {
+		ends, _ := json.Marshal(f.Ends)
+		storeFeats = append(storeFeats, &store.IntelFeature{
+			Name:      f.Name,
+			EndsJSON:  string(ends),
+			SortOrder: i,
+			Source:    "auto",
+			Anchor:    f.Anchor,
+			Status:    "active",
+		})
+	}
+	return s.store.ReplaceIntelFeatures(ctx, projectID, storeFeats)
 }
 
 // projectRoot returns the local working directory of a project: local path for

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strconv"
 )
 
 // migrate applies schema migrations to the database.
@@ -95,6 +96,9 @@ var migrations = []migration{
 	{name: "tasks_workflow_index", apply: migrationTasksWorkflowIndex},
 	{name: "intel", apply: migrationIntel},
 	{name: "intel_field_meta", apply: migrationIntelFieldMeta},
+	{name: "intel_test_assets", apply: migrationIntelTestAssets},
+	{name: "intel_features", apply: migrationIntelFeatures},
+	{name: "intel_rag", apply: migrationIntelRag},
 }
 
 // migrationIntel creates the Test Intelligence subsystem tables: flat project
@@ -184,7 +188,7 @@ func migrationIntelFieldMeta(ctx context.Context, driver string, db *sql.DB) err
 // migrationArchivesRawMessages adds the raw_messages column storing an
 // archive's complete structured message JSON (with parts) so archived sessions
 // can be restored byte-for-byte into a new OpenCode session. Older archives
-// have the column empty (''). Kept as its own migration because archives was
+// have the column empty (”). Kept as its own migration because archives was
 // already applied on existing databases.
 func migrationArchivesRawMessages(ctx context.Context, driver string, db *sql.DB) error {
 	if isPostgres(driver) {
@@ -429,7 +433,7 @@ func migrationTasksWorkflowIndex(ctx context.Context, driver string, db *sql.DB)
 }
 
 // migrationRulesSessionID lets a rule fire into a fixed, pre-bound session
-// instead of creating a fresh session per execution. Old rows keep '' (new
+// instead of creating a fresh session per execution. Old rows keep ” (new
 // session per run, previous behavior).
 func migrationRulesSessionID(ctx context.Context, driver string, db *sql.DB) error {
 	_, err := db.ExecContext(ctx, `ALTER TABLE rules ADD COLUMN session_id TEXT NOT NULL DEFAULT ''`)
@@ -496,6 +500,159 @@ func migrationTasks(ctx context.Context, driver string, db *sql.DB) error {
 	}
 	for _, s := range stmts {
 		if _, err := db.ExecContext(ctx, s); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// migrationIntelTestAssets creates the test-execution half of the Test
+// Intelligence subsystem: discovered test cases, test runs and per-case results
+// plus the issue closed-loop table (intel_issues). test_cases are the static
+// assets discovered by the scanner; test_runs/test_results are one execution's
+// dynamic outcome; intel_issues track problems across commits until resolved.
+func migrationIntelTestAssets(ctx context.Context, driver string, db *sql.DB) error {
+	stmts := []string{
+		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS test_cases (
+			%s,
+			project_id INTEGER NOT NULL DEFAULT 0,
+			module_id INTEGER NOT NULL DEFAULT 0,
+			module TEXT NOT NULL DEFAULT '',
+			kind TEXT NOT NULL DEFAULT '',
+			framework TEXT NOT NULL DEFAULT '',
+			class TEXT NOT NULL DEFAULT '',
+			method TEXT NOT NULL DEFAULT '',
+			path TEXT NOT NULL DEFAULT '',
+			tags TEXT NOT NULL DEFAULT '',
+			last_status TEXT NOT NULL DEFAULT '',
+			last_duration_ms INTEGER NOT NULL DEFAULT 0,
+			flaky_count INTEGER NOT NULL DEFAULT 0,
+			last_run_at TIMESTAMP NULL,
+			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+		)`, idColumn(driver)),
+		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS test_runs (
+			%s,
+			project_id INTEGER NOT NULL DEFAULT 0,
+			module_id INTEGER NOT NULL DEFAULT 0,
+			scope TEXT NOT NULL DEFAULT '',
+			kind TEXT NOT NULL DEFAULT '',
+			command TEXT NOT NULL DEFAULT '',
+			status TEXT NOT NULL DEFAULT 'queued',
+			started_at TIMESTAMP NULL,
+			finished_at TIMESTAMP NULL,
+			log_path TEXT NOT NULL DEFAULT '',
+			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+		)`, idColumn(driver)),
+		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS test_results (
+			%s,
+			run_id INTEGER NOT NULL DEFAULT 0,
+			project_id INTEGER NOT NULL DEFAULT 0,
+			module_id INTEGER NOT NULL DEFAULT 0,
+			case_id INTEGER NOT NULL DEFAULT 0,
+			kind TEXT NOT NULL DEFAULT '',
+			endpoint TEXT NOT NULL DEFAULT '',
+			passed BOOLEAN NOT NULL DEFAULT FALSE,
+			failures_json TEXT NOT NULL DEFAULT '',
+			rootcause_json TEXT NOT NULL DEFAULT '',
+			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+		)`, idColumn(driver)),
+		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS intel_issues (
+			%s,
+			project_id INTEGER NOT NULL DEFAULT 0,
+			module_id INTEGER NOT NULL DEFAULT 0,
+			feature_id INTEGER NOT NULL DEFAULT 0,
+			key TEXT NOT NULL DEFAULT '',
+			kind TEXT NOT NULL DEFAULT 'bug',
+			severity TEXT NOT NULL DEFAULT 'medium',
+			location TEXT NOT NULL DEFAULT '',
+			commit_seen TEXT NOT NULL DEFAULT '',
+			commit_fixed TEXT NOT NULL DEFAULT '',
+			status TEXT NOT NULL DEFAULT 'open',
+			resolved_at TIMESTAMP NULL,
+			last_check_at TIMESTAMP NULL,
+			detail_json TEXT NOT NULL DEFAULT '',
+			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+		)`, idColumn(driver)),
+		`CREATE INDEX IF NOT EXISTS idx_test_cases_project ON test_cases(project_id, module_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_test_runs_project ON test_runs(project_id, status)`,
+		`CREATE INDEX IF NOT EXISTS idx_test_results_run ON test_results(run_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_intel_issues_project ON intel_issues(project_id, status)`,
+	}
+	for _, s := range stmts {
+		if _, err := db.ExecContext(ctx, s); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// migrationIntelFeatures creates the feature-point table: business feature units
+// that cluster endpoints, host feature-level tests, attach integration bugs and
+// carry the AI-chat context. sort_order is human-priority (drag reorder), never
+// overwritten by re-scans.
+func migrationIntelFeatures(ctx context.Context, driver string, db *sql.DB) error {
+	stmts := []string{
+		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS intel_features (
+			%s,
+			project_id INTEGER NOT NULL DEFAULT 0,
+			name TEXT NOT NULL DEFAULT '',
+			summary TEXT NOT NULL DEFAULT '',
+			ends_json TEXT NOT NULL DEFAULT '',
+			sort_order INTEGER NOT NULL DEFAULT 0,
+			source TEXT NOT NULL DEFAULT 'auto',
+			anchor TEXT NOT NULL DEFAULT '',
+			status TEXT NOT NULL DEFAULT 'active',
+			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+		)`, idColumn(driver)),
+		`CREATE INDEX IF NOT EXISTS idx_intel_features_project ON intel_features(project_id, sort_order)`,
+	}
+	for _, s := range stmts {
+		if _, err := db.ExecContext(ctx, s); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// migrationIntelRag creates the project knowledge-base vector store: one
+// intel_chunks table holding embedded fragments of a project's code/contracts,
+// indexed by pgvector for cosine retrieval. On PostgreSQL it installs the
+// vector extension and an HNSW index; on SQLite the embedding column degrades
+// to a JSON-text blob and retrieval falls back to in-process cosine.
+func migrationIntelRag(ctx context.Context, driver string, db *sql.DB) error {
+	embedCol := `embedding TEXT NOT NULL DEFAULT ''`
+	if isPostgres(driver) {
+		if _, err := db.ExecContext(ctx, `CREATE EXTENSION IF NOT EXISTS vector`); err != nil {
+			return err
+		}
+		embedCol = `embedding vector(` + strconv.Itoa(EmbedDim) + `) NOT NULL`
+	}
+	stmts := []string{
+		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS intel_chunks (
+			%s,
+			project_id INTEGER NOT NULL DEFAULT 0,
+			module_id INTEGER NOT NULL DEFAULT 0,
+			kind TEXT NOT NULL DEFAULT '',
+			ref_id INTEGER NOT NULL DEFAULT 0,
+			title TEXT NOT NULL DEFAULT '',
+			content TEXT NOT NULL DEFAULT '',
+			source_file TEXT NOT NULL DEFAULT '',
+			source_line INTEGER NOT NULL DEFAULT 0,
+			%s,
+			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+		)`, idColumn(driver), embedCol),
+		`CREATE INDEX IF NOT EXISTS idx_intel_chunks_project ON intel_chunks(project_id, module_id)`,
+	}
+	for _, s := range stmts {
+		if _, err := db.ExecContext(ctx, s); err != nil {
+			return err
+		}
+	}
+	if isPostgres(driver) {
+		if _, err := db.ExecContext(ctx, fmt.Sprintf(
+			`CREATE INDEX IF NOT EXISTS idx_intel_chunks_embedding
+			 ON intel_chunks USING hnsw (embedding vector_cosine_ops)`)); err != nil {
 			return err
 		}
 	}
