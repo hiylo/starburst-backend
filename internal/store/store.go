@@ -344,6 +344,10 @@ type Store interface {
 	ReplaceIntelImpact(ctx context.Context, projectID int64, imp *IntelImpact) error
 	// GetIntelImpact returns the project's latest impact snapshot.
 	GetIntelImpact(ctx context.Context, projectID int64) (*IntelImpact, error)
+	// ReplaceIntelOverview replaces the project's dependency/env/SBOM overview.
+	ReplaceIntelOverview(ctx context.Context, projectID int64, ov *IntelOverview) error
+	// GetIntelOverview returns the project's latest overview snapshot.
+	GetIntelOverview(ctx context.Context, projectID int64) (*IntelOverview, error)
 }
 
 // Open opens a store for the given driver/dsn. It applies all migrations

@@ -105,6 +105,7 @@ var migrations = []migration{
 	{name: "intel_gateway_routes", apply: migrationIntelGatewayRoutes},
 	{name: "intel_endpoint_summary", apply: migrationIntelEndpointSummary},
 	{name: "intel_impacts", apply: migrationIntelImpacts},
+	{name: "intel_overviews", apply: migrationIntelOverviews},
 }
 
 // migrationIntel creates the Test Intelligence subsystem tables: flat project
@@ -781,6 +782,29 @@ func migrationIntelImpacts(ctx context.Context, driver string, db *sql.DB) error
 			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 		)`, idColumn(driver)),
 		`CREATE INDEX IF NOT EXISTS idx_intel_impacts_project ON intel_impacts(project_id)`,
+	}
+	for _, s := range stmts {
+		if _, err := db.ExecContext(ctx, s); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// migrationIntelOverviews creates the dependency/environment overview table:
+// one row per project holding the aggregated dependencies, env requirements and
+// CycloneDX SBOM, refreshed on each analyze.
+func migrationIntelOverviews(ctx context.Context, driver string, db *sql.DB) error {
+	stmts := []string{
+		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS intel_overviews (
+			%s,
+			project_id INTEGER NOT NULL DEFAULT 0,
+			deps_json TEXT NOT NULL DEFAULT '',
+			env_json TEXT NOT NULL DEFAULT '',
+			sbom_json TEXT NOT NULL DEFAULT '',
+			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+		)`, idColumn(driver)),
+		`CREATE INDEX IF NOT EXISTS idx_intel_overviews_project ON intel_overviews(project_id)`,
 	}
 	for _, s := range stmts {
 		if _, err := db.ExecContext(ctx, s); err != nil {

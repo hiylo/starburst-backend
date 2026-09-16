@@ -13,9 +13,12 @@ import (
 
 	"github.com/hiylo/starburst-backend/internal/intel"
 	"github.com/hiylo/starburst-backend/internal/intel/delta"
+	"github.com/hiylo/starburst-backend/internal/intel/deps"
 	"github.com/hiylo/starburst-backend/internal/intel/enrich"
+	"github.com/hiylo/starburst-backend/internal/intel/envdetect"
 	"github.com/hiylo/starburst-backend/internal/intel/feature"
 	"github.com/hiylo/starburst-backend/internal/intel/gateway"
+	"github.com/hiylo/starburst-backend/internal/intel/sbom"
 	"github.com/hiylo/starburst-backend/internal/intel/testassets"
 	"github.com/hiylo/starburst-backend/internal/store"
 )
@@ -258,6 +261,33 @@ func (s *Server) handleIntelImpact(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"impact": imp})
 }
 
+// handleIntelOverview returns the project's latest dependency/environment/SBOM
+// overview snapshot.
+func (s *Server) handleIntelOverview(w http.ResponseWriter, r *http.Request) {
+	if !s.requireWeb(r) {
+		if _, ok := s.requireToken(r); !ok {
+			writeErr(w, http.StatusUnauthorized, "web session or APP token required")
+			return
+		}
+	}
+	if r.Method != http.MethodGet {
+		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	projectID, ok := s.intelQueryProject(w, r)
+	if !ok {
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+	ov, err := s.store.GetIntelOverview(ctx, projectID)
+	if err != nil {
+		writeJSON(w, http.StatusOK, map[string]any{"overview": nil})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"overview": ov})
+}
+
 // ---- implementation ----
 
 // intelPathID parses a trailing integer id from a URL path prefix.
@@ -480,6 +510,7 @@ func (s *Server) runIntelAnalyze(ctx context.Context, projectID int64) error {
 		log.Printf("intel gateway routes project %d: %v", projectID, err)
 	}
 	s.enrichIntelWithLLM(ctx, projectID, root)
+	s.persistOverview(ctx, projectID, p, root)
 	sha, err := snapshotSHA(root)
 	if err != nil {
 		sha = ""
@@ -673,6 +704,77 @@ func (s *Server) recordImpact(ctx context.Context, projectID int64, p *store.Int
 	}); err != nil {
 		log.Printf("intel impact project %d: %v", projectID, err)
 	}
+}
+
+// persistOverview aggregates the project's dependency list, environment
+// requirements and CycloneDX SBOM, then stores them as a single overview
+// snapshot for the detail view.
+func (s *Server) persistOverview(ctx context.Context, projectID int64, p *store.IntelProject, root string) {
+	all := collectDependencies(root)
+	reqs, _ := envdetect.Detect(root, "")
+	depsJSON, _ := json.Marshal(all)
+	envJSON, _ := json.Marshal(reqs)
+	sbomJSON, err := sbom.Generate(p.Name, all)
+	if err != nil {
+		sbomJSON = nil
+	}
+	if err := s.store.ReplaceIntelOverview(ctx, projectID, &store.IntelOverview{
+		ProjectID: projectID,
+		DepsJSON:  string(depsJSON),
+		EnvJSON:   string(envJSON),
+		SbomJSON:  string(sbomJSON),
+	}); err != nil {
+		log.Printf("intel overview project %d: %v", projectID, err)
+	}
+}
+
+// collectDependencies walks the repository for dependency manifests and returns
+// a deduplicated dependency list across ecosystems.
+func collectDependencies(root string) []deps.Dependency {
+	seen := make(map[string]bool)
+	out := make([]deps.Dependency, 0)
+	_ = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if d.IsDir() {
+			name := d.Name()
+			if name == ".git" || name == "node_modules" || name == "target" ||
+				name == ".gradle" || name == "build_artifacts" || name == "dist" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		var parsed []deps.Dependency
+		switch d.Name() {
+		case "pom.xml":
+			if data, err := os.ReadFile(path); err == nil {
+				parsed, _ = deps.ParsePom(data)
+			}
+		case "go.mod":
+			if data, err := os.ReadFile(path); err == nil {
+				parsed, _ = deps.ParseGoMod(data)
+			}
+		case "package.json":
+			if data, err := os.ReadFile(path); err == nil {
+				parsed, _ = deps.ParsePackageJSON(data)
+			}
+		case "build.gradle", "build.gradle.kts":
+			if data, err := os.ReadFile(path); err == nil {
+				parsed, _ = deps.ParseGradle(data)
+			}
+		}
+		for _, dep := range parsed {
+			key := dep.Ecosystem + "|" + dep.Group + "|" + dep.Name + "|" + dep.Version
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			out = append(out, dep)
+		}
+		return nil
+	})
+	return out
 }
 
 // projectRoot returns the local working directory of a project: local path for

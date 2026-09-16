@@ -2275,6 +2275,7 @@ document.addEventListener("DOMContentLoaded", () => {
   const tabLoaders = {
     features: loadIntelFeatures, cases: loadIntelCases, findings: loadIntelFindings,
     issues: loadIntelIssues, fixes: loadIntelFixes, runs: loadIntelRuns, impact: loadIntelImpact,
+    overview: loadIntelOverview,
   };
   document.querySelectorAll(".intel-tab").forEach(t => {
     t.addEventListener("click", () => {
@@ -2741,6 +2742,75 @@ async function loadIntelImpact(id) {
   if (!list && !imp.fullRescan) {
     wrap.insertAdjacentHTML("beforeend", `<div class="muted" style="text-align:center;padding:16px">自上次分析以来无变更</div>`);
   }
+}
+
+async function loadIntelOverview(id) {
+  const wrap = document.getElementById("intelOverviewList");
+  wrap.innerHTML = `<div class="muted" style="text-align:center;padding:16px">加载中…</div>`;
+  const res = await api("/api/intel/overview?projectId=" + id, { headers: appHeaders() });
+  const data = await res.json();
+  const raw = data.overview;
+  if (!raw) { wrap.innerHTML = `<div class="muted" style="text-align:center;padding:16px">暂无依赖 / 环境画像（分析后自动生成）</div>`; return; }
+  let envs = [], deps = [];
+  try { envs = JSON.parse(raw.envJson || "[]"); } catch (_) {}
+  try { deps = JSON.parse(raw.depsJson || "[]"); } catch (_) {}
+  wrap.innerHTML = "";
+
+  if (envs.length) {
+    const envRows = envs.map(e => `<div class="row" style="justify-content:space-between;gap:8px">
+      <span class="mono" style="font-size:12.5px">${escapeHtml(e.service)}${e.version ? "@" + escapeHtml(e.version) : ""}</span>
+      <span class="muted" style="font-size:11px">${escapeHtml(e.category || "")} · ${escapeHtml(e.source || "")}</span>
+    </div>`).join("");
+    wrap.insertAdjacentHTML("beforeend", `<div class="card" style="margin:0">
+      <strong style="font-size:13px">环境依赖（${envs.length}）</strong>
+      <div style="margin-top:6px;display:flex;flex-direction:column;gap:4px">${envRows}</div>
+    </div>`);
+  }
+
+  const byEco = new Map();
+  for (const d of deps) {
+    const k = d.ecosystem || "other";
+    if (!byEco.has(k)) byEco.set(k, []);
+    byEco.get(k).push(d);
+  }
+  if (deps.length) {
+    let ecoHtml = "";
+    for (const [eco, list] of byEco) {
+      const rows = list.map(d => `<span class="mono muted" style="font-size:11.5px">${escapeHtml(d.group ? d.group + ":" : "")}${escapeHtml(d.name)}${d.version ? "@" + escapeHtml(d.version) : ""}</span>`).join("、");
+      ecoHtml += `<div style="margin-top:6px"><span class="badge">${escapeHtml(eco)}</span> ${list.length} 项
+        <div style="margin-top:4px;display:flex;flex-wrap:wrap;gap:4px 10px">${rows}</div></div>`;
+    }
+    wrap.insertAdjacentHTML("beforeend", `<div class="card" style="margin:0">
+      <div class="row" style="justify-content:space-between">
+        <strong style="font-size:13px">依赖清单（${deps.length}）</strong>
+        <button class="ghost sm" onclick="downloadIntelSbom()">下载 SBOM</button>
+      </div>${ecoHtml}
+    </div>`);
+  }
+  if (!envs.length && !deps.length) {
+    wrap.insertAdjacentHTML("beforeend", `<div class="muted" style="text-align:center;padding:16px">未检测到依赖或环境信息</div>`);
+  }
+}
+
+let intelSbomCache = "";
+async function downloadIntelSbom() {
+  if (intelSbomCache) { saveTextFile("sbom.json", intelSbomCache); return; }
+  const id = intelCurrentProject;
+  const res = await api("/api/intel/overview?projectId=" + id, { headers: appHeaders() });
+  const data = await res.json();
+  const sbom = data.overview ? data.overview.sbomJson : "";
+  if (!sbom) { show(document.getElementById("intelMsg"), "暂无 SBOM 数据"); return; }
+  intelSbomCache = sbom;
+  saveTextFile("sbom.json", sbom);
+}
+
+function saveTextFile(name, content) {
+  const blob = new Blob([content], { type: "application/json" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = name;
+  a.click();
+  URL.revokeObjectURL(a.href);
 }
 
 // 执行分析（不跳转）；在详情页时分析后原地刷新详情
