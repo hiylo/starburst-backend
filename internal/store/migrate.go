@@ -106,6 +106,7 @@ var migrations = []migration{
 	{name: "intel_endpoint_summary", apply: migrationIntelEndpointSummary},
 	{name: "intel_impacts", apply: migrationIntelImpacts},
 	{name: "intel_overviews", apply: migrationIntelOverviews},
+	{name: "intel_fix_finding", apply: migrationIntelFixFinding},
 }
 
 // migrationIntel creates the Test Intelligence subsystem tables: flat project
@@ -805,6 +806,21 @@ func migrationIntelOverviews(ctx context.Context, driver string, db *sql.DB) err
 			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 		)`, idColumn(driver)),
 		`CREATE INDEX IF NOT EXISTS idx_intel_overviews_project ON intel_overviews(project_id)`,
+	}
+	for _, s := range stmts {
+		if _, err := db.ExecContext(ctx, s); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// migrationIntelFixFinding adds the finding_id column to intel_fixes so a fix
+// suggestion can be generated from a compliance/security finding (which carries
+// a source file:line location) in addition to a test-failure issue.
+func migrationIntelFixFinding(ctx context.Context, driver string, db *sql.DB) error {
+	stmts := []string{
+		`ALTER TABLE intel_fixes ADD COLUMN finding_id INTEGER NOT NULL DEFAULT 0`,
 	}
 	for _, s := range stmts {
 		if _, err := db.ExecContext(ctx, s); err != nil {

@@ -206,6 +206,7 @@ func (s *Server) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/intel/findings", s.handleIntelFindings)
 	mux.HandleFunc("/api/intel/findings/", s.handleIntelFindingWaive)
 	mux.HandleFunc("/api/intel/fixes", s.handleIntelFixes)
+	mux.HandleFunc("/api/intel/fixes/generate", s.handleIntelFixGenerate)
 	mux.HandleFunc("/api/intel/fixes/", s.handleIntelFixAction)
 	mux.HandleFunc("/", s.handleIndex)
 }

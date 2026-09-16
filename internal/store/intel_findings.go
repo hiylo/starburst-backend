@@ -32,6 +32,7 @@ type IntelFix struct {
 	ID            int64      `json:"id"`
 	ProjectID     int64      `json:"projectId"`
 	IssueID       int64      `json:"issueId"`
+	FindingID     int64      `json:"findingId"`
 	Kind          string     `json:"kind"`
 	Title         string     `json:"title"`
 	DiffJSON      string     `json:"diffJson"`
@@ -112,23 +113,36 @@ func (s *sqlStore) UpdateIntelFinding(ctx context.Context, f *IntelFinding) erro
 	return err
 }
 
+// GetIntelFinding loads a single finding by id, or ErrNotFound when absent.
+func (s *sqlStore) GetIntelFinding(ctx context.Context, id int64) (*IntelFinding, error) {
+	row := s.db.QueryRowContext(ctx, s.q(`
+		SELECT id, project_id, module_id, detector, severity, category,
+			cve_or_rule_id, location, summary, status, removed_at, waived_reason, created_at
+		FROM intel_findings WHERE id = ?`), id)
+	f, err := scanIntelFinding(row)
+	if err != nil {
+		return nil, err
+	}
+	return f, nil
+}
+
 // CreateIntelFix persists a new fix suggestion and populates its id.
 func (s *sqlStore) CreateIntelFix(ctx context.Context, f *IntelFix) error {
 	if isPostgres(s.driver) {
 		return s.db.QueryRowContext(ctx, s.q(`
-			INSERT INTO intel_fixes (project_id, issue_id, kind, title, diff_json,
+			INSERT INTO intel_fixes (project_id, issue_id, finding_id, kind, title, diff_json,
 				status, applied_backup, write_mode, applied_at, created_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
 			RETURNING id`),
-			f.ProjectID, f.IssueID, f.Kind, f.Title, f.DiffJSON,
+			f.ProjectID, f.IssueID, f.FindingID, f.Kind, f.Title, f.DiffJSON,
 			f.Status, f.AppliedBackup, f.WriteMode, f.AppliedAt,
 		).Scan(&f.ID)
 	}
 	res, err := s.db.ExecContext(ctx, s.q(`
-		INSERT INTO intel_fixes (project_id, issue_id, kind, title, diff_json,
+		INSERT INTO intel_fixes (project_id, issue_id, finding_id, kind, title, diff_json,
 			status, applied_backup, write_mode, applied_at, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`),
-		f.ProjectID, f.IssueID, f.Kind, f.Title, f.DiffJSON,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`),
+		f.ProjectID, f.IssueID, f.FindingID, f.Kind, f.Title, f.DiffJSON,
 		f.Status, f.AppliedBackup, f.WriteMode, f.AppliedAt,
 	)
 	if err != nil {
@@ -145,7 +159,7 @@ func (s *sqlStore) CreateIntelFix(ctx context.Context, f *IntelFix) error {
 // GetIntelFix loads a single fix suggestion.
 func (s *sqlStore) GetIntelFix(ctx context.Context, id int64) (*IntelFix, error) {
 	row := s.db.QueryRowContext(ctx, s.q(`
-		SELECT id, project_id, issue_id, kind, title, diff_json, status,
+		SELECT id, project_id, issue_id, finding_id, kind, title, diff_json, status,
 			applied_backup, write_mode, applied_at, created_at
 		FROM intel_fixes WHERE id = ?`), id)
 	f, err := scanIntelFix(row)
@@ -158,7 +172,7 @@ func (s *sqlStore) GetIntelFix(ctx context.Context, id int64) (*IntelFix, error)
 // ListIntelFixes returns fix suggestions for a project, optionally filtered by
 // status ("" = all).
 func (s *sqlStore) ListIntelFixes(ctx context.Context, projectID int64, status string) ([]*IntelFix, error) {
-	query := `SELECT id, project_id, issue_id, kind, title, diff_json, status,
+	query := `SELECT id, project_id, issue_id, finding_id, kind, title, diff_json, status,
 		applied_backup, write_mode, applied_at, created_at
 		FROM intel_fixes WHERE project_id = ?`
 	args := []any{projectID}
@@ -206,7 +220,7 @@ func scanIntelFinding(row rowScanner) (*IntelFinding, error) {
 func scanIntelFix(row rowScanner) (*IntelFix, error) {
 	f := &IntelFix{}
 	var applied *time.Time
-	err := row.Scan(&f.ID, &f.ProjectID, &f.IssueID, &f.Kind, &f.Title, &f.DiffJSON,
+	err := row.Scan(&f.ID, &f.ProjectID, &f.IssueID, &f.FindingID, &f.Kind, &f.Title, &f.DiffJSON,
 		&f.Status, &f.AppliedBackup, &f.WriteMode, &applied, &f.CreatedAt)
 	if err != nil {
 		return nil, err

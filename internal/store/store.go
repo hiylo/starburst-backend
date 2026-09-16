@@ -324,6 +324,8 @@ type Store interface {
 	CreateIntelFinding(ctx context.Context, f *IntelFinding) error
 	// ListIntelFindings returns findings for a project, filtered by status/detector.
 	ListIntelFindings(ctx context.Context, projectID int64, status, detector string) ([]*IntelFinding, error)
+	// GetIntelFinding loads a single finding by id.
+	GetIntelFinding(ctx context.Context, id int64) (*IntelFinding, error)
 	// UpdateIntelFinding persists mutable finding fields.
 	UpdateIntelFinding(ctx context.Context, f *IntelFinding) error
 	// CreateIntelFix persists a new fix suggestion.

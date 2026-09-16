@@ -2624,9 +2624,22 @@ async function loadIntelFindings(id) {
         <span class="intel-status ${f.status === "open" ? "analyzed" : ""}">${escapeHtml(f.status || "open")}</span>
       </div>
       <div style="margin-top:6px">${escapeHtml(f.summary || "")}</div>
-      <div class="muted mono" style="font-size:11px;margin-top:4px">${escapeHtml(f.location || "")}</div>
+      <div class="row" style="justify-content:space-between;margin-top:4px">
+        <span class="muted mono" style="font-size:11px">${escapeHtml(f.location || "")}</span>
+        <button class="ghost sm" onclick="generateIntelFix(${f.id})">生成修复</button>
+      </div>
     </div>`);
   }
+}
+
+async function generateIntelFix(findingId) {
+  const id = intelCurrentProject;
+  const res = await api("/api/intel/fixes/generate", { method: "POST", headers: appHeaders(), body: JSON.stringify({ projectId: id, findingId }) });
+  const data = await res.json();
+  if (!res.ok) { show(document.getElementById("intelMsg"), data.error || "生成失败"); return; }
+  show(document.getElementById("intelMsg"), "已生成修复建议，见「修复建议」Tab");
+  document.getElementById("intelMsg").classList.add("ok");
+  loadIntelFixes(id);
 }
 
 async function loadIntelIssues(id) {
@@ -2655,11 +2668,13 @@ async function loadIntelFixes(id) {
   wrap.innerHTML = "";
   if (!fixes.length) { wrap.innerHTML = `<div class="muted" style="text-align:center;padding:16px">暂无修复建议</div>`; return; }
   for (const fx of fixes) {
+    const diff = fx.diffJson || "";
     wrap.insertAdjacentHTML("beforeend", `<div class="card" style="margin:0">
       <div class="row" style="justify-content:space-between">
         <strong>${escapeHtml(fx.title || fx.kind || "-")}</strong>
         <span class="intel-status ${fx.status === "applied" ? "analyzed" : ""}">${escapeHtml(fx.status || "pending")}</span>
       </div>
+      ${diff ? `<pre class="mono" style="font-size:11px;max-height:180px;overflow:auto;background:var(--surface-2);border:1px solid var(--hairline);border-radius:var(--r-sm);padding:8px;margin:8px 0 0">${escapeHtml(diff)}</pre>` : ""}
       <div class="row" style="gap:6px;margin-top:6px">
         <button class="ghost sm" onclick="applyIntelFix(${fx.id}, 'apply')">应用</button>
         <button class="tertiary sm" onclick="applyIntelFix(${fx.id}, 'reject')">拒绝</button>

@@ -336,3 +336,23 @@ func jsonInt(n int64) string {
 func stringsContains(s, sub string) bool {
 	return strings.Contains(s, sub)
 }
+
+func TestSplitLocation(t *testing.T) {
+	cases := []struct {
+		in   string
+		file string
+		line int
+	}{
+		{"activity-provider/src/main/java/A.java:68", "activity-provider/src/main/java/A.java", 68},
+		{"A.java:3", "A.java", 3},
+		{"A.java", "A.java", 0},
+		{"", "", 0},
+		{"path/A.java:x", "path/A.java:x", 0},
+	}
+	for _, c := range cases {
+		f, l := splitLocation(c.in)
+		if f != c.file || l != c.line {
+			t.Errorf("splitLocation(%q) = (%q,%d), want (%q,%d)", c.in, f, l, c.file, c.line)
+		}
+	}
+}

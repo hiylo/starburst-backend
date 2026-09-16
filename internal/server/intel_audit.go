@@ -5,11 +5,14 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/hiylo/starburst-backend/internal/intel/compliance"
+	"github.com/hiylo/starburst-backend/internal/intel/fix"
 	"github.com/hiylo/starburst-backend/internal/intel/security"
 	"github.com/hiylo/starburst-backend/internal/store"
 )
@@ -161,6 +164,141 @@ func (s *Server) handleIntelFixAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "status": fix.Status})
+}
+
+// handleIntelFixGenerate asks the orchestration LLM to propose a minimal code
+// fix for a finding, renders it as a unified diff (via the fix package) and
+// persists an ai-suggest fix for human review.
+func (s *Server) handleIntelFixGenerate(w http.ResponseWriter, r *http.Request) {
+	if !s.requireWeb(r) {
+		if _, ok := s.requireToken(r); !ok {
+			writeErr(w, http.StatusUnauthorized, "web session or APP token required")
+			return
+		}
+	}
+	if r.Method != http.MethodPost {
+		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	var req struct {
+		ProjectID int64 `json:"projectId"`
+		FindingID int64 `json:"findingId"`
+	}
+	if err := readJSONLimited(w, r, &req); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if req.ProjectID <= 0 || req.FindingID <= 0 {
+		writeErr(w, http.StatusBadRequest, "projectId and findingId are required")
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Minute)
+	defer cancel()
+	created, err := s.generateFixForFinding(ctx, req.ProjectID, req.FindingID)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "generate fix failed: "+err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"fix": created})
+}
+
+// generateFixForFinding loads the finding, reads the referenced source file,
+// asks the LLM for a minimal edit and renders a diff draft. It validates that
+// the model's oldText matches the file exactly once before storing.
+func (s *Server) generateFixForFinding(ctx context.Context, projectID, findingID int64) (*store.IntelFix, error) {
+	if s.llm == nil || !s.llm.Enabled() {
+		return nil, fmt.Errorf("orchestration LLM is not configured")
+	}
+	finding, err := s.store.GetIntelFinding(ctx, findingID)
+	if err != nil {
+		return nil, fmt.Errorf("finding %d: %w", findingID, err)
+	}
+	relFile, line := splitLocation(finding.Location)
+	if relFile == "" {
+		return nil, fmt.Errorf("finding has no file location")
+	}
+	p, err := s.store.GetIntelProject(ctx, projectID)
+	if err != nil {
+		return nil, err
+	}
+	root, err := s.projectRoot(ctx, p)
+	if err != nil {
+		return nil, err
+	}
+	abs := filepath.Join(root, filepath.FromSlash(relFile))
+	data, err := os.ReadFile(abs)
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", relFile, err)
+	}
+	content := string(data)
+	if len(content) > 100*1024 {
+		content = content[:100*1024]
+	}
+
+	var proposal struct {
+		Title   string `json:"title"`
+		OldText string `json:"oldText"`
+		NewText string `json:"newText"`
+	}
+	system := "你是代码修复助手。根据告警信息和源文件片段，提出一个最小、精确的修复。" +
+		"只输出 JSON：{\"title\":\"...\",\"oldText\":\"...\",\"newText\":\"...\"}。" +
+		"oldText 必须逐字来自源文件（唯一出现），newText 是替换后的内容。"
+	user := fmt.Sprintf("告警：%s\n位置：%s:%d\n\n源文件 %s 片段：\n%s",
+		finding.Summary, relFile, line, relFile, content)
+	if err := s.llm.CompleteJSON(ctx, system, user, &proposal); err != nil {
+		return nil, err
+	}
+	proposal.OldText = strings.TrimSpace(proposal.OldText)
+	if proposal.OldText == "" || proposal.OldText == proposal.NewText {
+		return nil, fmt.Errorf("model returned no usable edit")
+	}
+	if n := strings.Count(content, proposal.OldText); n != 1 {
+		return nil, fmt.Errorf("model oldText is not a unique match (%d occurrences)", n)
+	}
+
+	diff, err := fix.GeneratePatch(map[string]string{relFile: content}, []*fix.Suggestion{{
+		File:    relFile,
+		OldText: proposal.OldText,
+		NewText: proposal.NewText,
+		Line:    line,
+	}})
+	if err != nil {
+		return nil, err
+	}
+	title := strings.TrimSpace(proposal.Title)
+	if title == "" {
+		title = finding.Summary
+	}
+	stored := &store.IntelFix{
+		ProjectID: projectID,
+		FindingID: findingID,
+		Kind:      "ai-suggest",
+		Title:     title,
+		DiffJSON:  diff,
+		Status:    "proposed",
+	}
+	if err := s.store.CreateIntelFix(ctx, stored); err != nil {
+		return nil, err
+	}
+	return stored, nil
+}
+
+// splitLocation parses a "path/file:line" location into its file and line
+// parts. A location without a line yields line 0.
+func splitLocation(loc string) (string, int) {
+	loc = strings.TrimSpace(loc)
+	if loc == "" {
+		return "", 0
+	}
+	idx := strings.LastIndex(loc, ":")
+	if idx < 0 {
+		return loc, 0
+	}
+	line, err := strconv.Atoi(loc[idx+1:])
+	if err != nil {
+		return loc, 0
+	}
+	return loc[:idx], line
 }
 
 // runIntelComplianceScan runs the deterministic compliance rules over the
