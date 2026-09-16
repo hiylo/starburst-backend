@@ -422,64 +422,81 @@
 
       <!-- 智能测试 —— 项目详情（独立页面） -->
       <div id="page-intel-detail" class="page">
-        <div class="card">
-          <div class="row" style="justify-content:space-between">
-            <div class="row">
-              <button class="ghost" onclick="backToIntelList()">← 返回</button>
-              <h2><span class="dot"></span><span id="intelDetailName" class="mono" style="font-size:16px"></span></h2>
-            </div>
-            <div class="row">
-              <button onclick="runIntelAnalyze()">执行分析</button>
-              <span id="intelAnalyzeStatus" class="muted" style="font-size:12px"></span>
-            </div>
-          </div>
-          <div class="row muted" style="font-size:12px" id="intelDetailMeta"></div>
-
-          <!-- 概览统计 -->
-          <div class="stat-grid" style="margin-top:var(--sp-md)">
-            <div class="stat"><div class="k">子项目</div><div class="v" id="intelDetailStatModules">0</div></div>
-            <div class="stat primary"><div class="k">接口契约</div><div class="v" id="intelDetailStatEndpoints">0</div></div>
-            <div class="stat"><div class="k">实体 / 表</div><div class="v" id="intelDetailStatTables">0</div></div>
-            <div class="stat"><div class="k">字段 / 列</div><div class="v" id="intelDetailStatColumns">0</div></div>
-          </div>
-
-          <div class="intel-tabs">
-            <button class="intel-tab active" data-tab="modules">子项目</button>
-            <button class="intel-tab" data-tab="endpoints">接口契约</button>
-            <button class="intel-tab" data-tab="entities">实体 / 表 / 列</button>
-            <button class="intel-tab" data-tab="rag">知识库 / 提问</button>
-          </div>
-
-          <div class="intel-panel" id="intelPanel-modules">
-            <div class="table-wrap">
-              <table id="intelModuleTable"><thead><tr><th>路径</th><th>类型</th><th>角色</th><th>构建工具</th></tr></thead><tbody></tbody></table>
-            </div>
-          </div>
-          <div class="intel-panel hidden" id="intelPanel-endpoints">
-            <div class="table-wrap">
-              <table id="intelEndpointTable"><thead><tr><th>方法</th><th>路径</th><th>返回类型</th><th>请求体</th><th>来源</th></tr></thead><tbody></tbody></table>
-            </div>
-          </div>
-          <div class="intel-panel hidden" id="intelPanel-entities">
-            <div id="intelEntityList" style="display:flex;flex-direction:column;gap:var(--sp-sm)"></div>
-          </div>
-          <div class="intel-panel hidden" id="intelPanel-rag">
-            <div class="row" style="align-items:flex-end;gap:var(--sp-sm);margin-bottom:var(--sp-sm)">
-              <div style="flex:1">
-                <label style="margin-top:0">对项目提问（基于已索引的知识库）</label>
-                <input type="text" id="ragQuestion" placeholder="例如：这个项目的用户表有哪些字段？登录接口的请求参数是什么？">
+        <div class="intel-detail-layout">
+          <div class="intel-detail-main">
+            <div class="card">
+              <div class="row" style="justify-content:space-between">
+                <div class="row">
+                  <button class="ghost" onclick="backToIntelList()">← 返回</button>
+                  <h2><span class="dot"></span><span id="intelDetailName" class="mono" style="font-size:16px"></span></h2>
+                </div>
+                <div class="row">
+                  <button onclick="runIntelAnalyze()">执行分析</button>
+                  <span id="intelAnalyzeStatus" class="muted" style="font-size:12px"></span>
+                </div>
               </div>
-              <button id="ragAskBtn" onclick="askIntel()">提问</button>
+              <div class="row muted" style="font-size:12px" id="intelDetailMeta"></div>
+
+              <!-- 概览统计 -->
+              <div class="stat-grid" style="margin-top:var(--sp-md)">
+                <div class="stat"><div class="k">子模块</div><div class="v" id="intelDetailStatModules">0</div></div>
+                <div class="stat primary"><div class="k">接口契约</div><div class="v" id="intelDetailStatEndpoints">0</div></div>
+                <div class="stat"><div class="k">实体 / 表</div><div class="v" id="intelDetailStatTables">0</div></div>
+                <div class="stat"><div class="k">字段 / 列</div><div class="v" id="intelDetailStatColumns">0</div></div>
+              </div>
+
+              <div class="intel-tabs">
+                <button class="intel-tab active" data-tab="modules">子模块</button>
+                <button class="intel-tab" data-tab="endpoints">接口契约</button>
+                <button class="intel-tab" data-tab="entities">实体 / 表 / 列</button>
+              </div>
+
+              <div class="intel-panel" id="intelPanel-modules">
+                <div class="table-wrap">
+                  <table id="intelModuleTable"><thead><tr><th>路径</th><th>类型</th><th>角色</th><th>构建工具</th></tr></thead><tbody></tbody></table>
+                </div>
+              </div>
+              <div class="intel-panel hidden" id="intelPanel-endpoints">
+                <div class="table-wrap">
+                  <table id="intelEndpointTable"><thead><tr><th>方法</th><th>路径</th><th>返回类型</th><th>请求体</th><th>来源</th></tr></thead><tbody></tbody></table>
+                </div>
+              </div>
+              <div class="intel-panel hidden" id="intelPanel-entities">
+                <div id="intelEntityList" style="display:flex;flex-direction:column;gap:var(--sp-sm)"></div>
+              </div>
             </div>
-            <div class="row" style="gap:var(--sp-sm);margin-bottom:var(--sp-sm)">
-              <button class="ghost" id="ragIndexBtn" onclick="runIntelIndex()">建立 / 重建索引</button>
-              <span id="ragIndexStatus" class="muted" style="font-size:12px"></span>
-            </div>
-            <div id="ragMsg" class="msg"></div>
-            <div id="ragAnswer" style="display:none;margin-top:var(--sp-sm)">
-              <div class="card" style="margin:0"><div class="muted" style="font-size:12px">回答</div><div id="ragAnswerText" style="white-space:pre-wrap"></div></div>
-              <div class="muted" style="font-size:12px;margin-top:var(--sp-sm)">引用来源</div>
-              <div id="ragSources" style="display:flex;flex-direction:column;gap:var(--sp-xs)"></div>
+          </div>
+
+          <!-- 知识库对话（项目级多轮，左侧会话列表可收起） -->
+          <div class="intel-detail-rag">
+            <div class="card">
+              <div class="rag-section">
+                <div class="rag-sidebar collapsed" id="ragSidebar">
+                  <div class="rag-sidebar-head">对话
+                    <button class="ghost sm" onclick="newIntelChat()">＋ 新建</button>
+                  </div>
+                  <div class="rag-chat-list" id="ragChatList">
+                    <div class="muted" style="text-align:center;padding:12px;font-size:12px">暂无对话</div>
+                  </div>
+                </div>
+                <div class="rag-main">
+                  <div class="rag-main-head">
+                    <button class="ghost sm" id="ragToggleBtn" onclick="toggleRagSidebar()" title="收起 / 展开会话列表">☰</button>
+                    <span class="rag-title" id="ragCurrentTitle">新对话</span>
+                    <button class="ghost sm" id="ragDelBtn" onclick="deleteIntelChat()" disabled>删除</button>
+                    <span style="margin-left:auto"></span>
+                    <button class="ghost sm" id="ragIndexBtn" onclick="runIntelIndex()">重建索引</button>
+                  </div>
+                  <div id="ragMessages" class="rag-msgs">
+                    <div class="muted" style="text-align:center;padding:16px;font-size:12px">向知识库提问，支持连续追问（记住上下文）</div>
+                  </div>
+                  <div id="ragMsg" class="msg" style="margin:0 10px"></div>
+                  <div class="rag-inputbar">
+                    <input type="text" id="ragQuestion" placeholder="例如：这个项目的用户表有哪些字段？" onkeydown="if(event.key==='Enter')askIntel()">
+                    <button id="ragAskBtn" onclick="askIntel()">发送</button>
+                  </div>
+                </div>
+              </div>
             </div>
           </div>
         </div>

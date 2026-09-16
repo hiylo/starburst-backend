@@ -92,7 +92,10 @@ function switchPage(name) {
   document.getElementById("pageTitle").textContent = TITLES[name] || name;
   // 工作台大屏布局：内容区整宽并纵向撑满，消除右侧/底部空余。
   const content = document.querySelector(".content");
-  if (content) content.classList.toggle("wb-tight", name === "workbench");
+  if (content) {
+    content.classList.toggle("wb-tight", name === "workbench");
+    content.classList.toggle("full", name === "intel");
+  }
   // 每个页面切到时自动加载数据，避免打开就是空的、还得手动点"刷新"。
   if (name === "workbench") { loadWorkbench(); loadWbEvents(); renderWbFilters(); ensureWbProviders(); }
   else if (name === "tasks") { loadTasks(); loadTaskStats(); }
@@ -2360,6 +2363,8 @@ function showPageIntelDetail() {
   document.getElementById("page-intel-detail").classList.remove("hidden");
   document.getElementById("pageTitle").textContent = "智能测试 · 项目详情";
   document.querySelectorAll("#nav button").forEach(b => b.classList.remove("active"));
+  const content = document.querySelector(".content");
+  if (content) { content.classList.remove("wb-tight"); content.classList.add("full"); }
 }
 
 // 返回列表页
@@ -2389,9 +2394,10 @@ async function loadIntelDetail(id) {
       <td>${escapeHtml(m.buildTool || "-")}</td>
     </tr>`);
   }
-  if (!(data.modules || []).length) mtb.insertAdjacentHTML("beforeend", `<tr><td colspan="4" class="muted" style="text-align:center;padding:16px">暂无子项目（分析后自动识别）</td></tr>`);
+  if (!(data.modules || []).length) mtb.insertAdjacentHTML("beforeend", `<tr><td colspan="4" class="muted" style="text-align:center;padding:16px">暂无子模块（分析后自动识别）</td></tr>`);
   document.getElementById("intelDetailStatModules").textContent = (data.modules || []).length;
   await loadIntelContracts(id);
+  initIntelChats();
 }
 
 async function loadIntelContracts(id) {
@@ -2497,42 +2503,131 @@ async function runIntelIndex() {
   const id = intelCurrentProject;
   if (!id) return;
   const btn = document.getElementById("ragIndexBtn");
-  const st = document.getElementById("ragIndexStatus");
-  btn.disabled = true; st.textContent = "索引中…";
+  btn.disabled = true; btn.textContent = "索引中…";
   const res = await api("/api/intel/index", { method: "POST", headers: appHeaders(), body: JSON.stringify({ projectId: id }) });
   const data = await res.json();
-  btn.disabled = false;
-  if (!res.ok) { st.textContent = ""; show(document.getElementById("ragMsg"), data.error || "索引失败"); return; }
-  st.textContent = "已索引 " + (data.chunks || 0) + " 条";
+  btn.disabled = false; btn.textContent = "重建索引";
+  if (!res.ok) { show(document.getElementById("ragMsg"), data.error || "索引失败"); return; }
   show(document.getElementById("ragMsg"), "索引完成，共 " + (data.chunks || 0) + " 条", true);
 }
 
-// 对项目提问：向量检索 + LLM 生成回答
+/* ---------- 知识库对话（项目级多轮，左侧会话列表可收起） ---------- */
+let intelCurrentChat = 0;
+let ragChatsCache = [];
+
+function toggleRagSidebar() {
+  const sb = document.getElementById("ragSidebar");
+  sb.classList.toggle("collapsed");
+}
+
+async function initIntelChats() {
+  const id = intelCurrentProject;
+  if (!id) return;
+  intelCurrentChat = 0;
+  await loadRagChatList(0);
+  document.getElementById("ragDelBtn").disabled = true;
+  document.getElementById("ragCurrentTitle").textContent = "新对话";
+  document.getElementById("ragMessages").innerHTML =
+    `<div class="muted" style="text-align:center;padding:16px">向知识库提问，支持连续追问（记住上下文）</div>`;
+}
+
+async function loadRagChatList(activeId) {
+  const id = intelCurrentProject;
+  const res = await api("/api/intel/chats?projectId=" + id, { headers: appHeaders() });
+  const data = await res.json();
+  ragChatsCache = data.chats || [];
+  const list = document.getElementById("ragChatList");
+  list.innerHTML = "";
+  if (!ragChatsCache.length) {
+    list.innerHTML = `<div class="muted" style="text-align:center;padding:12px;font-size:12px">暂无对话</div>`;
+    return;
+  }
+  for (const c of ragChatsCache) {
+    list.insertAdjacentHTML("beforeend",
+      `<button class="rag-chat-item${c.id === activeId ? " active" : ""}" data-id="${c.id}" onclick="selectIntelChat(${c.id})">${escapeHtml(c.title || ("对话 " + c.id))}</button>`);
+  }
+}
+
+function ragChatTitle(chatId) {
+  const c = ragChatsCache.find(x => x.id === chatId);
+  return c ? (c.title || ("对话 " + c.id)) : "新对话";
+}
+
+function newIntelChat() {
+  intelCurrentChat = 0;
+  document.getElementById("ragDelBtn").disabled = true;
+  document.getElementById("ragCurrentTitle").textContent = "新对话";
+  document.getElementById("ragMessages").innerHTML =
+    `<div class="muted" style="text-align:center;padding:16px">新对话，开始提问吧</div>`;
+  document.querySelectorAll(".rag-chat-item").forEach(el => el.classList.remove("active"));
+}
+
+async function selectIntelChat(chatId) {
+  intelCurrentChat = chatId;
+  document.getElementById("ragDelBtn").disabled = false;
+  document.getElementById("ragCurrentTitle").textContent = ragChatTitle(chatId);
+  document.querySelectorAll(".rag-chat-item").forEach(el => el.classList.toggle("active", Number(el.dataset.id) === chatId));
+  const res = await api("/api/intel/chats/" + chatId, { headers: appHeaders() });
+  const data = await res.json();
+  if (!res.ok) { show(document.getElementById("ragMsg"), data.error || "加载失败"); return; }
+  renderRagMessages(data.messages || []);
+}
+
+async function deleteIntelChat() {
+  const chatId = intelCurrentChat;
+  if (!chatId) return;
+  const res = await api("/api/intel/chats/" + chatId, { method: "DELETE", headers: appHeaders() });
+  if (!res.ok) { show(document.getElementById("ragMsg"), "删除失败"); return; }
+  await initIntelChats();
+}
+
+function renderRagMessages(msgs) {
+  const wrap = document.getElementById("ragMessages");
+  wrap.innerHTML = "";
+  for (const m of msgs) {
+    appendRagBubble(m.role, m.content, m.sourcesJson ? safeParseJSON(m.sourcesJson) : null);
+  }
+  wrap.scrollTop = wrap.scrollHeight;
+}
+
+function appendRagBubble(role, content, sources) {
+  const wrap = document.getElementById("ragMessages");
+  const isUser = role === "user";
+  let sourcesHtml = "";
+  if (!isUser && sources && sources.length) {
+    sourcesHtml = `<div class="rag-sources">引用：` +
+      sources.map(s => escapeHtml(shortProv(s.sourceFile, s.sourceLine))).join("、") + `</div>`;
+  }
+  const label = isUser ? "你" : "AI 助手";
+  wrap.insertAdjacentHTML("beforeend",
+    `<div class="rag-msg ${isUser ? "user" : "assistant"}"><div class="rag-msg-label">${label}</div><div class="rag-bubble">${escapeHtml(content)}${sourcesHtml}</div></div>`);
+  wrap.scrollTop = wrap.scrollHeight;
+}
+
+// 对项目提问：向量检索 + LLM 生成回答（多轮，携带 chatId）
 async function askIntel() {
   const id = intelCurrentProject;
   const q = document.getElementById("ragQuestion").value.trim();
   if (!id || !q) { show(document.getElementById("ragMsg"), "请输入问题"); return; }
   const btn = document.getElementById("ragAskBtn");
   btn.disabled = true;
-  const res = await api("/api/intel/ask", { method: "POST", headers: appHeaders(), body: JSON.stringify({ projectId: id, question: q }) });
+  document.getElementById("ragQuestion").value = "";
+  appendRagBubble("user", q, null);
+  const res = await api("/api/intel/ask", { method: "POST", headers: appHeaders(), body: JSON.stringify({ projectId: id, question: q, chatId: intelCurrentChat }) });
   const data = await res.json();
   btn.disabled = false;
   if (!res.ok) { show(document.getElementById("ragMsg"), data.error || "提问失败"); return; }
-  const answerEl = document.getElementById("ragAnswer");
-  answerEl.style.display = "block";
-  document.getElementById("ragAnswerText").textContent = data.answer || "（未配置大模型，仅返回检索到的上下文）";
-  const src = document.getElementById("ragSources");
-  src.innerHTML = "";
-  for (const s of data.sources || []) {
-    src.insertAdjacentHTML("beforeend", `<div class="card" style="margin:0">
-      <div class="row" style="justify-content:space-between">
-        <strong class="mono">${escapeHtml(s.title)}</strong>
-        <span class="muted" style="font-size:12px">${escapeHtml(shortProv(s.sourceFile, s.sourceLine))} · ${(s.similarity || 0).toFixed(3)}</span>
-      </div>
-      <div class="muted" style="font-size:12px;white-space:pre-wrap">${escapeHtml(s.content)}</div>
-    </div>`);
+  appendRagBubble("assistant", data.answer || "（未配置大模型，仅返回检索到的上下文）", data.sources || []);
+  // 新会话：刷新列表并选中
+  if (intelCurrentChat === 0 && data.chatId) {
+    intelCurrentChat = data.chatId;
+    document.getElementById("ragDelBtn").disabled = false;
+    document.getElementById("ragCurrentTitle").textContent = ragChatTitle(data.chatId);
+    await loadRagChatList(data.chatId);
   }
 }
+
+function safeParseJSON(s) { try { return JSON.parse(s); } catch (_) { return null; } }
 
 /* ---------- 启动 ---------- */
 document.getElementById("appToken").value = localStorage.getItem(APP_TOKEN_KEY) || "";
