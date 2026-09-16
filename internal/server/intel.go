@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/hiylo/starburst-backend/internal/intel"
+	"github.com/hiylo/starburst-backend/internal/intel/delta"
 	"github.com/hiylo/starburst-backend/internal/intel/enrich"
 	"github.com/hiylo/starburst-backend/internal/intel/feature"
 	"github.com/hiylo/starburst-backend/internal/intel/gateway"
@@ -229,6 +230,32 @@ func (s *Server) handleIntelGatewayRoutes(w http.ResponseWriter, r *http.Request
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"gatewayRoutes": routes})
+}
+
+// handleIntelImpact returns the project's latest incremental-impact snapshot.
+func (s *Server) handleIntelImpact(w http.ResponseWriter, r *http.Request) {
+	if !s.requireWeb(r) {
+		if _, ok := s.requireToken(r); !ok {
+			writeErr(w, http.StatusUnauthorized, "web session or APP token required")
+			return
+		}
+	}
+	if r.Method != http.MethodGet {
+		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	projectID, ok := s.intelQueryProject(w, r)
+	if !ok {
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+	imp, err := s.store.GetIntelImpact(ctx, projectID)
+	if err != nil {
+		writeJSON(w, http.StatusOK, map[string]any{"impact": nil})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"impact": imp})
 }
 
 // ---- implementation ----
@@ -463,6 +490,7 @@ func (s *Server) runIntelAnalyze(ctx context.Context, projectID int64) error {
 	if err := s.runIntelSecurityScan(ctx, projectID, allEntities); err != nil {
 		log.Printf("intel security scan project %d: %v", projectID, err)
 	}
+	s.recordImpact(ctx, projectID, p, root, sha)
 	return s.store.MarkIntelProjectAnalyzed(ctx, projectID, sha)
 }
 
@@ -611,6 +639,39 @@ func (s *Server) storeLLMSuggestedRoutes(ctx context.Context, projectID int64, h
 		if err := s.store.AddIntelGatewayRoutes(ctx, projectID, add); err != nil {
 			log.Printf("intel llm routes project %d: %v", projectID, err)
 		}
+	}
+}
+
+// recordImpact computes and persists the incremental impact between the
+// project's previous snapshot and the current HEAD. It only applies to
+// git-backed projects; a non-ancestor base (force-push/reset) or a missing
+// previous snapshot records a full rescan instead of a diff.
+func (s *Server) recordImpact(ctx context.Context, projectID int64, p *store.IntelProject, root, head string) {
+	if head == "" || p.SnapshotSHA == "" || p.SnapshotSHA == head {
+		return
+	}
+	if _, err := os.Stat(filepath.Join(root, ".git")); err != nil {
+		return
+	}
+	imp := delta.Impact{}
+	if !delta.IsAncestor(root, p.SnapshotSHA, head) {
+		imp.FullRescan = true
+	} else if files, err := delta.DiffFiles(root, p.SnapshotSHA); err == nil {
+		imp = delta.ComputeImpact(files)
+	} else {
+		return
+	}
+	b, err := json.Marshal(imp)
+	if err != nil {
+		return
+	}
+	if err := s.store.ReplaceIntelImpact(ctx, projectID, &store.IntelImpact{
+		ProjectID:  projectID,
+		BaseSHA:    p.SnapshotSHA,
+		HeadSHA:    head,
+		ImpactJSON: string(b),
+	}); err != nil {
+		log.Printf("intel impact project %d: %v", projectID, err)
 	}
 }
 

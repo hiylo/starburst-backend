@@ -195,6 +195,7 @@ func (s *Server) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/intel/entities", s.handleIntelEntities)
 	mux.HandleFunc("/api/intel/modules", s.handleIntelModules)
 	mux.HandleFunc("/api/intel/gateway-routes", s.handleIntelGatewayRoutes)
+	mux.HandleFunc("/api/intel/impact", s.handleIntelImpact)
 	mux.HandleFunc("/api/intel/test-cases", s.handleIntelTestCases)
 	mux.HandleFunc("/api/intel/features", s.handleIntelFeatures)
 	mux.HandleFunc("/api/intel/issues", s.handleIntelIssues)

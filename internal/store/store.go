@@ -340,6 +340,10 @@ type Store interface {
 	AddIntelGatewayRoutes(ctx context.Context, projectID int64, routes []*IntelGatewayRoute) error
 	// ListIntelGatewayRoutes returns the project's gateway routes.
 	ListIntelGatewayRoutes(ctx context.Context, projectID int64) ([]*IntelGatewayRoute, error)
+	// ReplaceIntelImpact replaces the project's impact snapshot (latest only).
+	ReplaceIntelImpact(ctx context.Context, projectID int64, imp *IntelImpact) error
+	// GetIntelImpact returns the project's latest impact snapshot.
+	GetIntelImpact(ctx context.Context, projectID int64) (*IntelImpact, error)
 }
 
 // Open opens a store for the given driver/dsn. It applies all migrations

@@ -2274,7 +2274,7 @@ function toggleIntelSource() {
 document.addEventListener("DOMContentLoaded", () => {
   const tabLoaders = {
     features: loadIntelFeatures, cases: loadIntelCases, findings: loadIntelFindings,
-    issues: loadIntelIssues, fixes: loadIntelFixes, runs: loadIntelRuns,
+    issues: loadIntelIssues, fixes: loadIntelFixes, runs: loadIntelRuns, impact: loadIntelImpact,
   };
   document.querySelectorAll(".intel-tab").forEach(t => {
     t.addEventListener("click", () => {
@@ -2704,6 +2704,43 @@ async function runIntelTests() {
   if (!res.ok) { if (st) st.textContent = ""; show(document.getElementById("intelMsg"), data.error || "运行失败"); return; }
   if (st) st.textContent = "运行完成：" + (data.run ? data.run.status : "");
   loadIntelRuns(id);
+}
+
+async function loadIntelImpact(id) {
+  const wrap = document.getElementById("intelImpactList");
+  wrap.innerHTML = `<div class="muted" style="text-align:center;padding:16px">加载中…</div>`;
+  const res = await api("/api/intel/impact?projectId=" + id, { headers: appHeaders() });
+  const data = await res.json();
+  const raw = data.impact;
+  if (!raw) { wrap.innerHTML = `<div class="muted" style="text-align:center;padding:16px">暂无影响面（git 项目重复分析后自动生成变更影响）</div>`; return; }
+  let imp = {};
+  try { imp = JSON.parse(raw.impactJson || "{}"); } catch (_) {}
+  const base = raw.baseSha ? raw.baseSha.slice(0, 8) : "-";
+  const head = raw.headSha ? raw.headSha.slice(0, 8) : "-";
+  const list = (imp.files || []).length;
+  wrap.innerHTML = "";
+  wrap.insertAdjacentHTML("beforeend", `<div class="row muted" style="font-size:12px;margin-bottom:4px">
+    基线 ${base} → ${head} · ${list} 个变更文件${imp.fullRescan ? " · <span class='badge warn'>需全量重扫</span>" : ""}
+  </div>`);
+  const sections = [
+    ["受影响测试", imp.affectedTests, "mono"],
+    ["受影响业务源码", imp.affectedSources, "mono"],
+    ["变更测试文件", imp.changedTests, "mono"],
+    ["需全量重扫模块", imp.widenedModules, "mono"],
+  ];
+  for (const [title, arr, cls] of sections) {
+    const items = arr || [];
+    if (!items.length) continue;
+    wrap.insertAdjacentHTML("beforeend", `<div class="card" style="margin:0">
+      <strong style="font-size:13px">${title}（${items.length}）</strong>
+      <div style="margin-top:6px;display:flex;flex-direction:column;gap:2px">
+        ${items.map(x => `<span class="${cls}" style="font-size:11.5px">${escapeHtml(x)}</span>`).join("")}
+      </div>
+    </div>`);
+  }
+  if (!list && !imp.fullRescan) {
+    wrap.insertAdjacentHTML("beforeend", `<div class="muted" style="text-align:center;padding:16px">自上次分析以来无变更</div>`);
+  }
 }
 
 // 执行分析（不跳转）；在详情页时分析后原地刷新详情

@@ -104,6 +104,7 @@ var migrations = []migration{
 	{name: "intel_fixes", apply: migrationIntelFixes},
 	{name: "intel_gateway_routes", apply: migrationIntelGatewayRoutes},
 	{name: "intel_endpoint_summary", apply: migrationIntelEndpointSummary},
+	{name: "intel_impacts", apply: migrationIntelImpacts},
 }
 
 // migrationIntel creates the Test Intelligence subsystem tables: flat project
@@ -757,6 +758,29 @@ func migrationIntelGatewayRoutes(ctx context.Context, driver string, db *sql.DB)
 func migrationIntelEndpointSummary(ctx context.Context, driver string, db *sql.DB) error {
 	stmts := []string{
 		`ALTER TABLE intel_endpoints ADD COLUMN summary TEXT NOT NULL DEFAULT ''`,
+	}
+	for _, s := range stmts {
+		if _, err := db.ExecContext(ctx, s); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// migrationIntelImpacts creates the incremental-impact table: the latest
+// Git-delta impact snapshot (changed files → affected modules/tests/sources)
+// computed during analyze for git-backed projects.
+func migrationIntelImpacts(ctx context.Context, driver string, db *sql.DB) error {
+	stmts := []string{
+		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS intel_impacts (
+			%s,
+			project_id INTEGER NOT NULL DEFAULT 0,
+			base_sha TEXT NOT NULL DEFAULT '',
+			head_sha TEXT NOT NULL DEFAULT '',
+			impact_json TEXT NOT NULL DEFAULT '',
+			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+		)`, idColumn(driver)),
+		`CREATE INDEX IF NOT EXISTS idx_intel_impacts_project ON intel_impacts(project_id)`,
 	}
 	for _, s := range stmts {
 		if _, err := db.ExecContext(ctx, s); err != nil {
