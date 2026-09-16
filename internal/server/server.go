@@ -18,6 +18,7 @@ import (
 	"github.com/hiylo/starburst-backend/internal/auth"
 	"github.com/hiylo/starburst-backend/internal/automation"
 	"github.com/hiylo/starburst-backend/internal/config"
+	"github.com/hiylo/starburst-backend/internal/embed"
 	"github.com/hiylo/starburst-backend/internal/llm"
 	"github.com/hiylo/starburst-backend/internal/opencode"
 	"github.com/hiylo/starburst-backend/internal/push"
@@ -33,6 +34,7 @@ type Server struct {
 	hub        *push.Hub
 	automation *automation.Engine
 	llm        *llm.Client
+	embedding  *embed.Client
 	stt        *sttEngine
 	httpServer *http.Server
 	hasWebUI   bool
@@ -124,6 +126,10 @@ func (s *Server) SetAutomation(eng *automation.Engine) { s.automation = eng }
 // orchestration endpoints report they are unavailable.
 func (s *Server) SetLLM(c *llm.Client) { s.llm = c }
 
+// SetEmbedding wires the optional embeddings client used by the project
+// knowledge base. When nil the knowledge-base endpoints report unavailable.
+func (s *Server) SetEmbedding(c *embed.Client) { s.embedding = c }
+
 // SetSTT wires the streaming recognition engine proxy. An empty baseURL
 // disables /api/stt so clients can fall back to on-device recognition.
 func (s *Server) SetSTT(baseURL string, timeout time.Duration) {
@@ -161,6 +167,7 @@ func (s *Server) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/llm", s.handleLLMConfig)
 	mux.HandleFunc("/api/llm/generate", s.handleLLMGenerate)
 	mux.HandleFunc("/api/llm/complete", s.handleLLMComplete)
+	mux.HandleFunc("/api/embed", s.handleEmbedConfig)
 	mux.HandleFunc("/api/audit", s.handleAudit)
 	mux.HandleFunc("/api/stats", s.handleStats)
 	mux.HandleFunc("/api/archives", s.handleArchives)

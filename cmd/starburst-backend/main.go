@@ -14,6 +14,7 @@ import (
 	"github.com/hiylo/starburst-backend/internal/auth"
 	"github.com/hiylo/starburst-backend/internal/automation"
 	"github.com/hiylo/starburst-backend/internal/config"
+	"github.com/hiylo/starburst-backend/internal/embed"
 	"github.com/hiylo/starburst-backend/internal/llm"
 	"github.com/hiylo/starburst-backend/internal/opencode"
 	"github.com/hiylo/starburst-backend/internal/push"
@@ -121,6 +122,16 @@ func main() {
 		log.Printf("orchestration LLM enabled: %s (%s)", llmURL, llmModel)
 	}
 	srv.SetLLM(llmClient)
+
+	// Optional embeddings client: powers the project knowledge base (vector
+	// retrieval). Configured independently of the orchestration LLM, loaded
+	// from persisted settings with flag/env fallback.
+	embedURL, embedKey, embedModel := loadEmbedConfig(ctx, st, cfg)
+	embedClient := embed.New(embedURL, embedKey, embedModel)
+	if embedClient.Enabled() {
+		log.Printf("embeddings enabled: %s (%s)", embedURL, embedModel)
+	}
+	srv.SetEmbedding(embedClient)
 
 	// Optional streaming recognition engine: the backend proxies audio chunks
 	// to it, so devices without a working on-device ASR still get streaming
@@ -242,6 +253,34 @@ func loadLLMConfig(ctx context.Context, st store.Store, cfg *config.Config) (str
 		model = cfg.LLMModel
 		if model != "" {
 			_ = st.SetSetting(ctx, "llm.model", model)
+		}
+	}
+	return url, key, model
+}
+
+// loadEmbedConfig resolves the embeddings settings. Persisted settings (set via
+// the web UI) take precedence; on first run the flag/env values are persisted
+// as the initial settings.
+func loadEmbedConfig(ctx context.Context, st store.Store, cfg *config.Config) (string, string, string) {
+	url, err := st.GetSetting(ctx, "embed.url")
+	if err != nil || url == "" {
+		url = cfg.EmbedURL
+		if url != "" {
+			_ = st.SetSetting(ctx, "embed.url", url)
+		}
+	}
+	key, err := st.GetSetting(ctx, "embed.key")
+	if err != nil || key == "" {
+		key = cfg.EmbedKey
+		if key != "" {
+			_ = st.SetSetting(ctx, "embed.key", key)
+		}
+	}
+	model, err := st.GetSetting(ctx, "embed.model")
+	if err != nil || model == "" {
+		model = cfg.EmbedModel
+		if model != "" {
+			_ = st.SetSetting(ctx, "embed.model", model)
 		}
 	}
 	return url, key, model

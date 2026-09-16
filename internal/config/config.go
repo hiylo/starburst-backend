@@ -47,6 +47,14 @@ type Config struct {
 	LLMKey string
 	// LLMModel is the model name to use for orchestration decisions.
 	LLMModel string
+	// EmbedURL is the OpenAI-compatible base URL for the embeddings endpoint
+	// (e.g. a LiteLLM gateway or Ollama /v1). Empty disables the knowledge-base
+	// vector retrieval entirely.
+	EmbedURL string
+	// EmbedKey is the API key for EmbedURL.
+	EmbedKey string
+	// EmbedModel is the embedding model name (e.g. bge-m3).
+	EmbedModel string
 	// STTURL is the base URL of the streaming recognition engine, e.g.
 	// "http://192.0.2.150:18090". Empty disables /api/stt entirely, so
 	// clients fall back to on-device recognition.
@@ -84,6 +92,9 @@ func Parse(args []string) (*Config, error) {
 	llmURL := fs.String("llm-url", envOr("OCB_LLM_URL", ""), "OpenAI-compatible base URL for orchestration LLM (empty = disabled)")
 	llmKey := fs.String("llm-key", os.Getenv("OCB_LLM_KEY"), "API key for --llm-url")
 	llmModel := fs.String("llm-model", envOr("OCB_LLM_MODEL", ""), "model name for orchestration decisions")
+	embedURL := fs.String("embed-url", envOr("OCB_EMBED_URL", ""), "OpenAI-compatible base URL for embeddings (empty = disabled)")
+	embedKey := fs.String("embed-key", os.Getenv("OCB_EMBED_KEY"), "API key for --embed-url")
+	embedModel := fs.String("embed-model", envOr("OCB_EMBED_MODEL", ""), "embedding model name (e.g. bge-m3)")
 	sttURL := fs.String("stt-url", envOr("OCB_STT_URL", ""), "streaming recognition engine base URL (empty = disabled)")
 	sttTimeout := fs.Duration("stt-timeout", envDuration("OCB_STT_TIMEOUT", DefaultSTTTimeout), "timeout for one engine round trip")
 	sttMaxChunk := fs.Int("stt-max-chunk-bytes", envInt("OCB_STT_MAX_CHUNK_BYTES", 2*1024*1024), "max bytes accepted per audio chunk")
@@ -117,6 +128,9 @@ func Parse(args []string) (*Config, error) {
 		LLMURL:               strings.TrimRight(*llmURL, "/"),
 		LLMKey:               *llmKey,
 		LLMModel:             *llmModel,
+		EmbedURL:             strings.TrimRight(*embedURL, "/"),
+		EmbedKey:             *embedKey,
+		EmbedModel:           *embedModel,
 		STTURL:               strings.TrimRight(*sttURL, "/"),
 		STTTimeout:           sttTimeoutOrDefault(*sttTimeout, DefaultSTTTimeout),
 		STTMaxChunkBytes:     clampInt(*sttMaxChunk, 1024, 8*1024*1024),
