@@ -300,6 +300,21 @@ type Store interface {
 	CountProjectChunks(ctx context.Context, projectID int64) (int64, error)
 	// DeleteProjectChunks removes a project's knowledge-base chunks.
 	DeleteProjectChunks(ctx context.Context, projectID int64) error
+
+	// ---- Test Intelligence: knowledge base Q&A (project-level chat) ----
+
+	// CreateIntelChat persists a new conversation and populates its id.
+	CreateIntelChat(ctx context.Context, c *IntelChat) error
+	// ListIntelChats returns a project's conversations, newest first.
+	ListIntelChats(ctx context.Context, projectID int64) ([]*IntelChat, error)
+	// GetIntelChat loads a single conversation.
+	GetIntelChat(ctx context.Context, id int64) (*IntelChat, error)
+	// DeleteIntelChat removes a conversation and its messages.
+	DeleteIntelChat(ctx context.Context, id int64) error
+	// AddIntelChatMessage appends a message to a conversation.
+	AddIntelChatMessage(ctx context.Context, m *IntelChatMessage) error
+	// ListIntelChatMessages returns a conversation's messages, chronologically.
+	ListIntelChatMessages(ctx context.Context, chatID int64, limit int) ([]*IntelChatMessage, error)
 }
 
 // Open opens a store for the given driver/dsn. It applies all migrations

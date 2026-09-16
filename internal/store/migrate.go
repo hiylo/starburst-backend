@@ -99,6 +99,7 @@ var migrations = []migration{
 	{name: "intel_test_assets", apply: migrationIntelTestAssets},
 	{name: "intel_features", apply: migrationIntelFeatures},
 	{name: "intel_rag", apply: migrationIntelRag},
+	{name: "intel_chat", apply: migrationIntelChat},
 }
 
 // migrationIntel creates the Test Intelligence subsystem tables: flat project
@@ -653,6 +654,37 @@ func migrationIntelRag(ctx context.Context, driver string, db *sql.DB) error {
 		if _, err := db.ExecContext(ctx, fmt.Sprintf(
 			`CREATE INDEX IF NOT EXISTS idx_intel_chunks_embedding
 			 ON intel_chunks USING hnsw (embedding vector_cosine_ops)`)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// migrationIntelChat creates the project-level knowledge-base conversation
+// tables: intel_chats groups a dialog thread, intel_chat_messages stores each
+// user/assistant turn so multi-turn context can be reconstructed and reviewed.
+func migrationIntelChat(ctx context.Context, driver string, db *sql.DB) error {
+	stmts := []string{
+		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS intel_chats (
+			%s,
+			project_id INTEGER NOT NULL DEFAULT 0,
+			title TEXT NOT NULL DEFAULT '',
+			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+		)`, idColumn(driver)),
+		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS intel_chat_messages (
+			%s,
+			chat_id INTEGER NOT NULL DEFAULT 0,
+			role TEXT NOT NULL DEFAULT '',
+			content TEXT NOT NULL DEFAULT '',
+			sources_json TEXT NOT NULL DEFAULT '',
+			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+		)`, idColumn(driver)),
+		`CREATE INDEX IF NOT EXISTS idx_intel_chats_project ON intel_chats(project_id, updated_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_intel_chat_messages_chat ON intel_chat_messages(chat_id, id)`,
+	}
+	for _, s := range stmts {
+		if _, err := db.ExecContext(ctx, s); err != nil {
 			return err
 		}
 	}

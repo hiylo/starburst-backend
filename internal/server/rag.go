@@ -2,12 +2,14 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
 	"strings"
 	"time"
 
+	"github.com/hiylo/starburst-backend/internal/llm"
 	"github.com/hiylo/starburst-backend/internal/store"
 )
 
@@ -215,7 +217,8 @@ func (s *Server) embedChunks(ctx context.Context, chunks []*store.RagChunk) erro
 // handleIntelAsk answers a natural-language question about a project by
 // embedding the question, retrieving the most similar knowledge fragments, and
 // (when the orchestration LLM is configured) generating an answer grounded in
-// those fragments. Requires a web session or APP token.
+// those fragments. It is multi-turn: pass a chatId to continue a conversation,
+// or omit it to start a new one. Requires a web session or APP token.
 func (s *Server) handleIntelAsk(w http.ResponseWriter, r *http.Request) {
 	if !s.requireWeb(r) {
 		if _, ok := s.requireToken(r); !ok {
@@ -230,6 +233,7 @@ func (s *Server) handleIntelAsk(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		ProjectID int64  `json:"projectId"`
 		Question  string `json:"question"`
+		ChatID    int64  `json:"chatId"`
 		Limit     int    `json:"limit"`
 	}
 	if err := readJSONLimited(w, r, &req); err != nil {
@@ -247,7 +251,7 @@ func (s *Server) handleIntelAsk(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Minute)
 	defer cancel()
 
-	resp, err := s.askIntelProject(ctx, req.ProjectID, req.Question, req.Limit)
+	resp, err := s.askIntelProject(ctx, req.ProjectID, req.Question, req.ChatID, req.Limit)
 	if err != nil {
 		log.Printf("intel ask project %d: %v", req.ProjectID, err)
 		writeErr(w, http.StatusInternalServerError, "ask failed: "+err.Error())
@@ -256,10 +260,17 @@ func (s *Server) handleIntelAsk(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
-func (s *Server) askIntelProject(ctx context.Context, projectID int64, question string, limit int) (map[string]any, error) {
+func (s *Server) askIntelProject(ctx context.Context, projectID int64, question string, chatID int64, limit int) (map[string]any, error) {
 	if s.embedding == nil || !s.embedding.Enabled() {
 		return nil, errEmbeddingDisabled
 	}
+
+	// Resolve the conversation: continue an existing thread or start a new one.
+	chat, history, err := s.resolveChat(ctx, projectID, chatID, question)
+	if err != nil {
+		return nil, err
+	}
+
 	qvec, err := s.embedding.Embed(ctx, question)
 	if err != nil {
 		return nil, fmt.Errorf("embed question: %w", err)
@@ -295,21 +306,80 @@ func (s *Server) askIntelProject(ctx context.Context, projectID int64, question 
 
 	answer := ""
 	if s.llm != nil && s.llm.Enabled() && len(chunks) > 0 {
-		system := "你是项目代码知识库助手。只依据给定的项目上下文回答问题，引用上下文中的事实；如果上下文不足以回答，请明确说明，不要编造。"
-		user := "项目上下文：\n" + contextBuf.String() + "\n问题：" + question
-		if out, err := s.llm.Complete(ctx, system, user); err == nil {
-			answer = out
-		} else {
-			log.Printf("intel ask llm: %v", err)
-		}
+		answer = s.generateChatAnswer(ctx, history, contextBuf.String(), question)
+	}
+
+	// Persist the turn so subsequent questions carry full context.
+	sourcesJSON, _ := json.Marshal(sources)
+	_ = s.store.AddIntelChatMessage(ctx, &store.IntelChatMessage{ChatID: chat.ID, Role: "user", Content: question})
+	if answer != "" {
+		_ = s.store.AddIntelChatMessage(ctx, &store.IntelChatMessage{ChatID: chat.ID, Role: "assistant", Content: answer, SourcesJSON: string(sourcesJSON)})
 	}
 
 	return map[string]any{
+		"chatId":   chat.ID,
 		"question": question,
 		"answer":   answer,
 		"sources":  sources,
 		"count":    len(sources),
 	}, nil
+}
+
+// resolveChat loads the conversation (and its recent history) to continue, or
+// creates a fresh one titled from the opening question.
+func (s *Server) resolveChat(ctx context.Context, projectID, chatID int64, question string) (*store.IntelChat, []*store.IntelChatMessage, error) {
+	if chatID > 0 {
+		chat, err := s.store.GetIntelChat(ctx, chatID)
+		if err != nil {
+			return nil, nil, fmt.Errorf("conversation %d: %w", chatID, err)
+		}
+		if chat.ProjectID != projectID {
+			return nil, nil, fmt.Errorf("conversation %d does not belong to project %d", chatID, projectID)
+		}
+		history, err := s.store.ListIntelChatMessages(ctx, chatID, 20)
+		if err != nil {
+			return nil, nil, err
+		}
+		return chat, history, nil
+	}
+	chat := &store.IntelChat{ProjectID: projectID, Title: truncateRunes(strings.TrimSpace(question), 40)}
+	if err := s.store.CreateIntelChat(ctx, chat); err != nil {
+		return nil, nil, err
+	}
+	return chat, nil, nil
+}
+
+// generateChatAnswer builds a multi-turn prompt: the fixed system role, then
+// recent history (user/assistant turns), then the current question grounded in
+// the retrieved fragments.
+func (s *Server) generateChatAnswer(ctx context.Context, history []*store.IntelChatMessage, contextText, question string) string {
+	system := "你是项目代码知识库助手。只依据给定的项目上下文和历史对话回答问题，引用上下文中的事实；如果上下文不足以回答，请明确说明，不要编造。"
+	messages := []llm.ChatMessage{{Role: "system", Content: system}}
+	for _, m := range history {
+		role := m.Role
+		if role != "user" && role != "assistant" {
+			role = "user"
+		}
+		messages = append(messages, llm.ChatMessage{Role: role, Content: m.Content})
+	}
+	messages = append(messages, llm.ChatMessage{
+		Role:    "user",
+		Content: "项目上下文：\n" + contextText + "\n问题：" + question,
+	})
+	out, err := s.llm.Chat(ctx, messages)
+	if err != nil {
+		log.Printf("intel ask llm: %v", err)
+		return ""
+	}
+	return out
+}
+
+func truncateRunes(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n])
 }
 
 var errEmbeddingDisabled = &pathErr{msg: "embeddings not configured (set 嵌入模型配置 in settings)"}

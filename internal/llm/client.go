@@ -99,6 +99,16 @@ func (c *Client) Complete(ctx context.Context, system, user string) (string, err
 	return c.chat(ctx, messages, 0.2)
 }
 
+// Chat sends a full multi-turn message list and returns the assistant text.
+// The caller is responsible for ordering messages (system first, then
+// alternating user/assistant turns).
+func (c *Client) Chat(ctx context.Context, messages []ChatMessage) (string, error) {
+	if !c.Enabled() {
+		return "", errDisabled
+	}
+	return c.chat(ctx, messages, 0.2)
+}
+
 // CompleteJSON asks the model for a JSON object and decodes it into v.
 // It tolerates ```json fenced output. The system prompt should instruct the
 // model to emit only JSON.
