@@ -26,7 +26,7 @@ type IntelProject struct {
 	UpdatedAt     time.Time  `json:"updatedAt"`
 }
 
-// IntelModule is one sub-project (module) of a monorepo/mixed-type repository.
+// IntelModule is one sub-module of a monorepo/mixed-type repository.
 // Each module gets an independent type/role and owns its own contracts, test
 // assets, env requirements and command whitelist.
 type IntelModule struct {
@@ -197,7 +197,7 @@ func (s *sqlStore) ReplaceIntelModules(ctx context.Context, projectID int64, mod
 	return nil
 }
 
-// ListIntelModules returns the project's sub-project modules ordered by path.
+// ListIntelModules returns the project's sub-modules ordered by path.
 func (s *sqlStore) ListIntelModules(ctx context.Context, projectID int64) ([]*IntelModule, error) {
 	rows, err := s.db.QueryContext(ctx, s.q(`
 		SELECT id, project_id, rel_path, kind_type, kind_role, build_tool,

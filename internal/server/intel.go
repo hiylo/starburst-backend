@@ -152,7 +152,7 @@ func (s *Server) handleIntelEntities(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"entities": ents})
 }
 
-// handleIntelModules lists the sub-project modules of a project.
+// handleIntelModules lists the sub-modules of a project.
 func (s *Server) handleIntelModules(w http.ResponseWriter, r *http.Request) {
 	if !s.requireWeb(r) {
 		if _, ok := s.requireToken(r); !ok {

@@ -245,7 +245,7 @@ type Store interface {
 	DeleteIntelProject(ctx context.Context, id int64) error
 	// ReplaceIntelModules replaces the project's module list (full rescan).
 	ReplaceIntelModules(ctx context.Context, projectID int64, mods []*IntelModule) error
-	// ListIntelModules returns the project's sub-project modules.
+	// ListIntelModules returns the project's sub-modules.
 	ListIntelModules(ctx context.Context, projectID int64) ([]*IntelModule, error)
 	// ReplaceIntelEntities replaces a module's entity↔table↔column mappings.
 	ReplaceIntelEntities(ctx context.Context, projectID, moduleID int64, ents []*IntelEntity) error

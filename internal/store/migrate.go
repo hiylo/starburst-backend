@@ -105,7 +105,7 @@ var migrations = []migration{
 }
 
 // migrationIntel creates the Test Intelligence subsystem tables: flat project
-// registry, monorepo sub-project (module) detection results, entity/table/column
+// registry, monorepo sub-module detection results, entity/table/column
 // mappings and API endpoint contracts. All intel_* rows carry provenance
 // (source_file + source_line) per the deterministic-first design.
 func migrationIntel(ctx context.Context, driver string, db *sql.DB) error {

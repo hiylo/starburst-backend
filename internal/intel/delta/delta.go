@@ -242,7 +242,7 @@ func addWidened(imp *Impact, seen map[string]struct{}, f string) {
 	imp.WidenedModules = append(imp.WidenedModules, m)
 }
 
-// BuildModule derives the owning Maven module / Gradle sub-project relative path
+// BuildModule derives the owning Maven module / Gradle sub-module relative path
 // for a build/config file path, by walking up from the file's directory until a
 // directory owning a pom.xml or build.gradle* is found. It returns "" when no
 // build anchor is found up to (and including) root.
