@@ -398,6 +398,9 @@ func (s *Server) runIntelAnalyze(ctx context.Context, projectID int64) error {
 	if err != nil {
 		sha = ""
 	}
+	if err := s.runIntelComplianceScan(ctx, projectID, root); err != nil {
+		log.Printf("intel compliance scan project %d: %v", projectID, err)
+	}
 	return s.store.MarkIntelProjectAnalyzed(ctx, projectID, sha)
 }
 

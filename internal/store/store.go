@@ -315,6 +315,23 @@ type Store interface {
 	AddIntelChatMessage(ctx context.Context, m *IntelChatMessage) error
 	// ListIntelChatMessages returns a conversation's messages, chronologically.
 	ListIntelChatMessages(ctx context.Context, chatID int64, limit int) ([]*IntelChatMessage, error)
+
+	// ---- Test Intelligence: audit findings & fix suggestions ----
+
+	// CreateIntelFinding persists a new audit finding.
+	CreateIntelFinding(ctx context.Context, f *IntelFinding) error
+	// ListIntelFindings returns findings for a project, filtered by status/detector.
+	ListIntelFindings(ctx context.Context, projectID int64, status, detector string) ([]*IntelFinding, error)
+	// UpdateIntelFinding persists mutable finding fields.
+	UpdateIntelFinding(ctx context.Context, f *IntelFinding) error
+	// CreateIntelFix persists a new fix suggestion.
+	CreateIntelFix(ctx context.Context, f *IntelFix) error
+	// GetIntelFix loads a single fix suggestion.
+	GetIntelFix(ctx context.Context, id int64) (*IntelFix, error)
+	// ListIntelFixes returns fix suggestions for a project.
+	ListIntelFixes(ctx context.Context, projectID int64, status string) ([]*IntelFix, error)
+	// UpdateIntelFix persists mutable fix fields.
+	UpdateIntelFix(ctx context.Context, f *IntelFix) error
 }
 
 // Open opens a store for the given driver/dsn. It applies all migrations

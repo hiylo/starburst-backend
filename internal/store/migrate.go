@@ -100,6 +100,8 @@ var migrations = []migration{
 	{name: "intel_features", apply: migrationIntelFeatures},
 	{name: "intel_rag", apply: migrationIntelRag},
 	{name: "intel_chat", apply: migrationIntelChat},
+	{name: "intel_findings", apply: migrationIntelFindings},
+	{name: "intel_fixes", apply: migrationIntelFixes},
 }
 
 // migrationIntel creates the Test Intelligence subsystem tables: flat project
@@ -682,6 +684,65 @@ func migrationIntelChat(ctx context.Context, driver string, db *sql.DB) error {
 		)`, idColumn(driver)),
 		`CREATE INDEX IF NOT EXISTS idx_intel_chats_project ON intel_chats(project_id, updated_at)`,
 		`CREATE INDEX IF NOT EXISTS idx_intel_chat_messages_chat ON intel_chat_messages(chat_id, id)`,
+	}
+	for _, s := range stmts {
+		if _, err := db.ExecContext(ctx, s); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// migrationIntelFindings creates the security/compliance audit findings table.
+// Findings come from dependency-vuln scanners, code/lint rules, compliance
+// rules and LLM review; each carries a detector + severity + location and moves
+// through the closed loop (open/resolved/removed/false_positive/waived).
+func migrationIntelFindings(ctx context.Context, driver string, db *sql.DB) error {
+	stmts := []string{
+		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS intel_findings (
+			%s,
+			project_id INTEGER NOT NULL DEFAULT 0,
+			module_id INTEGER NOT NULL DEFAULT 0,
+			detector TEXT NOT NULL DEFAULT '',
+			severity TEXT NOT NULL DEFAULT 'medium',
+			category TEXT NOT NULL DEFAULT '',
+			cve_or_rule_id TEXT NOT NULL DEFAULT '',
+			location TEXT NOT NULL DEFAULT '',
+			summary TEXT NOT NULL DEFAULT '',
+			status TEXT NOT NULL DEFAULT 'open',
+			removed_at TIMESTAMP NULL,
+			waived_reason TEXT NOT NULL DEFAULT '',
+			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+		)`, idColumn(driver)),
+		`CREATE INDEX IF NOT EXISTS idx_intel_findings_project ON intel_findings(project_id, status)`,
+	}
+	for _, s := range stmts {
+		if _, err := db.ExecContext(ctx, s); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// migrationIntelFixes creates the fix-suggestion table: patch drafts produced
+// from failures/audit findings, applied only after human review on the page
+// (the single write path). Backups are kept for one-click rollback.
+func migrationIntelFixes(ctx context.Context, driver string, db *sql.DB) error {
+	stmts := []string{
+		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS intel_fixes (
+			%s,
+			project_id INTEGER NOT NULL DEFAULT 0,
+			issue_id INTEGER NOT NULL DEFAULT 0,
+			kind TEXT NOT NULL DEFAULT 'ai-suggest',
+			title TEXT NOT NULL DEFAULT '',
+			diff_json TEXT NOT NULL DEFAULT '',
+			status TEXT NOT NULL DEFAULT 'proposed',
+			applied_backup TEXT NOT NULL DEFAULT '',
+			write_mode TEXT NOT NULL DEFAULT 'direct',
+			applied_at TIMESTAMP NULL,
+			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+		)`, idColumn(driver)),
+		`CREATE INDEX IF NOT EXISTS idx_intel_fixes_project ON intel_fixes(project_id, status)`,
 	}
 	for _, s := range stmts {
 		if _, err := db.ExecContext(ctx, s); err != nil {
