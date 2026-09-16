@@ -70,6 +70,7 @@ type IntelEndpoint struct {
 	ResponseType string `json:"responseType"`
 	RequestJSON  string `json:"requestJson"`
 	FieldsJSON   string `json:"fieldsJson"`
+	Summary      string `json:"summary"`
 	SourceFile   string `json:"sourceFile"`
 	SourceLine   int    `json:"sourceLine"`
 	// GatewayRoutes is the computed public gateway exposure (path patterns),
@@ -282,10 +283,10 @@ func (s *sqlStore) ReplaceIntelEndpoints(ctx context.Context, projectID, moduleI
 	for _, ep := range eps {
 		if _, err := s.db.ExecContext(ctx, s.q(`
 			INSERT INTO intel_endpoints (project_id, module_id, method, path, response_type,
-				request_json, fields_json, source_file, source_line)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`),
+				request_json, fields_json, source_file, source_line, summary)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
 			projectID, moduleID, ep.Method, ep.Path, ep.ResponseType,
-			ep.RequestJSON, ep.FieldsJSON, ep.SourceFile, ep.SourceLine); err != nil {
+			ep.RequestJSON, ep.FieldsJSON, ep.SourceFile, ep.SourceLine, ep.Summary); err != nil {
 			return err
 		}
 	}
@@ -296,7 +297,7 @@ func (s *sqlStore) ReplaceIntelEndpoints(ctx context.Context, projectID, moduleI
 // narrowed to a single module).
 func (s *sqlStore) ListIntelEndpoints(ctx context.Context, projectID, moduleID int64) ([]*IntelEndpoint, error) {
 	query := `SELECT id, project_id, module_id, method, path, response_type,
-		request_json, fields_json, source_file, source_line FROM intel_endpoints WHERE project_id = ?`
+		request_json, fields_json, source_file, source_line, summary FROM intel_endpoints WHERE project_id = ?`
 	args := []any{projectID}
 	if moduleID > 0 {
 		query += ` AND module_id = ?`
@@ -312,12 +313,21 @@ func (s *sqlStore) ListIntelEndpoints(ctx context.Context, projectID, moduleID i
 	for rows.Next() {
 		ep := &IntelEndpoint{}
 		if err := rows.Scan(&ep.ID, &ep.ProjectID, &ep.ModuleID, &ep.Method, &ep.Path,
-			&ep.ResponseType, &ep.RequestJSON, &ep.FieldsJSON, &ep.SourceFile, &ep.SourceLine); err != nil {
+			&ep.ResponseType, &ep.RequestJSON, &ep.FieldsJSON, &ep.SourceFile, &ep.SourceLine, &ep.Summary); err != nil {
 			return nil, err
 		}
 		out = append(out, ep)
 	}
 	return out, rows.Err()
+}
+
+// UpdateIntelEndpointSummary persists the LLM-derived business summary for a
+// single endpoint, matched by project + method + path.
+func (s *sqlStore) UpdateIntelEndpointSummary(ctx context.Context, projectID int64, method, path, summary string) error {
+	_, err := s.db.ExecContext(ctx, s.q(`
+		UPDATE intel_endpoints SET summary = ? WHERE project_id = ? AND method = ? AND path = ?`),
+		summary, projectID, method, path)
+	return err
 }
 
 func scanIntelProject(row rowScanner) (*IntelProject, error) {

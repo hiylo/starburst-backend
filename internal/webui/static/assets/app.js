@@ -2430,7 +2430,7 @@ async function loadIntelContracts(id) {
     const gw = (ep.gatewayRoutes || []).map(g => `<span class="mono" style="font-size:11px">${escapeHtml(g)}</span>`).join("、") || `<span class="muted" style="font-size:11px">直连</span>`;
     etb.insertAdjacentHTML("beforeend", `<tr>
       <td><span class="badge method-${mc}">${escapeHtml(ep.method)}</span></td>
-      <td class="mono">${escapeHtml(ep.path)}</td>
+      <td class="mono"${ep.summary ? ` title="${escapeHtml(ep.summary)}"` : ""}>${escapeHtml(ep.path)}${ep.summary ? `<div class="muted" style="font-size:11px;font-weight:400">${escapeHtml(ep.summary)}</div>` : ""}</td>
       <td class="clip">${gw}</td>
       <td class="clip">${escapeHtml(ep.responseType || "-")}</td>
       <td class="clip muted" title="${escapeHtml(ep.requestJson || "")}">${escapeHtml(ep.requestJson || "-")}</td>
@@ -2529,7 +2529,7 @@ function openIntelMock(idx) {
   mockParams = params;
   mockBodyType = bodyType;
   document.getElementById("intelMockTitle").textContent =
-    `${mockMethod} ${mockPath}${bodyType ? "  ·  请求体类型 " + bodyType : ""}`;
+    `${mockMethod} ${mockPath}${bodyType ? "  ·  请求体类型 " + bodyType : ""}${ep.summary ? "  ·  " + ep.summary : ""}`;
   document.getElementById("intelMockUrl").value = buildMockUrl(mockMethod, mockPath, params);
   document.getElementById("intelMockBody").value = bodyType ? "{\n}" : "";
   document.getElementById("intelMockCurl").value = renderMockCurl();

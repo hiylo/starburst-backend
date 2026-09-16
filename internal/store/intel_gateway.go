@@ -24,6 +24,16 @@ func (s *sqlStore) ReplaceIntelGatewayRoutes(ctx context.Context, projectID int6
 	if _, err := s.db.ExecContext(ctx, s.q(`DELETE FROM intel_gateway_routes WHERE project_id = ?`), projectID); err != nil {
 		return err
 	}
+	return s.insertIntelGatewayRoutes(ctx, projectID, routes)
+}
+
+// AddIntelGatewayRoutes appends gateway routes without deleting existing ones.
+// Used for LLM-suggested routes so config-derived routes are preserved.
+func (s *sqlStore) AddIntelGatewayRoutes(ctx context.Context, projectID int64, routes []*IntelGatewayRoute) error {
+	return s.insertIntelGatewayRoutes(ctx, projectID, routes)
+}
+
+func (s *sqlStore) insertIntelGatewayRoutes(ctx context.Context, projectID int64, routes []*IntelGatewayRoute) error {
 	for _, r := range routes {
 		if _, err := s.db.ExecContext(ctx, s.q(`
 			INSERT INTO intel_gateway_routes (project_id, service, paths_json, uri, source, source_line, created_at)

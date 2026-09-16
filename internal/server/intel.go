@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/hiylo/starburst-backend/internal/intel"
+	"github.com/hiylo/starburst-backend/internal/intel/enrich"
 	"github.com/hiylo/starburst-backend/internal/intel/feature"
 	"github.com/hiylo/starburst-backend/internal/intel/gateway"
 	"github.com/hiylo/starburst-backend/internal/intel/testassets"
@@ -449,6 +450,7 @@ func (s *Server) runIntelAnalyze(ctx context.Context, projectID int64) error {
 	if err := s.persistGatewayRoutes(ctx, projectID, root); err != nil {
 		log.Printf("intel gateway routes project %d: %v", projectID, err)
 	}
+	s.enrichIntelWithLLM(ctx, projectID, root)
 	sha, err := snapshotSHA(root)
 	if err != nil {
 		sha = ""
@@ -525,6 +527,86 @@ func (s *Server) persistGatewayRoutes(ctx context.Context, projectID int64, root
 		})
 	}
 	return s.store.ReplaceIntelGatewayRoutes(ctx, projectID, storeRoutes)
+}
+
+// enrichIntelWithLLM runs the optional LLM document-analysis pass: it feeds the
+// project's Markdown docs plus the extracted endpoint contracts to the
+// orchestration LLM and stores per-endpoint business summaries and (clearly
+// marked) suggested gateway routes. It is a no-op unless the LLM is configured.
+func (s *Server) enrichIntelWithLLM(ctx context.Context, projectID int64, root string) {
+	if s.llm == nil || !s.llm.Enabled() {
+		return
+	}
+	eps, err := s.store.ListIntelEndpoints(ctx, projectID, 0)
+	if err != nil || len(eps) == 0 {
+		return
+	}
+	docs := enrich.Docs(root, 30000)
+	if docs == "" {
+		return
+	}
+	hints := make([]enrich.EndpointHint, 0, len(eps))
+	for _, ep := range eps {
+		hints = append(hints, enrich.EndpointHint{Method: ep.Method, Path: ep.Path, ResponseType: ep.ResponseType})
+	}
+	var result enrich.Result
+	if err := s.llm.CompleteJSON(ctx, enrich.SystemPrompt(), enrich.UserPrompt(docs, hints), &result); err != nil {
+		log.Printf("intel llm enrich project %d: %v", projectID, err)
+		return
+	}
+	for _, es := range result.Endpoints {
+		summary := strings.TrimSpace(es.Summary)
+		if summary == "" {
+			continue
+		}
+		if err := s.store.UpdateIntelEndpointSummary(ctx, projectID, es.Method, es.Path, summary); err != nil {
+			log.Printf("intel llm summary %s %s: %v", es.Method, es.Path, err)
+		}
+	}
+	s.storeLLMSuggestedRoutes(ctx, projectID, result.Routes)
+}
+
+// storeLLMSuggestedRoutes inserts LLM-suggested gateway routes that are not
+// already covered by config-derived routes, marking their source as "llm" so
+// the deterministic config routes remain authoritative.
+func (s *Server) storeLLMSuggestedRoutes(ctx context.Context, projectID int64, hints []enrich.RouteHint) {
+	if len(hints) == 0 {
+		return
+	}
+	existing, err := s.store.ListIntelGatewayRoutes(ctx, projectID)
+	if err != nil {
+		return
+	}
+	covered := make(map[string]bool)
+	for _, r := range existing {
+		var paths []string
+		if json.Unmarshal([]byte(r.PathsJSON), &paths) != nil {
+			continue
+		}
+		for _, p := range paths {
+			covered[p] = true
+		}
+	}
+	var add []*store.IntelGatewayRoute
+	for _, h := range hints {
+		var fresh []string
+		for _, p := range h.Paths {
+			if !covered[p] {
+				fresh = append(fresh, p)
+				covered[p] = true
+			}
+		}
+		if len(fresh) == 0 {
+			continue
+		}
+		pathsJSON, _ := json.Marshal(fresh)
+		add = append(add, &store.IntelGatewayRoute{Service: h.Service, PathsJSON: string(pathsJSON), Source: "llm"})
+	}
+	if len(add) > 0 {
+		if err := s.store.AddIntelGatewayRoutes(ctx, projectID, add); err != nil {
+			log.Printf("intel llm routes project %d: %v", projectID, err)
+		}
+	}
 }
 
 // projectRoot returns the local working directory of a project: local path for

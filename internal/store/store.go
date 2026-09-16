@@ -255,6 +255,8 @@ type Store interface {
 	ReplaceIntelEndpoints(ctx context.Context, projectID, moduleID int64, eps []*IntelEndpoint) error
 	// ListIntelEndpoints returns endpoint contracts for a project/module.
 	ListIntelEndpoints(ctx context.Context, projectID, moduleID int64) ([]*IntelEndpoint, error)
+	// UpdateIntelEndpointSummary persists a business summary for one endpoint.
+	UpdateIntelEndpointSummary(ctx context.Context, projectID int64, method, path, summary string) error
 
 	// ---- Test Intelligence: test assets & execution ----
 
@@ -334,6 +336,8 @@ type Store interface {
 	UpdateIntelFix(ctx context.Context, f *IntelFix) error
 	// ReplaceIntelGatewayRoutes replaces the project's gateway routes (full rescan).
 	ReplaceIntelGatewayRoutes(ctx context.Context, projectID int64, routes []*IntelGatewayRoute) error
+	// AddIntelGatewayRoutes appends gateway routes without deleting existing ones.
+	AddIntelGatewayRoutes(ctx context.Context, projectID int64, routes []*IntelGatewayRoute) error
 	// ListIntelGatewayRoutes returns the project's gateway routes.
 	ListIntelGatewayRoutes(ctx context.Context, projectID int64) ([]*IntelGatewayRoute, error)
 }

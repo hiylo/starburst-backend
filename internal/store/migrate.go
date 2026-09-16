@@ -103,6 +103,7 @@ var migrations = []migration{
 	{name: "intel_findings", apply: migrationIntelFindings},
 	{name: "intel_fixes", apply: migrationIntelFixes},
 	{name: "intel_gateway_routes", apply: migrationIntelGatewayRoutes},
+	{name: "intel_endpoint_summary", apply: migrationIntelEndpointSummary},
 }
 
 // migrationIntel creates the Test Intelligence subsystem tables: flat project
@@ -741,6 +742,21 @@ func migrationIntelGatewayRoutes(ctx context.Context, driver string, db *sql.DB)
 			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 		)`, idColumn(driver)),
 		`CREATE INDEX IF NOT EXISTS idx_intel_gateway_routes_project ON intel_gateway_routes(project_id)`,
+	}
+	for _, s := range stmts {
+		if _, err := db.ExecContext(ctx, s); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// migrationIntelEndpointSummary adds the business summary column to
+// intel_endpoints, filled by the LLM document-analysis pass (empty until the
+// orchestration LLM is configured).
+func migrationIntelEndpointSummary(ctx context.Context, driver string, db *sql.DB) error {
+	stmts := []string{
+		`ALTER TABLE intel_endpoints ADD COLUMN summary TEXT NOT NULL DEFAULT ''`,
 	}
 	for _, s := range stmts {
 		if _, err := db.ExecContext(ctx, s); err != nil {
