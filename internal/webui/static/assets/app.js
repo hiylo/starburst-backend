@@ -2492,6 +2492,48 @@ async function runIntelAnalyze(projectId) {
   loadIntelProjects();
 }
 
+// 建立 / 重建知识库向量索引（实体/表 + 接口契约 → 向量化入库）
+async function runIntelIndex() {
+  const id = intelCurrentProject;
+  if (!id) return;
+  const btn = document.getElementById("ragIndexBtn");
+  const st = document.getElementById("ragIndexStatus");
+  btn.disabled = true; st.textContent = "索引中…";
+  const res = await api("/api/intel/index", { method: "POST", headers: appHeaders(), body: JSON.stringify({ projectId: id }) });
+  const data = await res.json();
+  btn.disabled = false;
+  if (!res.ok) { st.textContent = ""; show(document.getElementById("ragMsg"), data.error || "索引失败"); return; }
+  st.textContent = "已索引 " + (data.chunks || 0) + " 条";
+  show(document.getElementById("ragMsg"), "索引完成，共 " + (data.chunks || 0) + " 条", true);
+}
+
+// 对项目提问：向量检索 + LLM 生成回答
+async function askIntel() {
+  const id = intelCurrentProject;
+  const q = document.getElementById("ragQuestion").value.trim();
+  if (!id || !q) { show(document.getElementById("ragMsg"), "请输入问题"); return; }
+  const btn = document.getElementById("ragAskBtn");
+  btn.disabled = true;
+  const res = await api("/api/intel/ask", { method: "POST", headers: appHeaders(), body: JSON.stringify({ projectId: id, question: q }) });
+  const data = await res.json();
+  btn.disabled = false;
+  if (!res.ok) { show(document.getElementById("ragMsg"), data.error || "提问失败"); return; }
+  const answerEl = document.getElementById("ragAnswer");
+  answerEl.style.display = "block";
+  document.getElementById("ragAnswerText").textContent = data.answer || "（未配置大模型，仅返回检索到的上下文）";
+  const src = document.getElementById("ragSources");
+  src.innerHTML = "";
+  for (const s of data.sources || []) {
+    src.insertAdjacentHTML("beforeend", `<div class="card" style="margin:0">
+      <div class="row" style="justify-content:space-between">
+        <strong class="mono">${escapeHtml(s.title)}</strong>
+        <span class="muted" style="font-size:12px">${escapeHtml(shortProv(s.sourceFile, s.sourceLine))} · ${(s.similarity || 0).toFixed(3)}</span>
+      </div>
+      <div class="muted" style="font-size:12px;white-space:pre-wrap">${escapeHtml(s.content)}</div>
+    </div>`);
+  }
+}
+
 /* ---------- 启动 ---------- */
 document.getElementById("appToken").value = localStorage.getItem(APP_TOKEN_KEY) || "";
 renderAuth();

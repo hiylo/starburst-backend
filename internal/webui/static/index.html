@@ -447,6 +447,7 @@
             <button class="intel-tab active" data-tab="modules">子项目</button>
             <button class="intel-tab" data-tab="endpoints">接口契约</button>
             <button class="intel-tab" data-tab="entities">实体 / 表 / 列</button>
+            <button class="intel-tab" data-tab="rag">知识库 / 提问</button>
           </div>
 
           <div class="intel-panel" id="intelPanel-modules">
@@ -461,6 +462,25 @@
           </div>
           <div class="intel-panel hidden" id="intelPanel-entities">
             <div id="intelEntityList" style="display:flex;flex-direction:column;gap:var(--sp-sm)"></div>
+          </div>
+          <div class="intel-panel hidden" id="intelPanel-rag">
+            <div class="row" style="align-items:flex-end;gap:var(--sp-sm);margin-bottom:var(--sp-sm)">
+              <div style="flex:1">
+                <label style="margin-top:0">对项目提问（基于已索引的知识库）</label>
+                <input type="text" id="ragQuestion" placeholder="例如：这个项目的用户表有哪些字段？登录接口的请求参数是什么？">
+              </div>
+              <button id="ragAskBtn" onclick="askIntel()">提问</button>
+            </div>
+            <div class="row" style="gap:var(--sp-sm);margin-bottom:var(--sp-sm)">
+              <button class="ghost" id="ragIndexBtn" onclick="runIntelIndex()">建立 / 重建索引</button>
+              <span id="ragIndexStatus" class="muted" style="font-size:12px"></span>
+            </div>
+            <div id="ragMsg" class="msg"></div>
+            <div id="ragAnswer" style="display:none;margin-top:var(--sp-sm)">
+              <div class="card" style="margin:0"><div class="muted" style="font-size:12px">回答</div><div id="ragAnswerText" style="white-space:pre-wrap"></div></div>
+              <div class="muted" style="font-size:12px;margin-top:var(--sp-sm)">引用来源</div>
+              <div id="ragSources" style="display:flex;flex-direction:column;gap:var(--sp-xs)"></div>
+            </div>
           </div>
         </div>
       </div>
