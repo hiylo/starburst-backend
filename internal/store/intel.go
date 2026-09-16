@@ -72,6 +72,9 @@ type IntelEndpoint struct {
 	FieldsJSON   string `json:"fieldsJson"`
 	SourceFile   string `json:"sourceFile"`
 	SourceLine   int    `json:"sourceLine"`
+	// GatewayRoutes is the computed public gateway exposure (path patterns),
+	// filled on read; it is not persisted.
+	GatewayRoutes []string `json:"gatewayRoutes,omitempty"`
 }
 
 // CreateIntelProject persists a new project and populates its auto-generated id.

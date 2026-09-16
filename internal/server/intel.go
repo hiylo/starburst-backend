@@ -13,6 +13,7 @@ import (
 
 	"github.com/hiylo/starburst-backend/internal/intel"
 	"github.com/hiylo/starburst-backend/internal/intel/feature"
+	"github.com/hiylo/starburst-backend/internal/intel/gateway"
 	"github.com/hiylo/starburst-backend/internal/intel/testassets"
 	"github.com/hiylo/starburst-backend/internal/store"
 )
@@ -121,7 +122,31 @@ func (s *Server) handleIntelEndpoints(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "load endpoints failed")
 		return
 	}
+	s.enrichGatewayRoutes(ctx, projectID, eps)
 	writeJSON(w, http.StatusOK, map[string]any{"endpoints": eps})
+}
+
+// enrichGatewayRoutes attaches the matched public gateway path patterns to each
+// endpoint, so the contract view distinguishes the internal service path from
+// its gateway exposure.
+func (s *Server) enrichGatewayRoutes(ctx context.Context, projectID int64, eps []*store.IntelEndpoint) {
+	if len(eps) == 0 {
+		return
+	}
+	stored, err := s.store.ListIntelGatewayRoutes(ctx, projectID)
+	if err != nil || len(stored) == 0 {
+		return
+	}
+	routes := make([]*gateway.Route, 0, len(stored))
+	for _, r := range stored {
+		var paths []string
+		if json.Unmarshal([]byte(r.PathsJSON), &paths) == nil {
+			routes = append(routes, &gateway.Route{Service: r.Service, Paths: paths})
+		}
+	}
+	for _, ep := range eps {
+		ep.GatewayRoutes = gateway.Match(routes, ep.Path)
+	}
 }
 
 // handleIntelEntities lists entity↔table↔column mappings for a project (and
@@ -176,6 +201,33 @@ func (s *Server) handleIntelModules(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"modules": mods})
+}
+
+// handleIntelGatewayRoutes lists the gateway routes (public exposure) of a
+// project, discovered from gateway config and Nacos metadata.
+func (s *Server) handleIntelGatewayRoutes(w http.ResponseWriter, r *http.Request) {
+	if !s.requireWeb(r) {
+		if _, ok := s.requireToken(r); !ok {
+			writeErr(w, http.StatusUnauthorized, "web session or APP token required")
+			return
+		}
+	}
+	if r.Method != http.MethodGet {
+		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	projectID, ok := s.intelQueryProject(w, r)
+	if !ok {
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+	routes, err := s.store.ListIntelGatewayRoutes(ctx, projectID)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "load gateway routes failed")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"gatewayRoutes": routes})
 }
 
 // ---- implementation ----
@@ -394,6 +446,9 @@ func (s *Server) runIntelAnalyze(ctx context.Context, projectID int64) error {
 	if err := s.persistFeatures(ctx, projectID, allEndpoints); err != nil {
 		return err
 	}
+	if err := s.persistGatewayRoutes(ctx, projectID, root); err != nil {
+		log.Printf("intel gateway routes project %d: %v", projectID, err)
+	}
 	sha, err := snapshotSHA(root)
 	if err != nil {
 		sha = ""
@@ -449,6 +504,27 @@ func (s *Server) persistFeatures(ctx context.Context, projectID int64, endpoints
 		})
 	}
 	return s.store.ReplaceIntelFeatures(ctx, projectID, storeFeats)
+}
+
+// persistGatewayRoutes discovers gateway route configuration under root and
+// persists it so the endpoint view can map internal paths to public exposure.
+func (s *Server) persistGatewayRoutes(ctx context.Context, projectID int64, root string) error {
+	routes, err := gateway.Discover(root)
+	if err != nil {
+		return err
+	}
+	storeRoutes := make([]*store.IntelGatewayRoute, 0, len(routes))
+	for _, r := range routes {
+		paths, _ := json.Marshal(r.Paths)
+		storeRoutes = append(storeRoutes, &store.IntelGatewayRoute{
+			Service:    r.Service,
+			PathsJSON:  string(paths),
+			URI:        r.URI,
+			Source:     r.Source,
+			SourceLine: r.SourceLine,
+		})
+	}
+	return s.store.ReplaceIntelGatewayRoutes(ctx, projectID, storeRoutes)
 }
 
 // projectRoot returns the local working directory of a project: local path for

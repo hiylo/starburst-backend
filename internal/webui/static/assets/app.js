@@ -2427,16 +2427,18 @@ async function loadIntelContracts(id) {
   etb.innerHTML = "";
   eps.forEach((ep, idx) => {
     const mc = (ep.method || "").toLowerCase();
+    const gw = (ep.gatewayRoutes || []).map(g => `<span class="mono" style="font-size:11px">${escapeHtml(g)}</span>`).join("、") || `<span class="muted" style="font-size:11px">直连</span>`;
     etb.insertAdjacentHTML("beforeend", `<tr>
       <td><span class="badge method-${mc}">${escapeHtml(ep.method)}</span></td>
       <td class="mono">${escapeHtml(ep.path)}</td>
+      <td class="clip">${gw}</td>
       <td class="clip">${escapeHtml(ep.responseType || "-")}</td>
       <td class="clip muted" title="${escapeHtml(ep.requestJson || "")}">${escapeHtml(ep.requestJson || "-")}</td>
       <td class="mono muted clip" title="${escapeHtml(ep.sourceFile)}">${escapeHtml(shortProv(ep.sourceFile, ep.sourceLine))}</td>
       <td><button class="ghost sm" onclick="openIntelMock(${idx})">模拟</button></td>
     </tr>`);
   });
-  if (!eps.length) etb.insertAdjacentHTML("beforeend", `<tr><td colspan="6" class="muted" style="text-align:center;padding:16px">暂无接口契约（分析后自动提取）</td></tr>`);
+  if (!eps.length) etb.insertAdjacentHTML("beforeend", `<tr><td colspan="7" class="muted" style="text-align:center;padding:16px">暂无接口契约（分析后自动提取）</td></tr>`);
 
   // 实体按表分组：每张表一个卡片，列出全部字段（字段名/类型/主键/可空）
   renderIntelEntities(ents);

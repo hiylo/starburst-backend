@@ -102,6 +102,7 @@ var migrations = []migration{
 	{name: "intel_chat", apply: migrationIntelChat},
 	{name: "intel_findings", apply: migrationIntelFindings},
 	{name: "intel_fixes", apply: migrationIntelFixes},
+	{name: "intel_gateway_routes", apply: migrationIntelGatewayRoutes},
 }
 
 // migrationIntel creates the Test Intelligence subsystem tables: flat project
@@ -715,6 +716,31 @@ func migrationIntelFindings(ctx context.Context, driver string, db *sql.DB) erro
 			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 		)`, idColumn(driver)),
 		`CREATE INDEX IF NOT EXISTS idx_intel_findings_project ON intel_findings(project_id, status)`,
+	}
+	for _, s := range stmts {
+		if _, err := db.ExecContext(ctx, s); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// migrationIntelGatewayRoutes creates the gateway-route table: the public
+// gateway exposure (path patterns) of each backend service, discovered from
+// Spring Cloud Gateway config and Nacos gateway.paths metadata.
+func migrationIntelGatewayRoutes(ctx context.Context, driver string, db *sql.DB) error {
+	stmts := []string{
+		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS intel_gateway_routes (
+			%s,
+			project_id INTEGER NOT NULL DEFAULT 0,
+			service TEXT NOT NULL DEFAULT '',
+			paths_json TEXT NOT NULL DEFAULT '',
+			uri TEXT NOT NULL DEFAULT '',
+			source TEXT NOT NULL DEFAULT '',
+			source_line INTEGER NOT NULL DEFAULT 0,
+			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+		)`, idColumn(driver)),
+		`CREATE INDEX IF NOT EXISTS idx_intel_gateway_routes_project ON intel_gateway_routes(project_id)`,
 	}
 	for _, s := range stmts {
 		if _, err := db.ExecContext(ctx, s); err != nil {

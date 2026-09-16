@@ -332,6 +332,10 @@ type Store interface {
 	ListIntelFixes(ctx context.Context, projectID int64, status string) ([]*IntelFix, error)
 	// UpdateIntelFix persists mutable fix fields.
 	UpdateIntelFix(ctx context.Context, f *IntelFix) error
+	// ReplaceIntelGatewayRoutes replaces the project's gateway routes (full rescan).
+	ReplaceIntelGatewayRoutes(ctx context.Context, projectID int64, routes []*IntelGatewayRoute) error
+	// ListIntelGatewayRoutes returns the project's gateway routes.
+	ListIntelGatewayRoutes(ctx context.Context, projectID int64) ([]*IntelGatewayRoute, error)
 }
 
 // Open opens a store for the given driver/dsn. It applies all migrations
