@@ -2,6 +2,7 @@ package intel
 
 import (
 	"bufio"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -18,18 +19,21 @@ import (
 // guarantees every extracted row has a verifiable location.
 
 var (
-	reEntity         = regexp.MustCompile(`@Entity\b`)
-	reTable          = regexp.MustCompile(`@Table\s*\(\s*name\s*=\s*"([^"]+)"`)
-	reClass          = regexp.MustCompile(`\bclass\s+([A-Za-z0-9_]+)`)
-	reColumn         = regexp.MustCompile(`@Column`)
-	reColumnName     = regexp.MustCompile(`@Column\s*\(\s*name\s*=\s*"([^"]+)"`)
-	reColumnNullable = regexp.MustCompile(`nullable\s*=\s*(true|false)`)
-	reField          = regexp.MustCompile(`^\s*(?:private|public|protected)\s+([A-Za-z0-9_<>,\[\]\. ]+)\s+([A-Za-z0-9_]+)\s*(?:=|;)`)
-	reController     = regexp.MustCompile(`@(RestController|Controller)\b`)
-	reRequestMapping = regexp.MustCompile(`@RequestMapping\s*\(\s*(?:value\s*=\s*)?"([^"]*)"`)
-	reMethodValue    = regexp.MustCompile(`@(?:Get|Post|Put|Delete|Patch)Mapping\s*\(\s*(?:value\s*=\s*)?(?:path\s*=\s*)?"([^"]*)"`)
-	reReturnType     = regexp.MustCompile(`\b(public)\s+([A-Za-z0-9_<>,\[\]\. ]+)\s+([A-Za-z0-9_]+)\s*\(`)
-	reRequestBody    = regexp.MustCompile(`@RequestBody\s+([A-Za-z0-9_]+)`)
+	reEntity          = regexp.MustCompile(`@Entity\b`)
+	reTable           = regexp.MustCompile(`@Table\s*\(\s*name\s*=\s*"([^"]+)"`)
+	reClass           = regexp.MustCompile(`\bclass\s+([A-Za-z0-9_]+)`)
+	reColumn          = regexp.MustCompile(`@Column`)
+	reColumnName      = regexp.MustCompile(`@Column\s*\(\s*name\s*=\s*"([^"]+)"`)
+	reColumnNullable  = regexp.MustCompile(`nullable\s*=\s*(true|false)`)
+	reField           = regexp.MustCompile(`^\s*(?:private|public|protected)\s+(?:@[\w.]+(?:\s*\([^)]*\))?\s+)*([A-Za-z0-9_$<>,\[\]\.]+)\s+([A-Za-z0-9_$]+)\s*(?:=|;)`)
+	reController      = regexp.MustCompile(`@(RestController|Controller)\b`)
+	reRequestMapping  = regexp.MustCompile(`@RequestMapping\s*\(\s*(?:value\s*=\s*)?"([^"]*)"`)
+	reMethodValue     = regexp.MustCompile(`@(?:Get|Post|Put|Delete|Patch)Mapping\s*\(\s*(?:value\s*=\s*)?(?:path\s*=\s*)?"([^"]*)"`)
+	reReturnType      = regexp.MustCompile(`\b(public)\s+([A-Za-z0-9_<>,\[\]\. ]+)\s+([A-Za-z0-9_]+)\s*\(`)
+	reRequestBody     = regexp.MustCompile(`@RequestBody\s+([A-Za-z0-9_<>,\[\]\.]+)\s+([A-Za-z0-9_]+)`)
+	rePathVariable    = regexp.MustCompile(`@PathVariable(?:\(\s*(?:value\s*=\s*|name\s*=\s*)?"([^"]*)")?\s*([A-Za-z0-9_<>,\[\]\.]+)\s+([A-Za-z0-9_]+)`)
+	reRequestParam    = regexp.MustCompile(`@RequestParam(?:\(\s*(?:value\s*=\s*|name\s*=\s*)?"([^"]*)"[^)]*\))?\s*([A-Za-z0-9_<>,\[\]\.]+)\s+([A-Za-z0-9_]+)`)
+	reRequestRequired = regexp.MustCompile(`required\s*=\s*false`)
 )
 
 // scanJavaFiles scans a set of .java files and returns the extracted entity
@@ -207,20 +211,71 @@ func scanController(file string, lines []string) []*store.IntelEndpoint {
 		httpMethod := mapMethod(m[0])
 		path := joinPath(classPrefix, m[1])
 		respType, _, _ := methodReturnAt(lines, i)
-		req := ""
-		if rm := reRequestBody.FindStringSubmatch(l); rm != nil {
-			req = rm[1]
-		}
 		out = append(out, &store.IntelEndpoint{
 			Method:       httpMethod,
 			Path:         path,
 			ResponseType: respType,
-			RequestJSON:  req,
+			RequestJSON:  extractRequestInfo(lines, i),
 			SourceFile:   file,
 			SourceLine:   i + 1,
 		})
 	}
 	return out
+}
+
+// paramInfo is one request parameter (path variable, query parameter or body).
+type paramInfo struct {
+	Name     string `json:"name"`
+	Type     string `json:"type"`
+	Source   string `json:"source"` // path | query
+	Required bool   `json:"required"`
+}
+
+// extractRequestInfo scans the method signature following a mapping annotation
+// (up to ~9 lines) for @PathVariable/@RequestParam/@RequestBody and renders a
+// JSON request contract. The @RequestBody type name is recorded; its field-level
+// expansion is left to the LLM assist layer (cross-module DTO resolution).
+func extractRequestInfo(lines []string, start int) string {
+	end := start + 9
+	if end > len(lines) {
+		end = len(lines)
+	}
+	window := strings.Join(lines[start:end], "\n")
+
+	params := make([]paramInfo, 0)
+	for _, m := range rePathVariable.FindAllStringSubmatch(window, -1) {
+		name := m[1]
+		if name == "" {
+			name = m[3]
+		}
+		params = append(params, paramInfo{Name: name, Type: m[2], Source: "path", Required: true})
+	}
+	for _, m := range reRequestParam.FindAllStringSubmatch(window, -1) {
+		name := m[1]
+		if name == "" {
+			name = m[3]
+		}
+		params = append(params, paramInfo{Name: name, Type: m[2], Source: "query", Required: !reRequestRequired.MatchString(m[0])})
+	}
+	bodyType := ""
+	if m := reRequestBody.FindStringSubmatch(window); m != nil {
+		bodyType = m[1]
+	}
+	if len(params) == 0 && bodyType == "" {
+		return ""
+	}
+	obj := map[string]any{}
+	if len(params) > 0 {
+		obj["params"] = params
+	}
+	if bodyType != "" {
+		obj["bodyType"] = bodyType
+	}
+	b, err := json.Marshal(obj)
+	if err != nil {
+		return ""
+	}
+	return string(b)
 }
 
 // methodMappingAt recognizes a method-level HTTP mapping annotation on a line.

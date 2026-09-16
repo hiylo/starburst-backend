@@ -13,8 +13,8 @@ import (
 // walked exhaustively during type detection.
 const maxModuleDepth = 5
 
-// DetectModules walks a repository root and identifies its sub-projects
-// (modules): every directory (including the root) that owns a build anchor is
+// DetectModules walks a repository root and identifies its sub-modules:
+// every directory (including the root) that owns a build anchor is
 // a module; monorepo layouts (services/, clients/, app/) and Maven multi-module
 // <modules> fall out naturally. Each module gets a detected type and role.
 func DetectModules(root string) ([]*store.IntelModule, error) {
@@ -53,10 +53,14 @@ func DetectModules(root string) ([]*store.IntelModule, error) {
 }
 
 // registerDir registers a module for dir (with its anchors) when it owns a
-// build anchor directly.
+// build anchor directly and is not a container directory (Gradle project root,
+// Maven aggregator).
 func registerDir(dir, rel string, mods map[string]*store.IntelModule) {
 	anchors := anchorsInDir(dir)
 	if len(anchors) == 0 {
+		return
+	}
+	if isContainerDir(dir) {
 		return
 	}
 	t := DetectType(anchorNames(anchors))
@@ -69,6 +73,24 @@ func registerDir(dir, rel string, mods map[string]*store.IntelModule) {
 		KindRole:  roleForType(t),
 		BuildTool: buildToolForNames(anchors),
 	}
+}
+
+// isContainerDir reports whether dir is a project container rather than a
+// buildable module: a Gradle project root (settings.gradle*) whose app/ module
+// is the real build target, or a Maven aggregator pom with <modules>. These are
+// skipped so only the innermost buildable modules are registered.
+func isContainerDir(dir string) bool {
+	for _, s := range []string{"settings.gradle", "settings.gradle.kts"} {
+		if _, err := os.Stat(filepath.Join(dir, s)); err == nil {
+			return true
+		}
+	}
+	if b, err := os.ReadFile(filepath.Join(dir, "pom.xml")); err == nil {
+		if strings.Contains(string(b), "<modules>") {
+			return true
+		}
+	}
+	return false
 }
 
 // anchorsInDir lists build anchor filenames present directly under dir.
