@@ -135,6 +135,32 @@ func (s *Server) handleIntelRun(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"run": run})
 }
 
+// handleIntelRuns lists test runs for a project, newest first.
+func (s *Server) handleIntelRuns(w http.ResponseWriter, r *http.Request) {
+	if !s.requireWeb(r) {
+		if _, ok := s.requireToken(r); !ok {
+			writeErr(w, http.StatusUnauthorized, "web session or APP token required")
+			return
+		}
+	}
+	if r.Method != http.MethodGet {
+		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	projectID, ok := s.intelQueryProject(w, r)
+	if !ok {
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+	runs, err := s.store.ListIntelTestRuns(ctx, projectID)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "load runs failed")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"runs": runs})
+}
+
 // handleIntelRunByID returns one run with its per-case results.
 func (s *Server) handleIntelRunByID(w http.ResponseWriter, r *http.Request) {
 	if !s.requireWeb(r) {

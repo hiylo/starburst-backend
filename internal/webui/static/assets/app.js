@@ -2259,6 +2259,7 @@ function clearStream() {
 
 /* ---------- 智能测试（intel） ---------- */
 let intelCurrentProject = 0;
+let intelEndpointsCache = [];
 const INTEL_TYPE_LABELS = { java: "Java", android: "Android", ios: "iOS", go: "Go", web: "Web", node: "Node" };
 
 function toggleIntelSource() {
@@ -2269,8 +2270,12 @@ function toggleIntelSource() {
   refInput.classList.toggle("hidden", src !== "git");
 }
 
-// intel tab switcher
+// intel tab switcher（切到某 Tab 时按需加载对应分析结果）
 document.addEventListener("DOMContentLoaded", () => {
+  const tabLoaders = {
+    features: loadIntelFeatures, cases: loadIntelCases, findings: loadIntelFindings,
+    issues: loadIntelIssues, fixes: loadIntelFixes, runs: loadIntelRuns,
+  };
   document.querySelectorAll(".intel-tab").forEach(t => {
     t.addEventListener("click", () => {
       document.querySelectorAll(".intel-tab").forEach(b => b.classList.remove("active"));
@@ -2278,6 +2283,8 @@ document.addEventListener("DOMContentLoaded", () => {
       document.querySelectorAll(".intel-panel").forEach(p => p.classList.add("hidden"));
       const panel = document.getElementById("intelPanel-" + t.dataset.tab);
       if (panel) panel.classList.remove("hidden");
+      const loader = tabLoaders[t.dataset.tab];
+      if (loader && intelCurrentProject) loader(intelCurrentProject);
     });
   });
 });
@@ -2415,19 +2422,21 @@ async function loadIntelContracts(id) {
   document.getElementById("intelDetailStatTables").textContent = tableSet.size;
 
   // 接口契约表
+  intelEndpointsCache = eps;
   const etb = document.querySelector("#intelEndpointTable tbody");
   etb.innerHTML = "";
-  for (const ep of eps) {
+  eps.forEach((ep, idx) => {
     const mc = (ep.method || "").toLowerCase();
     etb.insertAdjacentHTML("beforeend", `<tr>
       <td><span class="badge method-${mc}">${escapeHtml(ep.method)}</span></td>
       <td class="mono">${escapeHtml(ep.path)}</td>
       <td class="clip">${escapeHtml(ep.responseType || "-")}</td>
-      <td class="clip muted">${escapeHtml(ep.requestJson || "-")}</td>
+      <td class="clip muted" title="${escapeHtml(ep.requestJson || "")}">${escapeHtml(ep.requestJson || "-")}</td>
       <td class="mono muted clip" title="${escapeHtml(ep.sourceFile)}">${escapeHtml(shortProv(ep.sourceFile, ep.sourceLine))}</td>
+      <td><button class="ghost sm" onclick="openIntelMock(${idx})">模拟</button></td>
     </tr>`);
-  }
-  if (!eps.length) etb.insertAdjacentHTML("beforeend", `<tr><td colspan="5" class="muted" style="text-align:center;padding:16px">暂无接口契约（分析后自动提取）</td></tr>`);
+  });
+  if (!eps.length) etb.insertAdjacentHTML("beforeend", `<tr><td colspan="6" class="muted" style="text-align:center;padding:16px">暂无接口契约（分析后自动提取）</td></tr>`);
 
   // 实体按表分组：每张表一个卡片，列出全部字段（字段名/类型/主键/可空）
   renderIntelEntities(ents);
@@ -2472,6 +2481,227 @@ function shortProv(file, line) {
   if (!file) return "-";
   const name = file.split("/").pop().split("\\").pop();
   return name + ":" + (line || 0);
+}
+
+/* ---------- 模拟请求（接口契约 → 自动填参 + curl/JSON） ---------- */
+let mockMethod = "GET";
+let mockPath = "/";
+let mockParams = [];
+let mockBodyType = "";
+
+function mockValue(type, name) {
+  const t = (type || "").toLowerCase();
+  if (/long|integer|int|short|byte|number|bigint/.test(t)) return 1;
+  if (/double|float|decimal|bigdecimal/.test(t)) return 1.5;
+  if (/boolean/.test(t)) return true;
+  if (/date|time|timestamp/.test(t)) return "2026-09-16T00:00:00";
+  if (/list|set|map|array|collection/.test(t)) return [];
+  if (/id/i.test(name || "")) return 1;
+  if (/name|title|label/i.test(name || "")) return "test";
+  return "test";
+}
+
+function buildMockUrl(method, path, params) {
+  let url = "http://localhost:8080" + (path || "/");
+  const qs = [];
+  for (const p of params || []) {
+    if (p.source === "path") {
+      url = url.split("{" + p.name + "}").join(encodeURIComponent(mockValue(p.type, p.name)));
+    } else {
+      qs.push(encodeURIComponent(p.name) + "=" + encodeURIComponent(mockValue(p.type, p.name)));
+    }
+  }
+  if (qs.length) url += "?" + qs.join("&");
+  return url;
+}
+
+function openIntelMock(idx) {
+  const ep = intelEndpointsCache[idx];
+  if (!ep) return;
+  let params = [], bodyType = "";
+  if (ep.requestJson) {
+    try { const r = JSON.parse(ep.requestJson); params = r.params || []; bodyType = r.bodyType || ""; } catch (_) {}
+  }
+  mockMethod = (ep.method || "GET").toUpperCase();
+  mockPath = ep.path || "/";
+  mockParams = params;
+  mockBodyType = bodyType;
+  document.getElementById("intelMockTitle").textContent =
+    `${mockMethod} ${mockPath}${bodyType ? "  ·  请求体类型 " + bodyType : ""}`;
+  document.getElementById("intelMockUrl").value = buildMockUrl(mockMethod, mockPath, params);
+  document.getElementById("intelMockBody").value = bodyType ? "{\n}" : "";
+  document.getElementById("intelMockCurl").value = renderMockCurl();
+  document.getElementById("intelMockStatus").textContent = "";
+  document.getElementById("intelMockModal").classList.remove("hidden");
+}
+
+function renderMockCurl() {
+  const url = document.getElementById("intelMockUrl").value;
+  const body = document.getElementById("intelMockBody").value.trim();
+  const hasBody = mockMethod === "POST" || mockMethod === "PUT" || mockMethod === "PATCH";
+  let cmd = `curl -X ${mockMethod} '${url}'`;
+  if (hasBody && body) cmd += ` \\\n  -H 'Content-Type: application/json' \\\n  -d '${body.replace(/'/g, "'\\''")}'`;
+  else if (hasBody) cmd += ` -H 'Content-Type: application/json'`;
+  return cmd;
+}
+
+function closeIntelMock() {
+  document.getElementById("intelMockModal").classList.add("hidden");
+}
+
+async function copyIntelMock() {
+  const curl = renderMockCurl();
+  document.getElementById("intelMockCurl").value = curl;
+  try {
+    await navigator.clipboard.writeText(curl);
+    document.getElementById("intelMockStatus").textContent = "已复制到剪贴板";
+  } catch (_) {
+    document.getElementById("intelMockStatus").textContent = "复制失败，请手动选择";
+  }
+}
+
+/* ---------- 分析结果 Tab：功能点 / 用例 / 审计 / 问题 / 修复 / 运行 ---------- */
+const SEV_LABELS = { critical: "严重", high: "高", medium: "中", low: "低" };
+
+async function loadIntelFeatures(id) {
+  const res = await api("/api/intel/features?projectId=" + id, { headers: appHeaders() });
+  const data = await res.json();
+  const feats = data.features || [];
+  const wrap = document.getElementById("intelFeatureList");
+  wrap.innerHTML = "";
+  if (!feats.length) { wrap.innerHTML = `<div class="muted" style="text-align:center;padding:16px">暂无功能点（分析后自动聚类）</div>`; return; }
+  for (const f of feats) {
+    let ends = [];
+    try { ends = JSON.parse(f.endsJson || "[]"); } catch (_) {}
+    const endRows = (ends || []).map(e => `<span class="mono" style="font-size:11px">${escapeHtml(e.method || "")} ${escapeHtml(e.path || "")}</span>`).join("、");
+    wrap.insertAdjacentHTML("beforeend", `<div class="card" style="margin:0">
+      <div class="row" style="justify-content:space-between">
+        <strong>${escapeHtml(f.name || "-")}</strong>
+        <span class="muted" style="font-size:12px">${ends.length} 个接口 · ${escapeHtml(f.source || "auto")}</span>
+      </div>
+      <div class="muted" style="font-size:12px;margin-top:6px">${endRows || "（无关联接口）"}</div>
+    </div>`);
+  }
+}
+
+async function loadIntelCases(id) {
+  const res = await api("/api/intel/test-cases?projectId=" + id, { headers: appHeaders() });
+  const data = await res.json();
+  const cases = data.testCases || [];
+  const tb = document.querySelector("#intelCaseTable tbody");
+  tb.innerHTML = "";
+  for (const c of cases) {
+    tb.insertAdjacentHTML("beforeend", `<tr>
+      <td class="mono clip">${escapeHtml(c.module || "-")}</td>
+      <td><span class="badge">${escapeHtml(c.kind || "-")}</span></td>
+      <td>${escapeHtml(c.framework || "-")}</td>
+      <td class="mono clip">${escapeHtml(c.class || "")}${c.method ? "." + escapeHtml(c.method) : ""}</td>
+      <td class="mono muted clip" title="${escapeHtml(c.path || "")}">${escapeHtml(shortProv(c.path, 0))}</td>
+    </tr>`);
+  }
+  if (!cases.length) tb.insertAdjacentHTML("beforeend", `<tr><td colspan="5" class="muted" style="text-align:center;padding:16px">暂无测试用例（分析后自动发现）</td></tr>`);
+}
+
+async function loadIntelFindings(id) {
+  const res = await api("/api/intel/findings?projectId=" + id, { headers: appHeaders() });
+  const data = await res.json();
+  const findings = data.findings || [];
+  const wrap = document.getElementById("intelFindingList");
+  wrap.innerHTML = "";
+  if (!findings.length) { wrap.innerHTML = `<div class="muted" style="text-align:center;padding:16px">暂无合规 / 审计发现（分析后自动扫描）</div>`; return; }
+  for (const f of findings) {
+    const sev = f.severity || "low";
+    wrap.insertAdjacentHTML("beforeend", `<div class="card" style="margin:0">
+      <div class="row" style="justify-content:space-between">
+        <div class="row" style="gap:6px">
+          <span class="badge sev-${sev}">${SEV_LABELS[sev] || sev}</span>
+          <span class="badge">${escapeHtml(f.category || "-")}</span>
+          <span class="mono muted" style="font-size:11px">${escapeHtml(f.cveOrRuleId || f.detector || "")}</span>
+        </div>
+        <span class="intel-status ${f.status === "open" ? "analyzed" : ""}">${escapeHtml(f.status || "open")}</span>
+      </div>
+      <div style="margin-top:6px">${escapeHtml(f.summary || "")}</div>
+      <div class="muted mono" style="font-size:11px;margin-top:4px">${escapeHtml(f.location || "")}</div>
+    </div>`);
+  }
+}
+
+async function loadIntelIssues(id) {
+  const res = await api("/api/intel/issues?projectId=" + id, { headers: appHeaders() });
+  const data = await res.json();
+  const issues = data.issues || [];
+  const tb = document.querySelector("#intelIssueTable tbody");
+  tb.innerHTML = "";
+  for (const it of issues) {
+    tb.insertAdjacentHTML("beforeend", `<tr>
+      <td><span class="badge">${escapeHtml(it.kind || "-")}</span></td>
+      <td><span class="badge sev-${it.severity || "low"}">${SEV_LABELS[it.severity] || it.severity || "-"}</span></td>
+      <td class="mono clip" title="${escapeHtml(it.location || "")}">${escapeHtml(it.location || "-")}</td>
+      <td><span class="intel-status ${it.status === "open" ? "analyzed" : ""}">${escapeHtml(it.status || "open")}</span></td>
+      <td class="muted" style="font-size:12px">${it.commitSeen ? escapeHtml(it.commitSeen.slice(0, 8)) : "-"}</td>
+    </tr>`);
+  }
+  if (!issues.length) tb.insertAdjacentHTML("beforeend", `<tr><td colspan="5" class="muted" style="text-align:center;padding:16px">暂无问题（测试失败后自动登记）</td></tr>`);
+}
+
+async function loadIntelFixes(id) {
+  const res = await api("/api/intel/fixes?projectId=" + id, { headers: appHeaders() });
+  const data = await res.json();
+  const fixes = data.fixes || [];
+  const wrap = document.getElementById("intelFixList");
+  wrap.innerHTML = "";
+  if (!fixes.length) { wrap.innerHTML = `<div class="muted" style="text-align:center;padding:16px">暂无修复建议</div>`; return; }
+  for (const fx of fixes) {
+    wrap.insertAdjacentHTML("beforeend", `<div class="card" style="margin:0">
+      <div class="row" style="justify-content:space-between">
+        <strong>${escapeHtml(fx.title || fx.kind || "-")}</strong>
+        <span class="intel-status ${fx.status === "applied" ? "analyzed" : ""}">${escapeHtml(fx.status || "pending")}</span>
+      </div>
+      <div class="row" style="gap:6px;margin-top:6px">
+        <button class="ghost sm" onclick="applyIntelFix(${fx.id}, 'apply')">应用</button>
+        <button class="tertiary sm" onclick="applyIntelFix(${fx.id}, 'reject')">拒绝</button>
+      </div>
+    </div>`);
+  }
+}
+
+async function applyIntelFix(fixId, action) {
+  const res = await api("/api/intel/fixes/" + fixId + "/" + action, { method: "POST", headers: appHeaders() });
+  const data = await res.json();
+  if (!res.ok) { show(document.getElementById("intelMsg"), data.error || "操作失败"); return; }
+  loadIntelFixes(intelCurrentProject);
+}
+
+async function loadIntelRuns(id) {
+  const res = await api("/api/intel/runs?projectId=" + id, { headers: appHeaders() });
+  const data = await res.json();
+  const runs = data.runs || [];
+  const tb = document.querySelector("#intelRunTable tbody");
+  tb.innerHTML = "";
+  for (const r of runs) {
+    const dur = r.finishedAt && r.startedAt ? Math.round((new Date(r.finishedAt) - new Date(r.startedAt)) / 1000) + "s" : "-";
+    tb.insertAdjacentHTML("beforeend", `<tr>
+      <td>#${r.id}</td>
+      <td>${escapeHtml(r.scope || "module")}</td>
+      <td class="mono clip" title="${escapeHtml(r.command || "")}">${escapeHtml(r.command || "-")}</td>
+      <td><span class="intel-status ${r.status === "passed" ? "analyzed" : ""}">${escapeHtml(r.status || "-")}</span></td>
+      <td class="muted" style="font-size:12px">${r.startedAt ? new Date(r.startedAt).toLocaleString() : "-"}</td>
+      <td>${dur}</td>
+    </tr>`);
+  }
+  if (!runs.length) tb.insertAdjacentHTML("beforeend", `<tr><td colspan="6" class="muted" style="text-align:center;padding:16px">暂无运行记录（点击右上角「运行测试」触发）</td></tr>`);
+}
+
+async function runIntelTests() {
+  const id = intelCurrentProject;
+  if (!id) return;
+  const st = document.getElementById("intelAnalyzeStatus");
+  if (st) st.textContent = "运行测试中…";
+  const res = await api("/api/intel/run", { method: "POST", headers: appHeaders(), body: JSON.stringify({ projectId: id }) });
+  const data = await res.json();
+  if (!res.ok) { if (st) st.textContent = ""; show(document.getElementById("intelMsg"), data.error || "运行失败"); return; }
+  if (st) st.textContent = "运行完成：" + (data.run ? data.run.status : "");
+  loadIntelRuns(id);
 }
 
 // 执行分析（不跳转）；在详情页时分析后原地刷新详情
@@ -2527,8 +2757,7 @@ async function initIntelChats() {
   await loadRagChatList(0);
   document.getElementById("ragDelBtn").disabled = true;
   document.getElementById("ragCurrentTitle").textContent = "新对话";
-  document.getElementById("ragMessages").innerHTML =
-    `<div class="muted" style="text-align:center;padding:16px">向知识库提问，支持连续追问（记住上下文）</div>`;
+  ragShowEmpty();
 }
 
 async function loadRagChatList(activeId) {
@@ -2557,9 +2786,22 @@ function newIntelChat() {
   intelCurrentChat = 0;
   document.getElementById("ragDelBtn").disabled = true;
   document.getElementById("ragCurrentTitle").textContent = "新对话";
-  document.getElementById("ragMessages").innerHTML =
-    `<div class="muted" style="text-align:center;padding:16px">新对话，开始提问吧</div>`;
+  ragShowEmpty();
   document.querySelectorAll(".rag-chat-item").forEach(el => el.classList.remove("active"));
+}
+
+function ragShowEmpty() {
+  document.getElementById("ragMessages").innerHTML =
+    `<div class="rag-empty">向知识库提问，支持连续追问<br><span>基于已索引的项目契约与代码</span></div>`;
+}
+
+function ragQuestionKeydown(e) {
+  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); askIntel(); }
+}
+
+function autoGrowRagInput(el) {
+  el.style.height = "auto";
+  el.style.height = Math.min(el.scrollHeight, 140) + "px";
 }
 
 async function selectIntelChat(chatId) {
@@ -2611,7 +2853,9 @@ async function askIntel() {
   if (!id || !q) { show(document.getElementById("ragMsg"), "请输入问题"); return; }
   const btn = document.getElementById("ragAskBtn");
   btn.disabled = true;
-  document.getElementById("ragQuestion").value = "";
+  const input = document.getElementById("ragQuestion");
+  input.value = "";
+  input.style.height = "auto";
   appendRagBubble("user", q, null);
   const res = await api("/api/intel/ask", { method: "POST", headers: appHeaders(), body: JSON.stringify({ projectId: id, question: q, chatId: intelCurrentChat }) });
   const data = await res.json();

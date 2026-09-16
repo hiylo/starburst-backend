@@ -715,14 +715,21 @@ td .actions { display: inline-flex; gap: 6px; }
   .intel-detail-rag { position: static; }
 }
 
+.rag-card {
+  background: var(--surface-1);
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-lg);
+  box-shadow: var(--shadow-card);
+  overflow: hidden;
+}
 .rag-section {
-  display: flex; gap: 10px; align-items: stretch; min-height: 0;
+  display: flex; gap: 0; align-items: stretch; min-height: 0;
 }
 .rag-sidebar {
   width: 200px; flex-shrink: 0;
   display: flex; flex-direction: column; min-height: 0;
-  background: var(--surface-1); border: 1px solid var(--hairline);
-  border-radius: var(--r-lg); overflow: hidden;
+  background: var(--surface-1);
+  border-right: 1px solid var(--hairline);
   transition: width .18s ease, opacity .18s ease;
 }
 .rag-sidebar.collapsed { display: none; }
@@ -740,24 +747,45 @@ td .actions { display: inline-flex; gap: 6px; }
 }
 .rag-chat-item:hover { background: var(--surface-2); color: var(--ink); }
 .rag-chat-item.active { background: var(--info-dim); color: var(--ink); }
+.rag-sidebar-foot {
+  padding: 8px; border-top: 1px solid var(--hairline);
+}
+.rag-sidebar-foot button { width: 100%; }
 
 .rag-main {
   flex: 1; min-width: 0; display: flex; flex-direction: column; min-height: 0;
-  background: var(--surface-1); border: 1px solid var(--hairline);
-  border-radius: var(--r-lg); overflow: hidden;
-  height: calc(100vh - 150px); min-height: 440px; max-height: 760px;
+  background: var(--surface-1);
+  height: calc(100vh - 150px); min-height: 460px; max-height: 780px;
 }
 .rag-main-head {
-  display: flex; align-items: center; gap: 8px;
-  padding: 9px 12px; border-bottom: 1px solid var(--hairline);
+  display: flex; align-items: center; gap: 6px;
+  padding: 8px 12px; border-bottom: 1px solid var(--hairline);
 }
-.rag-main-head .rag-title { font-size: 13px; font-weight: 500; color: var(--ink-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rag-head-spacer { flex: 1; }
+.rag-title {
+  font-size: 13px; font-weight: 500; color: var(--ink-muted);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 40%;
+}
+.rag-icon-btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 28px; height: 28px; padding: 0; border-radius: var(--r-sm);
+  background: transparent; border: 1px solid transparent; color: var(--ink-subtle);
+  cursor: pointer; font-size: 15px; line-height: 1;
+}
+.rag-icon-btn:hover { background: var(--surface-2); color: var(--ink); }
+.rag-icon-btn:disabled { opacity: .4; cursor: default; }
+
 .rag-msgs {
-  flex: 1; overflow-y: auto; padding: 16px 14px;
-  display: flex; flex-direction: column; gap: 14px;
+  flex: 1; overflow-y: auto; padding: 18px 16px;
+  display: flex; flex-direction: column; gap: 16px;
   scroll-behavior: smooth;
 }
-.rag-msg { display: flex; flex-direction: column; max-width: 88%; }
+.rag-empty {
+  margin: auto; text-align: center; color: var(--ink-tertiary); font-size: 13px;
+  line-height: 1.7; padding: 32px 12px;
+}
+.rag-empty span { font-size: 12px; color: var(--ink-tertiary); }
+.rag-msg { display: flex; flex-direction: column; max-width: 90%; }
 .rag-msg.user { align-self: flex-end; align-items: flex-end; }
 .rag-msg.assistant { align-self: flex-start; align-items: flex-start; }
 .rag-msg-label { font-size: 11px; color: var(--ink-tertiary); margin-bottom: 4px; padding: 0 4px; }
@@ -777,18 +805,48 @@ td .actions { display: inline-flex; gap: 6px; }
   margin-top: 8px; padding-top: 7px; border-top: 1px solid var(--hairline);
   font-size: 11px; color: var(--ink-subtle); line-height: 1.5;
 }
-.rag-inputbar { display: flex; gap: 8px; padding: 12px; border-top: 1px solid var(--hairline); }
-.rag-inputbar input {
-  flex: 1; padding: 10px 14px; border-radius: var(--r-pill);
-  background: var(--surface-2); border: 1px solid var(--hairline);
-  color: var(--ink); font-size: 13px; outline: none;
+.rag-inputbar {
+  display: flex; align-items: flex-end; gap: 8px;
+  padding: 12px; border-top: 1px solid var(--hairline);
 }
-.rag-inputbar input:focus { border-color: var(--primary); box-shadow: 0 0 0 3px var(--primary-focus); }
-.rag-inputbar input::placeholder { color: var(--ink-tertiary); }
-.rag-inputbar button { border-radius: var(--r-pill); padding: 0 20px; }
+.rag-inputbar textarea {
+  flex: 1; padding: 10px 14px; border-radius: 12px; resize: none;
+  background: var(--surface-2); border: 1px solid var(--hairline);
+  color: var(--ink); font-size: 13px; line-height: 1.5; font-family: inherit;
+  outline: none; max-height: 140px;
+}
+.rag-inputbar textarea:focus { border-color: var(--primary); box-shadow: 0 0 0 3px var(--primary-focus); }
+.rag-inputbar textarea::placeholder { color: var(--ink-tertiary); }
+.rag-inputbar button {
+  border-radius: var(--r-pill); padding: 0 20px; height: 40px; flex-shrink: 0;
+}
+.rag-msg .msg, #ragMsg { padding: 0 14px; }
 @media (max-width: 720px) {
   .rag-section { flex-direction: column; }
   .rag-sidebar { width: 100%; max-height: 180px; }
   .rag-sidebar.collapsed { display: none; }
   .rag-main { height: auto; max-height: none; min-height: 360px; }
 }
+
+/* ============================== 模拟请求弹窗 ============================== */
+.modal {
+  position: fixed; inset: 0; z-index: 200;
+  display: flex; align-items: center; justify-content: center;
+  background: rgba(0, 0, 0, 0.55); padding: 24px;
+}
+.modal-card {
+  width: 100%; max-width: 640px; max-height: 90vh; overflow-y: auto;
+  background: var(--surface-1); border: 1px solid var(--hairline-strong);
+  border-radius: var(--r-lg); padding: 20px; box-shadow: var(--shadow-pop);
+}
+.modal-card textarea, .modal-card input {
+  width: 100%; box-sizing: border-box; background: var(--surface-2);
+  border: 1px solid var(--hairline); color: var(--ink); border-radius: var(--r-sm);
+  padding: 9px 11px; font-size: 12.5px; resize: vertical;
+}
+
+/* ============================== 严重度 / 状态徽章 ============================== */
+.badge.sev-critical { background: var(--danger-dim); color: var(--danger); border-color: rgba(255,71,71,.4); }
+.badge.sev-high { background: rgba(255,120,40,.14); color: #ff9440; border-color: rgba(255,120,40,.35); }
+.badge.sev-medium { background: var(--warning-dim); color: var(--warning); border-color: rgba(247,201,72,.35); }
+.badge.sev-low { background: var(--info-dim); color: var(--primary-hover); border-color: rgba(99,102,241,.35); }

@@ -432,6 +432,7 @@
                 </div>
                 <div class="row">
                   <button onclick="runIntelAnalyze()">执行分析</button>
+                  <button class="ghost" onclick="runIntelTests()">运行测试</button>
                   <span id="intelAnalyzeStatus" class="muted" style="font-size:12px"></span>
                 </div>
               </div>
@@ -449,6 +450,12 @@
                 <button class="intel-tab active" data-tab="modules">子模块</button>
                 <button class="intel-tab" data-tab="endpoints">接口契约</button>
                 <button class="intel-tab" data-tab="entities">实体 / 表 / 列</button>
+                <button class="intel-tab" data-tab="features">功能点</button>
+                <button class="intel-tab" data-tab="cases">测试用例</button>
+                <button class="intel-tab" data-tab="findings">合规审计</button>
+                <button class="intel-tab" data-tab="issues">问题</button>
+                <button class="intel-tab" data-tab="fixes">修复建议</button>
+                <button class="intel-tab" data-tab="runs">运行记录</button>
               </div>
 
               <div class="intel-panel" id="intelPanel-modules">
@@ -458,41 +465,69 @@
               </div>
               <div class="intel-panel hidden" id="intelPanel-endpoints">
                 <div class="table-wrap">
-                  <table id="intelEndpointTable"><thead><tr><th>方法</th><th>路径</th><th>返回类型</th><th>请求体</th><th>来源</th></tr></thead><tbody></tbody></table>
+                  <table id="intelEndpointTable"><thead><tr><th>方法</th><th>路径</th><th>返回类型</th><th>请求体</th><th>来源</th><th>操作</th></tr></thead><tbody></tbody></table>
                 </div>
               </div>
               <div class="intel-panel hidden" id="intelPanel-entities">
                 <div id="intelEntityList" style="display:flex;flex-direction:column;gap:var(--sp-sm)"></div>
+              </div>
+              <div class="intel-panel hidden" id="intelPanel-features">
+                <div id="intelFeatureList" style="display:flex;flex-direction:column;gap:var(--sp-sm)"></div>
+              </div>
+              <div class="intel-panel hidden" id="intelPanel-cases">
+                <div class="table-wrap">
+                  <table id="intelCaseTable"><thead><tr><th>模块</th><th>类型</th><th>框架</th><th>类 / 方法</th><th>路径</th></tr></thead><tbody></tbody></table>
+                </div>
+              </div>
+              <div class="intel-panel hidden" id="intelPanel-findings">
+                <div id="intelFindingList" style="display:flex;flex-direction:column;gap:var(--sp-sm)"></div>
+              </div>
+              <div class="intel-panel hidden" id="intelPanel-issues">
+                <div class="table-wrap">
+                  <table id="intelIssueTable"><thead><tr><th>类型</th><th>严重度</th><th>位置</th><th>状态</th><th>发现于</th></tr></thead><tbody></tbody></table>
+                </div>
+              </div>
+              <div class="intel-panel hidden" id="intelPanel-fixes">
+                <div id="intelFixList" style="display:flex;flex-direction:column;gap:var(--sp-sm)"></div>
+              </div>
+              <div class="intel-panel hidden" id="intelPanel-runs">
+                <div class="table-wrap">
+                  <table id="intelRunTable"><thead><tr><th>#</th><th>模块</th><th>命令</th><th>状态</th><th>开始时间</th><th>耗时</th></tr></thead><tbody></tbody></table>
+                </div>
               </div>
             </div>
           </div>
 
           <!-- 知识库对话（项目级多轮，左侧会话列表可收起） -->
           <div class="intel-detail-rag">
-            <div class="card">
+            <div class="rag-card">
               <div class="rag-section">
                 <div class="rag-sidebar collapsed" id="ragSidebar">
-                  <div class="rag-sidebar-head">对话
-                    <button class="ghost sm" onclick="newIntelChat()">＋ 新建</button>
+                  <div class="rag-sidebar-head">
+                    <span>对话</span>
+                    <button class="rag-icon-btn" onclick="newIntelChat()" title="新建对话">＋</button>
                   </div>
-                  <div class="rag-chat-list" id="ragChatList">
-                    <div class="muted" style="text-align:center;padding:12px;font-size:12px">暂无对话</div>
+                  <div class="rag-chat-list" id="ragChatList"></div>
+                  <div class="rag-sidebar-foot">
+                    <button class="ghost sm" id="ragIndexBtn" onclick="runIntelIndex()">重建索引</button>
                   </div>
                 </div>
                 <div class="rag-main">
                   <div class="rag-main-head">
-                    <button class="ghost sm" id="ragToggleBtn" onclick="toggleRagSidebar()" title="收起 / 展开会话列表">☰</button>
+                    <button class="rag-icon-btn" id="ragToggleBtn" onclick="toggleRagSidebar()" title="会话列表">☰</button>
                     <span class="rag-title" id="ragCurrentTitle">新对话</span>
-                    <button class="ghost sm" id="ragDelBtn" onclick="deleteIntelChat()" disabled>删除</button>
-                    <span style="margin-left:auto"></span>
-                    <button class="ghost sm" id="ragIndexBtn" onclick="runIntelIndex()">重建索引</button>
+                    <span class="rag-head-spacer"></span>
+                    <button class="rag-icon-btn" onclick="newIntelChat()" title="新建对话">＋</button>
+                    <button class="rag-icon-btn" id="ragDelBtn" onclick="deleteIntelChat()" title="删除当前对话" disabled>
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m3 0v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6h14z"/></svg>
+                    </button>
                   </div>
                   <div id="ragMessages" class="rag-msgs">
-                    <div class="muted" style="text-align:center;padding:16px;font-size:12px">向知识库提问，支持连续追问（记住上下文）</div>
+                    <div class="rag-empty">向知识库提问，支持连续追问<br><span>基于已索引的项目契约与代码</span></div>
                   </div>
-                  <div id="ragMsg" class="msg" style="margin:0 10px"></div>
+                  <div id="ragMsg" class="msg"></div>
                   <div class="rag-inputbar">
-                    <input type="text" id="ragQuestion" placeholder="例如：这个项目的用户表有哪些字段？" onkeydown="if(event.key==='Enter')askIntel()">
+                    <textarea id="ragQuestion" rows="1" placeholder="输入问题，回车发送，Shift+Enter 换行" onkeydown="ragQuestionKeydown(event)" oninput="autoGrowRagInput(this)"></textarea>
                     <button id="ragAskBtn" onclick="askIntel()">发送</button>
                   </div>
                 </div>
@@ -543,6 +578,27 @@
         </div>
       </div>
 
+    </div>
+  </div>
+</div>
+
+<!-- 模拟请求弹窗 -->
+<div id="intelMockModal" class="modal hidden">
+  <div class="modal-card">
+    <div class="row" style="justify-content:space-between">
+      <h3 style="margin:0"><span class="dot"></span>模拟请求</h3>
+      <button class="ghost sm" onclick="closeIntelMock()">关闭</button>
+    </div>
+    <div class="muted" style="font-size:12px;margin:6px 0" id="intelMockTitle"></div>
+    <label>请求 URL（可改主机）</label>
+    <input type="text" id="intelMockUrl" style="font-family:monospace">
+    <label>JSON 请求体（自动填参，可按需修改）</label>
+    <textarea id="intelMockBody" rows="8" style="font-family:monospace"></textarea>
+    <label>cURL 命令</label>
+    <textarea id="intelMockCurl" rows="4" readonly style="font-family:monospace"></textarea>
+    <div class="row" style="margin-top:12px">
+      <button onclick="copyIntelMock()">复制 cURL</button>
+      <span id="intelMockStatus" class="muted" style="font-size:12px"></span>
     </div>
   </div>
 </div>
