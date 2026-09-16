@@ -78,7 +78,7 @@ async function api(path, opts) {
 
 /* ---------- 路由 ---------- */
 const TITLES = {
-  workbench: "AI 工作台", tasks: "任务", stream: "实时流", projects: "项目 / 会话",
+  workbench: "AI 工作台", tasks: "任务", workflow: "编排", stream: "实时流", projects: "项目 / 会话",
   rules: "自动化规则", archives: "会话归档", audit: "审计日志",
   tokens: "Token 管理", settings: "设置",
 };
@@ -95,7 +95,8 @@ function switchPage(name) {
   if (content) content.classList.toggle("wb-tight", name === "workbench");
   // 每个页面切到时自动加载数据，避免打开就是空的、还得手动点"刷新"。
   if (name === "workbench") { loadWorkbench(); loadWbEvents(); renderWbFilters(); ensureWbProviders(); }
-  else if (name === "tasks") loadTasks();
+  else if (name === "tasks") { loadTasks(); loadTaskStats(); }
+  else if (name === "workflow") { loadWorkflows(); if (!document.getElementById("wfSteps").children.length) wfAddStep(); }
   else if (name === "projects") loadProjects();
   else if (name === "rules") loadRules();
   else if (name === "archives") { loadArchives(); loadArchiveSessions(); }
@@ -176,14 +177,155 @@ async function loadTokenUsage() {
   } catch (_) {}
 }
 
+/* ---------- 编排（多步工作流） ---------- */
+let wfStepSeq = 0;
+function wfStepRow() {
+  const i = ++wfStepSeq;
+  const row = document.createElement("div");
+  row.className = "wf-step";
+  row.style.cssText = "display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-top:8px";
+  row.innerHTML = `
+    <span class="muted" style="font-size:12px;flex-shrink:0">步骤 ${i}</span>
+    <input type="text" placeholder="名称" style="flex:0 0 130px" class="wf-s-name">
+    <input type="text" placeholder="Prompt（必填）" style="flex:1;min-width:200px" class="wf-s-prompt">
+    <input type="text" placeholder="目录(可选)" style="flex:0 0 160px" class="wf-s-dir">
+    <input type="number" placeholder="超时s" title="超时秒数" style="flex:0 0 80px" class="wf-s-timeout">
+    <input type="number" placeholder="优先级" title="优先级0-100" value="50" style="flex:0 0 70px" class="wf-s-priority">
+    <button class="danger sm" title="删除步骤" onclick="this.parentElement.remove()">×</button>`;
+  return row;
+}
+function wfAddStep() {
+  document.getElementById("wfSteps").appendChild(wfStepRow());
+}
+async function wfCreate() {
+  const name = document.getElementById("wfName").value.trim();
+  const directory = document.getElementById("wfDirectory").value.trim();
+  const steps = [...document.querySelectorAll("#wfSteps .wf-step")].map(el => {
+    const g = q => (el.querySelector(q) || {}).value;
+    const tsec = parseInt(g(".wf-s-timeout"), 10);
+    const pri = parseInt(g(".wf-s-priority"), 10);
+    return {
+      name: g(".wf-s-name").trim(),
+      prompt: g(".wf-s-prompt").trim(),
+      directory: g(".wf-s-dir").trim(),
+      timeoutSeconds: isNaN(tsec) || tsec <= 0 ? 0 : tsec,
+      priority: isNaN(pri) ? 50 : pri,
+    };
+  }).filter(s => s.prompt);
+  if (!steps.length) { show(document.getElementById("wfMsg"), "请至少填写一个步骤的 Prompt"); return; }
+  const res = await api("/api/workflow", { method: "POST", headers: appHeaders(), body: JSON.stringify({ name, directory, steps }) });
+  const data = await res.json();
+  if (!res.ok) { show(document.getElementById("wfMsg"), data.error || "创建失败"); return; }
+  show(document.getElementById("wfMsg"), `已创建编排 ${data.workflowId}，共 ${data.tasks.length} 步`, true);
+  document.getElementById("wfName").value = "";
+  document.getElementById("wfSteps").innerHTML = "";
+  wfAddStep();
+  loadWorkflows();
+}
+async function loadWorkflows() {
+  const box = document.getElementById("wfList");
+  const msg = document.getElementById("wfListMsg");
+  const res = await api("/api/workflows", { headers: appHeaders() });
+  const data = await res.json();
+  if (!res.ok) { if (msg) show(msg, data.error || "加载失败"); return; }
+  const list = data.workflows || [];
+  if (msg) show(msg, "");
+  if (!list.length) { box.innerHTML = `<div class="muted" style="font-size:13px">暂无编排</div>`; box.onclick = null; return; }
+  box.innerHTML = list.map(w =>
+    `<div class="card" style="margin-bottom:8px">
+      <div class="row" style="justify-content:space-between">
+        <b>${escapeHtml(w.name || w.workflowId)}</b>
+        <span class="muted mono" style="font-size:11px">${escapeHtml(w.workflowId)}</span>
+        <span class="muted" style="font-size:12px">${fmtDate(w.createdAt)}</span>
+      </div>
+      <div class="row" style="gap:12px;margin-top:6px">
+        <span class="badge ok">成功 ${w.succeeded}</span>
+        <span class="badge danger">失败 ${w.failed}</span>
+        <span class="badge primary">执行中/待执行 ${w.running}</span>
+        <span class="badge">共 ${w.steps} 步</span>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <button class="ghost sm" data-wf="${escapeHtml(w.workflowId)}">${w.succeeded}/${w.steps} 步成功 · 详情</button>
+        <button class="ghost sm" data-wf-action="rerun" data-wf="${escapeHtml(w.workflowId)}">重跑（从失败处）</button>
+        <button class="danger sm" data-wf-action="cancel" data-wf="${escapeHtml(w.workflowId)}">取消</button>
+      </div>
+      <div class="hidden wf-steps" data-wf-steps="${escapeHtml(w.workflowId)}"></div>
+    </div>`).join("");
+  box.onclick = (e) => {
+    const st = e.target.closest("button[data-wf-step]");
+    if (st) {
+      const row = box.querySelector(`[data-wf-step-detail="${st.dataset.wfStep}"]`);
+      if (row) row.classList.toggle("hidden");
+      return;
+    }
+    const actionBtn = e.target.closest("button[data-wf-action]");
+    if (actionBtn) {
+      const id = actionBtn.dataset.wf;
+      const act = actionBtn.dataset.wfAction;
+      if (act === "cancel" && !confirm("确认取消该编排的所有未完成任务？")) return;
+      api(`/api/workflow/${encodeURIComponent(id)}/${act}`, { method: "POST", headers: appHeaders() }).then(async r => {
+        const d = await r.json();
+        if (!r.ok) { toast("操作失败", d.error || ("HTTP " + r.status), "crit"); return; }
+        toast(act === "cancel" ? "已取消编排" : "已重跑编排", act === "cancel" ? `取消 ${d.canceled ?? 0} 步` : `重置 ${d.reset ?? 0} 步`, "info");
+        loadWorkflows();
+      });
+      return;
+    }
+    const btn = e.target.closest("button[data-wf]");
+    if (!btn) return;
+    const id = btn.dataset.wf;
+    const target = box.querySelector(`[data-wf-steps="${id}"]`);
+    if (!target) return;
+    if (!target.classList.contains("hidden")) { target.classList.add("hidden"); return; }
+    target.classList.remove("hidden");
+    target.innerHTML = `<div class="muted" style="font-size:12px;padding:6px">加载中…</div>`;
+    api(`/api/workflow/${encodeURIComponent(id)}`, { headers: appHeaders() }).then(async r => {
+      if (!r.ok) { target.innerHTML = `<div class="muted">加载失败</div>`; return; }
+      const d = await r.json();
+      target.innerHTML = `<div class="table-wrap" style="margin-top:8px"><table>
+        <thead><tr><th>步骤</th><th>目录</th><th>Prompt</th><th>状态</th><th>优先级</th><th>创建时间</th><th></th></tr></thead>
+        <tbody>${(d.steps || []).map((s, idx) => {
+          const detail = [
+            `名称: ${s.name || "-"}`, `状态: ${TASK_STATUS[s.status] || s.status}`,
+            `工作流: ${s.workflowId || "-"}`, `上游: ${s.dependsOn || "-"}`,
+            `尝试: ${s.attempts ?? 0}`, `超时: ${s.timeoutSeconds ? s.timeoutSeconds + "s" : "-"}`,
+            `错误: ${s.error || "-"}`, `进度: ${s.progress || "-"}`, `结果: ${s.result || "-"}`,
+            `AI 摘要: ${s.aiSummary || "-"}`,
+          ].join("\n");
+          return `<tr>
+            <td>#${idx + 1} ${escapeHtml(s.name || "")}</td>
+            <td class="mono clip" title="${escapeHtml(s.directory)}">${escapeHtml(s.directory) || "-"}</td>
+            <td class="clip" title="${escapeHtml(s.prompt)}">${escapeHtml(s.prompt)}</td>
+            <td><span class="badge ${escapeHtml(s.status)}">${TASK_STATUS[s.status] || s.status}</span></td>
+            <td class="mono">${s.priority ?? 50}</td>
+            <td>${fmtDate(s.createdAt)}</td>
+            <td><button class="ghost sm" data-wf-step="${escapeHtml(s.id)}">详情</button></td>
+          </tr>
+          <tr class="hidden" data-wf-step-detail="${escapeHtml(s.id)}"><td colspan="7"><div class="pre" style="margin:0">${escapeHtml(detail)}</div></td></tr>`;
+        }).join("")}
+        </tbody></table></div>`;
+    });
+  };
+}
+
 /* ---------- 任务 ---------- */
 async function submitTask() {
   const prompt = document.getElementById("taskPrompt").value.trim();
   const directory = document.getElementById("taskDirectory").value.trim();
   const dependsOn = document.getElementById("taskDependsOn").value.trim();
-  if (!prompt) { show(document.getElementById("taskSubmitMsg"), "请填写 Prompt"); return; }
+  const name = document.getElementById("taskName").value.trim();
   const body = { prompt, directory };
   if (dependsOn) body.dependsOn = dependsOn;
+  if (name) body.name = name;
+  const p = parseInt(document.getElementById("taskPriority").value, 10);
+  if (!isNaN(p) && p >= 0 && p <= 100) body.priority = p;
+  const tsec = parseInt(document.getElementById("taskTimeout").value, 10);
+  if (!isNaN(tsec) && tsec > 0) body.timeoutSeconds = tsec;
+  const schedAt = document.getElementById("taskScheduledAt").value.trim();
+  if (schedAt) body.scheduledAt = schedAt;
+  const cron = document.getElementById("taskCron").value.trim();
+  if (cron) body.cron = cron;
+  if (!prompt) { show(document.getElementById("taskSubmitMsg"), "请填写 Prompt"); return; }
   const res = await api("/api/tasks", { method: "POST", headers: appHeaders(), body: JSON.stringify(body) });
   const data = await res.json();
   if (!res.ok) { show(document.getElementById("taskSubmitMsg"), data.error || "提交失败"); return; }
@@ -191,8 +333,13 @@ async function submitTask() {
   show(document.getElementById("taskSubmitMsg"), `已提交任务 ${data.id}${note}`, true);
   document.getElementById("taskPrompt").value = "";
   document.getElementById("taskDependsOn").value = "";
+  document.getElementById("taskName").value = "";
   loadTasks();
 }
+let taskSelected = new Set();
+let taskExpanded = new Set();
+let taskLastList = [];
+
 async function loadTasks() {
   const status = document.getElementById("taskFilter").value;
   const url = "/api/tasks" + (status ? "?status=" + status : "");
@@ -200,37 +347,175 @@ async function loadTasks() {
   const data = await res.json();
   if (!res.ok) { show(document.getElementById("taskMsg"), data.error || "加载失败"); return; }
   const list = data.tasks || [];
+  taskLastList = list;
+  // 目录下拉（增量维护，不打断已选值）。
+  const dirSel = document.getElementById("taskDirFilter");
+  const dirs = [...new Set(list.map(t => t.directory).filter(Boolean))];
+  const curDir = dirSel.value;
+  dirSel.innerHTML = `<option value="">全部目录</option>` + dirs.map(d => `<option value="${escapeHtml(d)}">${escapeHtml(d)}</option>`).join("");
+  dirSel.value = curDir;
+
+  const kw = document.getElementById("taskSearch").value.trim().toLowerCase();
+  const dirFilter = dirSel.value;
+  const shown = list.filter(t => {
+    if (dirFilter && t.directory !== dirFilter) return false;
+    if (kw) {
+      const hay = (t.name + " " + t.prompt + " " + (t.directory || "") + " " + (t.workflowId || "") + " " + t.id).toLowerCase();
+      if (!hay.includes(kw)) return false;
+    }
+    return true;
+  });
+
   const tb = document.querySelector("#taskTable tbody");
   tb.innerHTML = "";
-  if (!list.length) {
+  if (!shown.length) {
     tb.insertAdjacentHTML("beforeend", `<tr><td colspan="9" class="muted">暂无任务</td></tr>`);
     return;
   }
-  for (const t of list) {
-    const detail = (t.error || t.result || t.progress || "").trim();
-    const cancellable = t.status === "queued" || t.status === "running" || t.status === "pending";
+  for (const t of shown) {
+    const cancellable = t.status === "queued" || t.status === "running" || t.status === "pending" || t.status === "retrying";
+    const retriable = t.status === "failed" || t.status === "canceled";
     const tid = escapeHtml(t.id);
-    const action = t.status === "blocked"
-      ? `<button class="ghost sm" data-unblock="${tid}">解阻</button>`
-      : (cancellable ? `<button class="danger sm" data-cancel="${tid}">取消</button>` : "");
+    const checked = taskSelected.has(t.id) ? "checked" : "";
+    const detailBits = [];
+    if (t.attempts) detailBits.push(`尝试 ${t.attempts} 次`);
+    if (t.timeoutSeconds) detailBits.push(`超时 ${t.timeoutSeconds}s`);
+    if (t.priority && t.priority !== 50) detailBits.push(`优先级 ${t.priority}`);
+    if (t.scheduledAt) detailBits.push(`排期 ${new Date(t.scheduledAt).toLocaleString()}`);
+    if (t.cron) detailBits.push(`周期 ${t.cron}`);
+    if (t.startedAt && t.finishedAt) {
+      const dur = (new Date(t.finishedAt) - new Date(t.startedAt)) / 1000;
+      if (dur > 0) detailBits.push(`耗时 ${dur.toFixed(0)}s`);
+    }
+    const action = `<div class="actions">
+      <button class="ghost sm" data-detail="${tid}">详情</button>
+      ${t.status === "blocked" ? `<button class="ghost sm" data-unblock="${tid}">解阻</button>` : ""}
+      ${retriable ? `<button class="ghost sm" data-retry="${tid}">重试</button>` : ""}
+      ${cancellable ? `<button class="danger sm" data-cancel="${tid}">取消</button>` : ""}
+    </div>`;
     tb.insertAdjacentHTML("beforeend", `<tr data-task="${tid}">
+      <td><input type="checkbox" class="task-sel" data-sel="${tid}" ${checked}></td>
       <td class="mono clip" title="${tid}">${tid}</td>
       <td class="clip" title="${escapeHtml(t.directory)}">${escapeHtml(t.directory) || "-"}</td>
-      <td class="clip" title="${escapeHtml(t.prompt)}">${escapeHtml(t.prompt)}</td>
+      <td class="clip" title="${escapeHtml(t.prompt)}">${escapeHtml(t.name ? "[" + t.name + "] " : "")}${escapeHtml(t.prompt)}</td>
+      <td class="mono">${t.priority ?? 50}</td>
       <td><span class="badge ${escapeHtml(t.status)}">${TASK_STATUS[t.status] || t.status}</span></td>
       <td class="mono clip muted" title="${escapeHtml(t.dependsOn || "")}">${escapeHtml(t.dependsOn) || "-"}</td>
-      <td class="clip" title="${escapeHtml(detail)}">${escapeHtml(detail) || "-"}</td>
-      <td class="clip muted" title="${escapeHtml(t.aiSummary || "")}">${escapeHtml(t.aiSummary) || "-"}</td>
       <td>${fmtDate(t.createdAt)}</td>
-      <td><div class="actions">${action}</div></td>
+      <td>${action}</td>
     </tr>`);
+    const detailRow = document.createElement("tr");
+    detailRow.className = "task-detail" + (taskExpanded.has(t.id) ? "" : " hidden");
+    detailRow.innerHTML = `<td colspan="9"><div class="pre" style="margin:0">
+      ${escapeHtml([
+        ["状态", TASK_STATUS[t.status] || t.status],
+        ["名称", t.name || "-"],
+        ["工作流", t.workflowId || "-"],
+        ["上游", t.dependsOn || "-"],
+        ["错误", t.error || "-"],
+        ["进度", t.progress || "-"],
+        ["结果", t.result || "-"],
+        ["AI 摘要", t.aiSummary || "-"],
+        ["详情", detailBits.join(" · ") || "-"],
+      ].map(([k, v]) => `${k}: ${v}`).join("\n"))}
+      ${t.dependsOn ? `<div class="task-down" data-down="${escapeHtml(t.id)}">下游：加载中…</div>` : ""}
+    </div></td>`;
+    tb.insertAdjacentElement("beforeend", detailRow);
+    if (taskExpanded.has(t.id)) loadTaskDownstream(t.id, detailRow);
   }
   tb.onclick = (e) => {
+    const dt = e.target.closest("button[data-detail]");
+    if (dt) {
+      const id = dt.dataset.detail;
+      if (taskExpanded.has(id)) { taskExpanded.delete(id); } else { taskExpanded.add(id); loadTaskDownstream(id); }
+      loadTasks();
+      return;
+    }
     const ub = e.target.closest("button[data-unblock]");
     if (ub) { unblockTask(ub.dataset.unblock); return; }
+    const rt = e.target.closest("button[data-retry]");
+    if (rt) { retryTask(rt.dataset.retry); return; }
     const cc = e.target.closest("button[data-cancel]");
     if (cc) cancelTask(cc.dataset.cancel);
   };
+  tb.onchange = (e) => {
+    const cb = e.target.closest(".task-sel");
+    if (cb) {
+      if (cb.checked) taskSelected.add(cb.dataset.sel); else taskSelected.delete(cb.dataset.sel);
+      document.getElementById("taskSelAll").checked = taskSelected.size === shown.length && shown.length > 0;
+    }
+  };
+}
+// 加载某任务的下游（依赖它的任务），渲染进其详情。
+async function loadTaskDownstream(id, row) {
+  const el = row ? row.querySelector(`.task-down[data-down="${id}"]`) : null;
+  if (!el) return;
+  const res = await api(`/api/tasks/${encodeURIComponent(id)}/dependents`, { headers: appHeaders() });
+  if (!res.ok) { el.textContent = "下游：加载失败"; return; }
+  const d = await res.json();
+  const deps = d.dependents || [];
+  el.textContent = deps.length ? ("下游：\n" + deps.map(x => `  ${x.id} [${TASK_STATUS[x.status] || x.status}] ${x.prompt}`).join("\n")) : "下游：无";
+}
+// 批量操作（取消 / 重试选中的任务）。
+async function taskBatch(action) {
+  const ids = [...taskSelected];
+  if (!ids.length) { toast("批量操作", "请先勾选任务", "warn"); return; }
+  const label = action === "cancel" ? "取消" : "重试";
+  if (action === "cancel" && !confirm(`确认取消选中的 ${ids.length} 个任务？`)) return;
+  const res = await api("/api/tasks/action", { method: "POST", headers: appHeaders(), body: JSON.stringify({ ids, action }) });
+  const data = await res.json();
+  if (!res.ok) { toast("批量" + label + "失败", data.error || "HTTP " + res.status, "crit"); return; }
+  toast("批量" + label, `已${label} ${data.affected ?? ids.length} 个`, "info");
+  taskSelected.clear();
+  document.getElementById("taskSelAll").checked = false;
+  loadTasks();
+}
+document.getElementById("taskSearch").addEventListener("input", loadTasks);
+document.getElementById("taskDirFilter").addEventListener("change", loadTasks);
+document.getElementById("taskFilter").addEventListener("change", loadTasks);
+document.getElementById("taskSelAll").addEventListener("change", (e) => {
+  taskSelected.clear();
+  if (e.target.checked) taskLastList.forEach(t => taskSelected.add(t.id));
+  loadTasks();
+});
+// 手动重试已失败/已取消的任务。
+async function retryTask(id) {
+  const res = await api(`/api/tasks/${encodeURIComponent(id)}/retry`, { method: "POST", headers: appHeaders() });
+  if (!res.ok) { toast("重试失败", "任务重试未生效 (" + res.status + ")", "crit"); return; }
+  toast("已重试", "任务已重新排队", "info");
+  loadTasks();
+}
+// 任务统计（近 N 天）：状态分布 + 成功率 + 平均耗时 + 每日趋势 + 并发占用。
+async function loadTaskStats() {
+  try {
+    const res = await api("/api/tasks/stats?days=7", { headers: appHeaders() });
+    if (!res.ok) return;
+    const st = await res.json();
+    document.getElementById("tsTotal").textContent = st.total ?? 0;
+    document.getElementById("tsSucceeded").textContent = st.succeeded ?? 0;
+    document.getElementById("tsFailed").textContent = st.failed ?? 0;
+    document.getElementById("tsRate").textContent = ((st.successRate ?? 0) * 100).toFixed(0) + "%";
+    const avg = st.avgDurationSec ?? 0;
+    document.getElementById("tsAvg").textContent = avg > 60 ? (avg / 60).toFixed(1) + "m" : avg.toFixed(0) + "s";
+    const trend = (st.trend || []);
+    const maxV = Math.max(1, ...trend.map(d => Math.max(d.created, d.succeeded, d.failed)));
+    document.getElementById("taskTrend").innerHTML = trend.map(d =>
+      `<div style="display:inline-block;margin-right:14px;vertical-align:bottom;text-align:center">
+        <div style="display:flex;gap:2px;align-items:flex-end;height:40px">
+          <span style="width:7px;background:var(--primary);height:${(d.succeeded / maxV * 40).toFixed(0)}px;border-radius:2px" title="成功 ${d.succeeded}"></span>
+          <span style="width:7px;background:var(--danger);height:${(d.failed / maxV * 40).toFixed(0)}px;border-radius:2px" title="失败 ${d.failed}"></span>
+        </div>
+        <div style="font-size:10px;color:var(--ink-tertiary)">${escapeHtml(d.day)}</div>
+      </div>`).join("") || "近 7 天无任务";
+    // 并发占用（运行中 / 上限）。
+    try {
+      const s2 = await (await api("/api/stats", { headers: hdr() })).json();
+      const running = (s2.tasks && (s2.tasks.running ?? 0)) || 0;
+      const cap = s2.maxConcurrency || 0;
+      const el = document.getElementById("tsConc");
+      if (el) el.textContent = cap > 0 ? `${running}/${cap}` : `${running}`;
+    } catch (_) {}
+  } catch (_) {}
 }
 async function cancelTask(id) {
   await api("/api/tasks/" + encodeURIComponent(id), { method: "DELETE", headers: appHeaders() });
@@ -384,6 +669,7 @@ async function createRule() {
     kind: document.getElementById("ruleKind").value,
     schedule: document.getElementById("ruleSchedule").value.trim(),
     directory: document.getElementById("ruleDirectory").value.trim(),
+    sessionId: document.getElementById("ruleSessionId").value.trim(),
     prompt: document.getElementById("rulePrompt").value.trim(),
     enabled: true,
   };
@@ -393,6 +679,7 @@ async function createRule() {
   if (!res.ok) { show(document.getElementById("ruleMsg"), data.error || "创建失败"); return; }
   show(document.getElementById("ruleMsg"), "规则已创建", true);
   document.getElementById("ruleName").value = ""; document.getElementById("rulePrompt").value = "";
+  document.getElementById("ruleSessionId").value = "";
   loadRules();
 }
 async function loadRules() {
@@ -408,6 +695,7 @@ async function loadRules() {
       <td>${KIND_LABEL[r.kind] || r.kind}</td>
       <td class="clip mono" title="${escapeHtml(r.schedule)}">${escapeHtml(r.schedule) || "-"}</td>
       <td class="clip" title="${escapeHtml(r.prompt)}">${escapeHtml(r.prompt)}</td>
+      <td class="mono clip" title="${escapeHtml(r.sessionId || "")}">${escapeHtml(r.sessionId) || "自动新建"}</td>
       <td><span class="badge ${r.enabled ? "enabled" : "disabled"}">${r.enabled ? "启用" : "停用"}</span></td>
       <td>${fmtDate(r.lastFiredAt)}</td>
       <td id="exec-count-${escapeHtml(r.id)}">…</td>
@@ -637,7 +925,7 @@ async function doChangePassword() {
 setInterval(() => {
   if (!document.getElementById("taskAutoRefresh").checked) return;
   const page = document.querySelector(".page:not(.hidden)");
-  if (page && page.id === "page-tasks" && session) loadTasks();
+  if (page && page.id === "page-tasks" && session) { loadTasks(); loadTaskStats(); }
 }, 4000);
 
 /* ---------- AI 工作台轮询（事件 5s，状态 12s，对话跟随；WS 推送实时） ---------- */

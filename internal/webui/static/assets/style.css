@@ -419,7 +419,7 @@ td .actions { display: inline-flex; gap: 6px; }
 .wb-stat .l .dot { width: 8px; height: 8px; border-radius: 50%; }
 .wb-stat .dot-q { background: var(--warning); box-shadow: 0 0 0 3px var(--warning-dim); }
 .wb-stat .dot-b { background: var(--primary); box-shadow: 0 0 0 3px var(--info-dim); animation: wbpulse 1.4s infinite; }
-.wb-stat .dot-i { background: var(--success); box-shadow: 0 0 0 3px var(--success-dim); }
+.wb-stat .dot-i { background: var(--ink-tertiary); box-shadow: 0 0 0 3px rgba(98, 102, 109, 0.16); }
 .wb-stat .dot-t { background: var(--ink-tertiary); }
 .wb-stat .dot-e { background: var(--primary-hover); }
 @keyframes wbpulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
@@ -530,7 +530,7 @@ td .actions { display: inline-flex; gap: 6px; }
 .dot.question { background: var(--warning); box-shadow: 0 0 0 3px var(--warning-dim); }
 .dot.busy { background: var(--primary); box-shadow: 0 0 0 3px var(--info-dim); animation: wbpulse 1.4s infinite; }
 .dot.retry { background: var(--warning); box-shadow: 0 0 0 3px var(--warning-dim); animation: wbpulse 1.4s infinite; }
-.dot.idle { background: var(--success); box-shadow: 0 0 0 3px var(--success-dim); }
+.dot.idle { background: var(--ink-tertiary); box-shadow: 0 0 0 3px rgba(98, 102, 109, 0.16); }
 
 .wb-placeholder {
   color: var(--ink-subtle); text-align: center;
