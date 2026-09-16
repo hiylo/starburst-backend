@@ -94,6 +94,7 @@ var migrations = []migration{
 	{name: "rules_session_id", apply: migrationRulesSessionID},
 	{name: "tasks_workflow_index", apply: migrationTasksWorkflowIndex},
 	{name: "intel", apply: migrationIntel},
+	{name: "intel_field_meta", apply: migrationIntelFieldMeta},
 }
 
 // migrationIntel creates the Test Intelligence subsystem tables: flat project
@@ -155,6 +156,22 @@ func migrationIntel(ctx context.Context, driver string, db *sql.DB) error {
 		`CREATE INDEX IF NOT EXISTS idx_project_modules_project ON project_modules(project_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_intel_entities_project ON intel_entities(project_id, module_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_intel_endpoints_project ON intel_endpoints(project_id, module_id)`,
+	}
+	for _, s := range stmts {
+		if _, err := db.ExecContext(ctx, s); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// migrationIntelFieldMeta adds the field type and primary-key marker columns to
+// intel_entities so the project detail view can render a complete column
+// contract (name/type/nullable/primary-key) instead of just column names.
+func migrationIntelFieldMeta(ctx context.Context, driver string, db *sql.DB) error {
+	stmts := []string{
+		`ALTER TABLE intel_entities ADD COLUMN field_type TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE intel_entities ADD COLUMN is_primary BOOLEAN NOT NULL DEFAULT FALSE`,
 	}
 	for _, s := range stmts {
 		if _, err := db.ExecContext(ctx, s); err != nil {
