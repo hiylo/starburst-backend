@@ -4,10 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/hiylo/starburst-backend/internal/embed"
+	"github.com/hiylo/starburst-backend/internal/llm"
 	"github.com/hiylo/starburst-backend/internal/store"
 )
 
@@ -151,4 +154,86 @@ public class Order {
 	if !strings.Contains(overview.Content, "模块/服务清单") {
 		t.Errorf("overview missing module inventory: %q", overview.Content)
 	}
+}
+
+// TestAskIntelProjectOverviewInjection verifies the project profile is injected
+// as a first-class source when the description exists but the overview chunk is
+// not among the retrieved fragments, and that the injection is skipped (dedup)
+// when the overview chunk itself is retrieved.
+func TestAskIntelProjectOverviewInjection(t *testing.T) {
+	s := newTestServer(t)
+
+	// 固定 1024 维向量的假嵌入服务（问题与 chunk 都返回同一向量，相似度恒为 1）。
+	embSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		vec := make([]float32, store.EmbedDim)
+		for i := range vec {
+			vec[i] = 0.01
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"data": []map[string]any{{"index": 0, "embedding": vec}},
+		})
+	}))
+	t.Cleanup(embSrv.Close)
+	s.SetEmbedding(embed.New(embSrv.URL, "", "test-model"))
+
+	llmSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"这是一个支付网关项目。"}}]}`))
+	}))
+	t.Cleanup(llmSrv.Close)
+	s.SetLLM(llm.New(llmSrv.URL, "test-key", "test-model"))
+
+	ctx := context.Background()
+	p := &store.IntelProject{Name: "pay", Source: "local", Description: "支付网关项目，负责订单支付与退款。"}
+	if err := s.store.CreateIntelProject(ctx, p); err != nil {
+		t.Fatal(err)
+	}
+
+	vec := func() []float32 {
+		v := make([]float32, store.EmbedDim)
+		for i := range v {
+			v[i] = 0.01
+		}
+		return v
+	}
+
+	t.Run("inject when overview chunk absent", func(t *testing.T) {
+		if err := s.store.ReplaceProjectChunks(ctx, p.ID, []*store.RagChunk{
+			{Kind: "entity", Title: "t_order 表", Content: "数据表 t_order 字段：id", SourceFile: "Order.java", SourceLine: 1, Embedding: vec()},
+		}); err != nil {
+			t.Fatal(err)
+		}
+		resp, err := s.askIntelProject(ctx, p.ID, "这个项目是做什么的", 0, 10)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resp["answer"] == "" {
+			t.Fatal("expected non-empty answer")
+		}
+		sources := resp["sources"].([]map[string]any)
+		if len(sources) != 2 {
+			t.Fatalf("expected 2 sources (画像 + entity), got %d", len(sources))
+		}
+		if sources[0]["sourceFile"] != "项目画像" {
+			t.Fatalf("expected 项目画像 first, got %v", sources[0]["sourceFile"])
+		}
+	})
+
+	t.Run("dedup when overview chunk retrieved", func(t *testing.T) {
+		if err := s.store.ReplaceProjectChunks(ctx, p.ID, []*store.RagChunk{
+			{Kind: "overview", Title: "项目概览 pay", Content: "项目 pay 概览", SourceFile: "项目画像", Embedding: vec()},
+		}); err != nil {
+			t.Fatal(err)
+		}
+		resp, err := s.askIntelProject(ctx, p.ID, "这个项目有哪些模块", 0, 10)
+		if err != nil {
+			t.Fatal(err)
+		}
+		sources := resp["sources"].([]map[string]any)
+		if len(sources) != 1 {
+			t.Fatalf("expected 1 source (overview chunk only, no duplicate 画像), got %d", len(sources))
+		}
+		if sources[0]["kind"] != "overview" {
+			t.Fatalf("expected overview chunk, got kind=%v", sources[0]["kind"])
+		}
+	})
 }

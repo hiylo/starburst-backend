@@ -591,6 +591,16 @@ func (s *Server) askIntelProject(ctx context.Context, projectID int64, question 
 		ragRetrievalCache.put(key, retrievalHit{projectID: projectID, context: contextJSON, sources: sources})
 	}
 
+	// 若检索片段里已含项目 overview chunk，则不再单独注入画像，避免描述在上下文
+	// 中重复出现（chunk 随分析后的索引重建保持新鲜）。
+	for _, src := range sources {
+		if k, _ := src["kind"].(string); k == "overview" {
+			overviewText = ""
+			overviewSource = nil
+			break
+		}
+	}
+
 	answer := ""
 	if s.llm != nil && s.llm.Enabled() && (chunkCount > 0 || overviewText != "") {
 		contextText := contextJSON
