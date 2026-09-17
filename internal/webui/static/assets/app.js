@@ -1837,6 +1837,7 @@ async function refreshWbPanel(id, force) {
   }
 }
 function renderWbPanel() {
+  wbMoreOpen = false;
   const panel = document.getElementById("wbPanel");
   const d = wbPanelData;
   if (!d) { panel.innerHTML = ""; return; }
@@ -1861,6 +1862,8 @@ function renderWbPanel() {
   if (s.time && s.time.created) metaBits.push(`创建 ${escapeHtml(new Date(s.time.created).toLocaleString())}`);
   if (s.time && s.time.updated) metaBits.push(escapeHtml(new Date(s.time.updated).toLocaleString()));
   const statusBadgeCls = status === "question" ? "question" : (status === "busy" || status === "retry") ? "busy" : "idle";
+  const isBusyForAct = status === "busy" || status === "retry";
+  const shareUrl = (s.share && s.share.url) || "";
   const qhtml = renderWbQuestions();
   const permHtml = renderWbPermissions(d.permissions || []);
   const total = d.recent.length;
@@ -1885,10 +1888,26 @@ function renderWbPanel() {
       </div>
       <div style="display:flex;flex-direction:column;gap:6px;align-items:flex-end;flex-shrink:0">
         <span class="badge ${statusBadgeCls}">${wbStatusLabel(status)}</span>
-        <div style="display:flex;gap:6px">
+        <div style="display:flex;gap:6px;align-items:center">
           <button class="ghost sm" data-wb-rename="1" title="修改会话标题">改名</button>
           <button class="ghost sm" data-wb-compact="1" title="压缩会话：把历史对话汇总为摘要以释放上下文（耗时较长）" ${wbCompacting ? "disabled" : ""}>${wbCompacting ? "压缩中…" : "压缩"}</button>
           <button class="danger sm" data-wb-del="${escapeHtml(d.id)}">删除</button>
+          <div class="wb-more-wrap">
+            <button class="ghost sm" data-wb-morebtn="1" title="更多操作（同 App 聊天详情菜单）">更多 ▾</button>
+            <div class="wb-more-menu hidden" data-wb-more-menu>
+              <button data-wb-action="reload">重新加载</button>
+              <button data-wb-action="fork">Fork 会话</button>
+              <button data-wb-action="undo" ${isBusyForAct ? "disabled" : ""}>撤销上一条</button>
+              <button data-wb-action="redo" ${isBusyForAct ? "disabled" : ""}>重做</button>
+              <button data-wb-action="review">运行代码审查</button>
+              <button data-wb-action="diff">查看更改（diff）</button>
+              <button data-wb-action="timeline">会话时间线</button>
+              <button data-wb-action="abort" ${isBusyForAct ? "" : "disabled"}>停止处理</button>
+              ${shareUrl ? `<button data-wb-action="copylink">复制分享链接</button><button data-wb-action="unshare">取消分享</button>` : `<button data-wb-action="share">分享会话</button>`}
+              <button data-wb-action="export-md">导出 Markdown</button>
+              <button data-wb-action="export-json">导出 JSON</button>
+            </div>
+          </div>
         </div>
       </div>
     </div>
@@ -1917,6 +1936,10 @@ function renderWbPanel() {
       </div>
     </div>`;
   panel.onclick = (e) => {
+    const morebtn = e.target.closest("[data-wb-morebtn]");
+    if (morebtn) { wbMoreMenuToggle(morebtn); return; }
+    const mact = e.target.closest("[data-wb-action]");
+    if (mact) { wbMoreMenuAction(mact.dataset.wbAction); return; }
     const cp = e.target.closest("[data-wb-compact]");
     if (cp) { wbCompactSession(d.id); return; }
     const pbp = e.target.closest("[data-wb-perm]");
@@ -2196,6 +2219,319 @@ async function deleteWbSession(id) {
   if (wbSelected === id) closeWbPanel();
   renderWbList();
   toast("已删除", "会话已删除", "info");
+}
+
+/* ---- 决策面板「更多」下拉菜单 ---- */
+// 更多操作与 App 聊天详情页菜单对齐：重新加载 / Fork / 撤销 / 重做 /
+// 代码审查 / 查看更改 / 会话时间线 / 停止 / 分享 / 导出。
+let wbMoreOpen = false;
+function wbMoreMenuToggle(btn) {
+  const wrap = btn.closest(".wb-more-wrap");
+  const menu = wrap && wrap.querySelector("[data-wb-more-menu]");
+  if (!menu) return;
+  const opening = menu.classList.contains("hidden");
+  wbMoreMenuClose();
+  if (opening) {
+    wbMoreOpen = true;
+    menu.classList.remove("hidden");
+  }
+}
+function wbMoreMenuClose() {
+  if (!wbMoreOpen) return;
+  wbMoreOpen = false;
+  document.querySelectorAll("[data-wb-more-menu]").forEach(m => m.classList.add("hidden"));
+}
+document.addEventListener("click", (e) => {
+  // 点击菜单外任意位置关闭下拉。
+  if (e.target.closest("[data-wb-more-menu]") || e.target.closest("[data-wb-morebtn]")) return;
+  wbMoreMenuClose();
+});
+function wbCurrentDir() {
+  const item = wbItems.find(x => x.session.id === wbSelected);
+  return ((item && item.session && item.session.directory) || (wbPanelData && wbPanelData.session && wbPanelData.session.directory) || "").toString();
+}
+function wbDirHeaders(dir) {
+  const headers = appHeaders();
+  if (dir) headers["x-opencode-directory"] = dir;
+  return headers;
+}
+async function wbMoreMenuAction(action) {
+  const id = wbSelected;
+  if (!id) return;
+  wbMoreMenuClose();
+  if (action === "reload") { refreshWbPanel(id, true); toast("已重新加载", "会话信息已刷新", "info"); return; }
+  if (action === "fork") { await wbForkSession(id); return; }
+  if (action === "undo") { await wbUndoWbSession(id); return; }
+  if (action === "redo") { await wbRedoWbSession(id); return; }
+  if (action === "review") { await wbRunWbCommand(id, "review"); return; }
+  if (action === "diff") { await wbShowWbDiff(id); return; }
+  if (action === "timeline") { await wbShowWbTimeline(id); return; }
+  if (action === "abort") { await wbAbortWbSession(id); return; }
+  if (action === "share") { await wbShareWbSession(id); return; }
+  if (action === "unshare") { await wbUnshareWbSession(id); return; }
+  if (action === "copylink") { await wbCopyWbShareLink(id); return; }
+  if (action === "export-md") { await wbExportWbSession(id, "markdown"); return; }
+  if (action === "export-json") { await wbExportWbSession(id, "json"); return; }
+}
+// 重新加载 / Fork / 撤销 / 重做 / 停止 / 分享等操作，契约与 App 的 OpenCodeApi 一致。
+async function wbForkSession(id) {
+  const dir = wbCurrentDir();
+  const res = await api(`/api/opencode/session/${encodeURIComponent(id)}/fork`, { method: "POST", headers: wbDirHeaders(dir), body: JSON.stringify({}) });
+  let data = {};
+  try { data = await res.json(); } catch (_) {}
+  if (!res.ok) { toast("Fork 失败", "未创建新会话 (" + res.status + ")", "crit"); return; }
+  const nid = data.id || data.sessionID || "";
+  toast("已 Fork", "新会话 " + nid, "info");
+  await loadWorkbench();
+  if (nid) openWbPanel(nid);
+}
+// 撤销上一条：寻找最近一条用户消息，revert 到它之前（与 App undoMessage 契约一致）。
+async function wbUndoWbSession(id) {
+  const dir = wbCurrentDir();
+  let msgs = [];
+  try {
+    const mRes = await api(`/api/opencode/session/${encodeURIComponent(id)}/message?limit=50`, { headers: wbDirHeaders(dir) });
+    if (mRes.ok) { const d = await mRes.json(); msgs = Array.isArray(d) ? d : (d.messages || []); }
+  } catch (_) {}
+  const lastUser = [...msgs].reverse().find(m => m.info && m.info.role === "user");
+  if (!lastUser) { toast("撤销失败", "未找到可撤销的用户消息", "warn"); return; }
+  const mid = lastUser.info.id || lastUser.id || "";
+  if (!mid) { toast("撤销失败", "消息缺少 ID", "warn"); return; }
+  const res = await api(`/api/opencode/session/${encodeURIComponent(id)}/revert`, { method: "POST", headers: wbDirHeaders(dir), body: JSON.stringify({ messageID: mid }) });
+  if (!res.ok) { toast("撤销失败", "revert (" + res.status + ")", "crit"); return; }
+  toast("已撤销", "已回退到上一条消息", "info");
+  refreshWbPanel(id, true);
+  loadWorkbench();
+}
+async function wbRedoWbSession(id) {
+  const dir = wbCurrentDir();
+  const res = await api(`/api/opencode/session/${encodeURIComponent(id)}/unrevert`, { method: "POST", headers: wbDirHeaders(dir) });
+  if (!res.ok) { toast("重做失败", "unrevert (" + res.status + ")", "crit"); return; }
+  toast("已重做", "已恢复上一条撤销", "info");
+  refreshWbPanel(id, true);
+  loadWorkbench();
+}
+// 运行服务器端命令（如 /review），与 App executeCommand 契约一致。
+async function wbRunWbCommand(id, command) {
+  const dir = wbCurrentDir();
+  const res = await api(`/api/opencode/session/${encodeURIComponent(id)}/command`, { method: "POST", headers: wbDirHeaders(dir), body: JSON.stringify({ command, arguments: "" }) });
+  if (!res.ok) { toast("命令失败", `/${command} 未生效 (${res.status})`, "crit"); return; }
+  toast(`已运行 /${command}`, "命令已下发到会话", "info");
+  wbStatuses[id] = { type: "busy" };
+  renderWbList();
+  wbPanelScrollBottom = true;
+  refreshWbPanel(id, true);
+}
+async function wbAbortWbSession(id) {
+  const dir = wbCurrentDir();
+  const res = await api(`/api/opencode/session/${encodeURIComponent(id)}/abort`, { method: "POST", headers: wbDirHeaders(dir) });
+  if (!res.ok) { toast("停止失败", "abort (" + res.status + ")", "crit"); return; }
+  toast("已停止", "已发送停止信号", "info");
+  wbStatuses[id] = { type: "idle" };
+  renderWbList();
+  refreshWbPanel(id, true);
+}
+async function wbShareWbSession(id) {
+  const dir = wbCurrentDir();
+  const res = await api(`/api/opencode/session/${encodeURIComponent(id)}/share`, { method: "POST", headers: wbDirHeaders(dir) });
+  let data = {};
+  try { data = await res.json(); } catch (_) {}
+  if (!res.ok) { toast("分享失败", "share (" + res.status + ")", "crit"); return; }
+  const url = (data.share && data.share.url) || "";
+  // 同步本地会话对象，避免重绘后菜单回到「分享会话」。
+  const it = wbItems.find(x => x.session.id === id);
+  if (it) it.session.share = data.share || { url };
+  if (wbPanelData && wbPanelData.session) wbPanelData.session.share = data.share || { url };
+  toast("已分享", url ? "分享链接已生成" : "分享成功", "info");
+  if (url) wbCopyText(url, "分享链接已复制");
+  wbRerenderPanel();
+  loadWorkbench();
+}
+async function wbUnshareWbSession(id) {
+  const dir = wbCurrentDir();
+  const res = await api(`/api/opencode/session/${encodeURIComponent(id)}/share`, { method: "DELETE", headers: wbDirHeaders(dir) });
+  if (!res.ok) { toast("取消分享失败", "unshare (" + res.status + ")", "crit"); return; }
+  const it = wbItems.find(x => x.session.id === id);
+  if (it) it.session.share = null;
+  if (wbPanelData && wbPanelData.session) wbPanelData.session.share = null;
+  toast("已取消分享", "分享链接已移除", "info");
+  wbRerenderPanel();
+  loadWorkbench();
+}
+async function wbCopyWbShareLink(id) {
+  const it = wbItems.find(x => x.session.id === id);
+  const s = (it && it.session && it.session.share && it.session.share.url) || (wbPanelData && wbPanelData.session && wbPanelData.session.share && wbPanelData.session.share.url) || "";
+  if (!s) { toast("复制失败", "该会话未分享", "warn"); return; }
+  wbCopyText(s, "分享链接已复制");
+}
+function wbCopyText(text, okTitle) {
+  const done = () => toast(okTitle || "已复制", text.slice(0, 80), "info");
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(done).catch(() => wbCopyTextFallback(text, done));
+  } else {
+    wbCopyTextFallback(text, done);
+  }
+}
+function wbCopyTextFallback(text, done) {
+  const ta = document.createElement("textarea");
+  ta.value = text;
+  ta.style.position = "fixed"; ta.style.opacity = "0";
+  document.body.appendChild(ta);
+  ta.select();
+  try { document.execCommand("copy"); done(); } catch (_) { toast("复制失败", "无法访问剪贴板", "warn"); }
+  document.body.removeChild(ta);
+}
+// 导出会话为 Markdown / JSON（App 的 SessionExport 同款结构，浏览器端直接下载）。
+async function wbExportWbSession(id, fmt) {
+  const dir = wbCurrentDir();
+  const headers = appHeaders();
+  try {
+    const [sRes, mRes] = await Promise.all([
+      api(`/api/opencode/session/${encodeURIComponent(id)}`, { headers: wbDirHeaders(dir) }),
+      api(`/api/opencode/session/${encodeURIComponent(id)}/message`, { headers: wbDirHeaders(dir) }),
+    ]);
+    const session = sRes.ok ? await sRes.json() : { id };
+    let msgs = [];
+    if (mRes.ok) { const d = await mRes.json(); msgs = Array.isArray(d) ? d : (d.messages || []); }
+    const title = (session.title || session.slug || id).toString();
+    const safe = title.replace(/[^\w\u4e00-\u9fa5-]+/g, "_").slice(0, 60) || "session";
+    if (fmt === "json") {
+      const content = JSON.stringify({ info: session, messages: msgs }, null, 2);
+      wbDownFile(safe + ".json", content, "application/json");
+    } else {
+      let md = `# ${title}\n\n`;
+      for (const m of msgs) {
+        const role = (m.info && m.info.role) || "user";
+        const label = role === "assistant" ? "Assistant" : role === "tool" ? "Tool" : "User";
+        const text = (m.parts || []).filter(p => p && p.type === "text" && p.text && !p.synthetic && !p.ignored).map(p => p.text).join("\n").trim();
+        if (!text) continue;
+        md += `## ${label}\n\n${text}\n\n`;
+      }
+      wbDownFile(safe + ".md", md.trim() + "\n", "text/markdown");
+    }
+    toast("已导出", safe + "." + (fmt === "json" ? "json" : "md"), "info");
+  } catch (e) {
+    if (e.message !== "unauthorized") toast("导出失败", e.message || "未知错误", "crit");
+  }
+}
+function wbDownFile(name, content, type) {
+  const blob = new Blob([content], { type });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = name;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+// 查看更改：GET /session/{id}/diff，弹窗展示每个文件 +增删行数 + before/after 代码块。
+async function wbShowWbDiff(id) {
+  const dir = wbCurrentDir();
+  const res = await api(`/api/opencode/session/${encodeURIComponent(id)}/diff`, { headers: wbDirHeaders(dir) });
+  let list = [];
+  if (res.ok) { try { const d = await res.json(); list = Array.isArray(d) ? d : (d.diffs || d.files || []); } catch (_) {} }
+  if (!res.ok && !list.length) { toast("查看更改失败", "diff (" + res.status + ")", "crit"); return; }
+  let html;
+  if (!list.length) {
+    html = `<div class="wb-diff-empty">该会话暂无文件更改</div>`;
+  } else {
+    html = list.map((df, i) => {
+      const file = df.file || df.path || "";
+      const adds = df.additions || 0;
+      const dels = df.deletions || 0;
+      const before = df.before || "";
+      const after = df.after || "";
+      return `<details class="wb-diff-item" ${i === 0 ? "open" : ""}>
+        <summary><b>${escapeHtml(file)}</b><span class="meta"><span class="add">+${adds}</span> <span class="del">-${dels}</span> <span class="badge">${escapeHtml(df.status || "modified")}</span></span></summary>
+        <div class="wb-diff-body">
+          <div class="col before"><h5>改动前</h5><pre>${escapeHtml(before) || "-"}</pre></div>
+          <div class="col after"><h5>改动后</h5><pre>${escapeHtml(after) || "-"}</pre></div>
+        </div>
+      </details>`;
+    }).join("");
+  }
+  wbModalOpen("查看更改（" + list.length + "）", html);
+}
+// 会话时间线：由当前消息 parts 重建（工具调用 / 授权 / 提问 / 子代理 / agent / 待决项）。
+function wbTimelineFromMessages(msgs) {
+  const entries = [];
+  let toolSeq = 0;
+  let miscSeq = 0;
+  for (const m of msgs) {
+    const created = (m.info && m.info.time && m.info.time.created) || 0;
+    const parts = m.parts || [];
+    for (const p of parts) {
+      if (!p || typeof p !== "object") continue;
+      const type = p.type || "";
+      if (type === "tool") {
+        toolSeq++;
+        const state = p.state || {};
+        const st = state.type || "completed";
+        const status = st === "running" ? "busy" : (st === "error" || st === "failed") ? "busy" : "idle";
+        let summary = p.tool || "";
+        const input = state.input || {};
+        try {
+          const ks = Object.keys(input).slice(0, 3);
+          if (ks.length) summary += " · " + ks.map(k => {
+            let v = input[k];
+            if (typeof v === "object") v = JSON.stringify(v);
+            v = String(v).replace(/\s+/g, " ").trim();
+            return `${k}: ${v.length > 48 ? v.slice(0, 45) + "…" : v}`;
+          }).join(" · ");
+        } catch (_) {}
+        entries.push({ icon: status, st: status === "busy" ? (st === "running" ? "运行中" : "失败") : "已完成", title: "工具调用 · " + p.tool, summary, ts: (state.time && state.time.start) || created, key: "tool" + toolSeq });
+      } else if (type === "permission") {
+        entries.push({ icon: "question", st: "待授权", title: "授权请求", summary: p.message || "", ts: created, key: "perm" + created + "_" + (miscSeq++) });
+      } else if (type === "question") {
+        entries.push({ icon: "question", st: "提问", title: "待决问题", summary: p.question || "", ts: created, key: "q" + created + "_" + (miscSeq++) });
+      } else if (type === "subtask" || type === "agent") {
+        entries.push({ icon: "info", st: "子任务", title: type === "subtask" ? (p.description || p.prompt || "") : (p.name || "agent"), summary: "", ts: created, key: "sub" + created + "_" + (miscSeq++) });
+      }
+    }
+  }
+  // 待授权操作 / 待决问题也并入时间线（当前尚未处理的）。
+  for (const perm of (wbPermissions[wbSelected] || [])) {
+    entries.push({ icon: "question", st: "待授权", title: "授权请求 · " + (perm.permission || "操作"), summary: (perm.patterns || []).join("、"), ts: 0, key: "permpend" + perm.id });
+  }
+  for (const q of (wbPending[wbSelected] || [])) {
+    const first = (q.questions || [])[0] || {};
+    entries.push({ icon: "question", st: "待回答", title: first.header || "待决问题", summary: first.question || "", ts: 0, key: "qpend" + q.id });
+  }
+  entries.sort((a, b) => (a.ts || 0) - (b.ts || 0));
+  return entries;
+}
+async function wbShowWbTimeline(id) {
+  const dir = wbCurrentDir();
+  let msgs = [];
+  try {
+    const mRes = await api(`/api/opencode/session/${encodeURIComponent(id)}/message?limit=500`, { headers: wbDirHeaders(dir) });
+    if (mRes.ok) { const d = await mRes.json(); msgs = Array.isArray(d) ? d : (d.messages || []); }
+  } catch (_) {}
+  const entries = wbTimelineFromMessages(msgs);
+  let html;
+  if (!entries.length) {
+    html = `<div class="wb-diff-empty">时间线为空（等待工具调用 / 授权 / 提问）</div>`;
+  } else {
+    html = entries.map(e => `<div class="wb-tl">
+      <span class="ico ${e.icon}">${e.icon === "busy" ? "⚙" : e.icon === "question" ? "?" : "▤"}</span>
+      <div class="t">
+        <b>${escapeHtml(e.title)}</b> <span class="badge ${e.icon === "busy" ? "busy" : e.icon === "question" ? "question" : "idle"} st">${escapeHtml(e.st)}</span>
+        ${e.summary ? `<div class="sum">${escapeHtml(e.summary)}</div>` : ""}
+        ${e.ts ? `<div class="time">${wbTimeFormat(e.ts)}</div>` : ""}
+      </div>
+    </div>`).join("");
+  }
+  wbModalOpen("会话时间线（" + entries.length + "）", html);
+}
+function wbModalOpen(title, html) {
+  document.getElementById("wbModalTitle").textContent = title;
+  document.getElementById("wbModalBody").innerHTML = html;
+  const card = document.querySelector("#wbModal .modal-card");
+  if (window.innerWidth <= 768) card && card.classList.add("wb-modal-scroll");
+  else card && card.classList.remove("wb-modal-scroll");
+  document.getElementById("wbModal").classList.remove("hidden");
+}
+function wbModalClose() {
+  document.getElementById("wbModal").classList.add("hidden");
+  document.getElementById("wbModalBody").innerHTML = "";
 }
 document.getElementById("wbFilter").addEventListener("input", renderWbList);
 

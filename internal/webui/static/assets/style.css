@@ -669,6 +669,68 @@ td .actions { display: inline-flex; gap: 6px; }
 .wb-reply textarea { flex: 1; min-height: 42px; max-height: 180px; resize: none; overflow: hidden; padding: 6px 10px; font-size: 13px; }
 .wb-reply .send { height: auto; align-self: stretch; padding: 0 16px; }
 
+/* 决策面板头部「更多」下拉菜单 */
+.wb-more-wrap { position: relative; display: inline-flex; flex-direction: column; align-items: flex-start; }
+.wb-more-menu {
+  position: absolute; top: calc(100% + 4px); right: 0; z-index: 30;
+  min-width: 176px; padding: 6px;
+  background: var(--surface-1); border: 1px solid var(--hairline-strong);
+  border-radius: var(--r-md); box-shadow: var(--shadow-pop);
+  display: flex; flex-direction: column; gap: 2px;
+}
+.wb-more-menu button {
+  width: 100%; text-align: left; padding: 7px 10px; font-size: 12.5px;
+  background: transparent; border: none; border-radius: var(--r-sm); color: var(--ink);
+  cursor: pointer; white-space: nowrap; box-shadow: none;
+}
+.wb-more-menu button:hover { background: var(--surface-2); color: var(--ink); box-shadow: none; }
+.wb-more-menu button.danger-item { color: var(--danger); }
+.wb-more-menu button.danger-item:hover { background: var(--danger-dim); }
+
+/* 会话详情弹窗：文件更改（diff） */
+.wb-diff-item {
+  border: 1px solid var(--hairline); border-radius: var(--r-md);
+  margin-bottom: 8px; overflow: hidden; background: var(--canvas);
+}
+.wb-diff-item summary {
+  list-style: none; cursor: pointer; padding: 8px 12px;
+  display: flex; align-items: center; gap: 8px; font-size: 13px;
+}
+.wb-diff-item summary::-webkit-details-marker { display: none; }
+.wb-diff-item summary:hover { background: var(--surface-2); }
+.wb-diff-item .meta { margin-left: auto; font-size: 11.5px; font-family: var(--font-mono); flex-shrink: 0; }
+.wb-diff-item .meta .add { color: var(--success); }
+.wb-diff-item .meta .del { color: var(--danger); }
+.wb-diff-body { display: grid; grid-template-columns: 1fr 1fr; gap: 1px; background: var(--hairline); }
+.wb-diff-body .col { padding: 8px 12px; background: var(--surface-1); min-width: 0; }
+.wb-diff-body .col h5 { margin: 0 0 6px; font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--ink-tertiary); }
+.wb-diff-body pre {
+  margin: 0; white-space: pre-wrap; word-break: break-word;
+  font-family: var(--font-mono); font-size: 11.5px; line-height: 1.55;
+  max-height: 260px; overflow: auto; color: var(--ink-muted);
+}
+.wb-diff-body .col.before pre { color: #f5876f; }
+.wb-diff-body .col.after pre { color: #8fce98; }
+.wb-diff-empty { padding: 20px; text-align: center; color: var(--ink-tertiary); font-size: 12.5px; }
+
+/* 会话详情弹窗：会话时间线 */
+.wb-tl { display: flex; gap: 10px; padding: 8px 4px; border-bottom: 1px solid var(--hairline); }
+.wb-tl:last-child { border-bottom: none; }
+.wb-tl .ico {
+  width: 22px; height: 22px; border-radius: 50%; flex-shrink: 0;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 11px; margin-top: 1px;
+}
+.wb-tl .ico.busy { background: var(--danger-dim); color: var(--danger); }
+.wb-tl .ico.idle { background: var(--success-dim); color: var(--success); }
+.wb-tl .ico.question { background: var(--warning-dim); color: var(--warning); }
+.wb-tl .ico.info { background: var(--info-dim); color: var(--primary-hover); }
+.wb-tl .t { flex: 1; min-width: 0; }
+.wb-tl .t .sum { font-size: 12px; color: var(--ink-muted); line-height: 1.5; word-break: break-word; }
+.wb-tl .t .time { font-size: 10.5px; color: var(--ink-tertiary); margin-top: 3px; font-family: var(--font-mono); }
+.wb-tl .t b { font-size: 12.5px; font-weight: 600; }
+.wb-tl .t .st { float: right; }
+
 .wb-event {
   display: flex; gap: 10px; padding: 5px 8px;
   border-bottom: 1px solid var(--surface-3);
@@ -832,6 +894,13 @@ td .actions { display: inline-flex; gap: 6px; }
   /* 快捷回复块标题紧凑，消息区 padding 压缩 */
   .wb-scroll > .wb-block:last-child h4 { margin-bottom: 0; }
   .wb-msgwrap { padding: 0 1px; }
+  /* 更多下拉菜单：移动端全宽覆盖在面板上方，避免溢出 */
+  .wb-more-wrap { position: static; }
+  .wb-more-menu { position: fixed; left: 12px; right: 12px; top: 64px; bottom: auto; min-width: 0; max-height: 60dvh; overflow-y: auto; z-index: 60; }
+  .wb-more-menu button { min-height: 40px; font-size: 13.5px; }
+  /* 会话详情弹窗：diff 双栏改单栏，避免窄屏挤压 */
+  .wb-diff-body { grid-template-columns: 1fr; }
+  .modal-card.wb-modal-scroll { max-height: calc(100dvh - 48px); }
 }
 
 /* 超窄屏：进一步压缩间距与字号，行内按钮不换行溢出 */
