@@ -724,6 +724,72 @@ public class UserEntity {
 	}
 }
 
+// TestIntelWebBindings verifies the Web client field-binding pipeline: a Vue
+// module's template bindings are extracted into the must-display field list and
+// exposed through /api/intel/web-bindings.
+func TestIntelWebBindings(t *testing.T) {
+	s := newTestServer(t)
+	wh := loginWeb(t, s)
+
+	root := t.TempDir()
+	writeTestFile(t, filepath.Join(root, "clients/admin-vue/package.json"),
+		`{"dependencies":{"vue":"3.4.0"}}`)
+	writeTestFile(t, filepath.Join(root, "clients/admin-vue/src/views/users/UserDetail.vue"),
+		`<template>
+  <div>
+    <span>{{ detail.userId }}</span>
+    <span>{{ detail.nickname || '-' }}</span>
+    <input v-model="activeTab" />
+  </div>
+</template>
+<script>export default { name: 'UserDetail' }</script>`)
+
+	rec := s.do(t, http.MethodPost, "/api/intel/projects",
+		`{"name":"demo","source":"local","localPath":"`+filepath.ToSlash(root)+`"}`, wh)
+	var proj struct {
+		ID int64 `json:"id"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &proj); err != nil || proj.ID == 0 {
+		t.Fatalf("create project: %s", rec.Body.String())
+	}
+	rec = s.do(t, http.MethodPost, "/api/intel/analyze",
+		`{"projectId":`+jsonInt(proj.ID)+`}`, wh)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("analyze status %d: %s", rec.Code, rec.Body.String())
+	}
+
+	rec = s.do(t, http.MethodGet, "/api/intel/web-bindings?projectId="+jsonInt(proj.ID), "", wh)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("web-bindings status %d: %s", rec.Code, rec.Body.String())
+	}
+	var bResp struct {
+		Bindings []struct {
+			Page      string `json:"page"`
+			FieldPath string `json:"fieldPath"`
+			Slot      string `json:"slot"`
+		} `json:"bindings"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &bResp); err != nil {
+		t.Fatalf("bindings parse: %v", err)
+	}
+	if len(bResp.Bindings) != 3 {
+		t.Fatalf("bindings = %d, want 3: %+v", len(bResp.Bindings), bResp.Bindings)
+	}
+	got := map[string]string{}
+	for _, b := range bResp.Bindings {
+		got[b.FieldPath] = b.Slot
+	}
+	if got["detail.userId"] != "interpolation" {
+		t.Errorf("detail.userId slot = %q, want interpolation", got["detail.userId"])
+	}
+	if got["detail.nickname"] != "interpolation" {
+		t.Errorf("detail.nickname slot = %q, want interpolation", got["detail.nickname"])
+	}
+	if got["activeTab"] != "v-model" {
+		t.Errorf("activeTab slot = %q, want v-model", got["activeTab"])
+	}
+}
+
 func gitRun(t *testing.T, dir string, args ...string) {
 	t.Helper()
 	cmd := exec.Command("git", args...)

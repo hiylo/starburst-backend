@@ -109,6 +109,7 @@ var migrations = []migration{
 	{name: "intel_fix_finding", apply: migrationIntelFixFinding},
 	{name: "intel_dedup", apply: migrationIntelDedup},
 	{name: "intel_android_bindings", apply: migrationIntelAndroidBindings},
+	{name: "intel_web_bindings", apply: migrationIntelWebBindings},
 	{name: "sync_bundle", apply: migrationSyncBundle},
 }
 
@@ -850,6 +851,31 @@ func migrationIntelAndroidBindings(ctx context.Context, driver string, db *sql.D
 			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 		)`, idColumn(driver)),
 		`CREATE INDEX IF NOT EXISTS idx_intel_android_bindings_project ON intel_android_bindings(project_id, module_id)`,
+	}
+	for _, s := range stmts {
+		if _, err := db.ExecContext(ctx, s); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// migrationIntelWebBindings creates the Web client field-binding table: Vue
+// template "page -> field path" extractions (the must-display field list).
+func migrationIntelWebBindings(ctx context.Context, driver string, db *sql.DB) error {
+	stmts := []string{
+		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS intel_web_bindings (
+			%s,
+			project_id INTEGER NOT NULL DEFAULT 0,
+			module_id INTEGER NOT NULL DEFAULT 0,
+			page TEXT NOT NULL DEFAULT '',
+			field_path TEXT NOT NULL DEFAULT '',
+			slot TEXT NOT NULL DEFAULT '',
+			source_file TEXT NOT NULL DEFAULT '',
+			source_line INTEGER NOT NULL DEFAULT 0,
+			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+		)`, idColumn(driver)),
+		`CREATE INDEX IF NOT EXISTS idx_intel_web_bindings_project ON intel_web_bindings(project_id, module_id)`,
 	}
 	for _, s := range stmts {
 		if _, err := db.ExecContext(ctx, s); err != nil {

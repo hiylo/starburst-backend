@@ -367,6 +367,10 @@ type Store interface {
 	ReplaceIntelAndroidBindings(ctx context.Context, projectID int64, bindings []*IntelAndroidBinding) error
 	// ListIntelAndroidBindings returns the project's Android field bindings.
 	ListIntelAndroidBindings(ctx context.Context, projectID int64) ([]*IntelAndroidBinding, error)
+	// ReplaceIntelWebBindings replaces the project's Web field bindings (full rescan).
+	ReplaceIntelWebBindings(ctx context.Context, projectID int64, bindings []*IntelWebBinding) error
+	// ListIntelWebBindings returns the project's Web field bindings.
+	ListIntelWebBindings(ctx context.Context, projectID int64) ([]*IntelWebBinding, error)
 }
 
 // Open opens a store for the given driver/dsn. It applies all migrations

@@ -23,6 +23,7 @@ import (
 	"github.com/hiylo/starburst-backend/internal/intel/gateway"
 	"github.com/hiylo/starburst-backend/internal/intel/sbom"
 	"github.com/hiylo/starburst-backend/internal/intel/testassets"
+	"github.com/hiylo/starburst-backend/internal/intel/web"
 	"github.com/hiylo/starburst-backend/internal/store"
 )
 
@@ -207,6 +208,33 @@ func (s *Server) handleIntelAndroidBindings(w http.ResponseWriter, r *http.Reque
 	bindings, err := s.store.ListIntelAndroidBindings(ctx, projectID)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "load android bindings failed")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"bindings": bindings})
+}
+
+// handleIntelWebBindings lists the project's Web client field bindings (the
+// must-display field list extracted from Vue templates).
+func (s *Server) handleIntelWebBindings(w http.ResponseWriter, r *http.Request) {
+	if !s.requireWeb(r) {
+		if _, ok := s.requireToken(r); !ok {
+			writeErr(w, http.StatusUnauthorized, "web session or APP token required")
+			return
+		}
+	}
+	if r.Method != http.MethodGet {
+		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	projectID, ok := s.intelQueryProject(w, r)
+	if !ok {
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+	bindings, err := s.store.ListIntelWebBindings(ctx, projectID)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "load web bindings failed")
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"bindings": bindings})
@@ -550,6 +578,9 @@ func (s *Server) runIntelAnalyze(ctx context.Context, projectID int64) error {
 	if err := s.persistAndroidBindings(ctx, projectID, root, mods); err != nil {
 		log.Printf("intel android bindings project %d: %v", projectID, err)
 	}
+	if err := s.persistWebBindings(ctx, projectID, root, mods); err != nil {
+		log.Printf("intel web bindings project %d: %v", projectID, err)
+	}
 	if err := s.persistGatewayRoutes(ctx, projectID, root); err != nil {
 		log.Printf("intel gateway routes project %d: %v", projectID, err)
 	}
@@ -667,6 +698,38 @@ func (s *Server) persistAndroidBindings(ctx context.Context, projectID int64, ro
 		}
 	}
 	return s.store.ReplaceIntelAndroidBindings(ctx, projectID, bindings)
+}
+
+// persistWebBindings extracts Vue template "page -> field path" bindings for
+// every web module and persists them as the client's must-display field list.
+func (s *Server) persistWebBindings(ctx context.Context, projectID int64, root string, mods []*store.IntelModule) error {
+	bindings := make([]*store.IntelWebBinding, 0)
+	for _, m := range mods {
+		if m.KindType != "web" {
+			continue
+		}
+		dir := filepath.Join(root, m.RelPath)
+		srcDir := filepath.Join(dir, "src")
+		if fi, err := os.Stat(srcDir); err != nil || !fi.IsDir() {
+			continue
+		}
+		bs, err := web.ExtractBindings(srcDir)
+		if err != nil {
+			continue
+		}
+		for _, b := range bs {
+			src, line := splitAndroidSource(root, srcDir, b.Source)
+			bindings = append(bindings, &store.IntelWebBinding{
+				ModuleID:   m.ID,
+				Page:       b.Page,
+				FieldPath:  b.FieldPath,
+				Slot:       b.Slot,
+				SourceFile: src,
+				SourceLine: line,
+			})
+		}
+	}
+	return s.store.ReplaceIntelWebBindings(ctx, projectID, bindings)
 }
 
 // splitAndroidSource splits a binding's "rel/path.xml:line" source (relative to

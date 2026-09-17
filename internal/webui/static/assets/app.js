@@ -2626,20 +2626,25 @@ async function checkIntelContract() {
 const SEV_LABELS = { critical: "严重", high: "高", medium: "中", low: "低" };
 
 async function loadIntelBindings(id) {
-  const res = await api("/api/intel/android-bindings?projectId=" + id, { headers: appHeaders() });
-  const data = await res.json();
-  const bindings = data.bindings || [];
+  const [aRes, wRes] = await Promise.all([
+    api("/api/intel/android-bindings?projectId=" + id, { headers: appHeaders() }),
+    api("/api/intel/web-bindings?projectId=" + id, { headers: appHeaders() }),
+  ]);
+  const android = ((await aRes.json()).bindings || []).map(b => ({ ...b, client: "android", slot: b.widget || "-" }));
+  const web = ((await wRes.json()).bindings || []).map(b => ({ ...b, client: "web", slot: b.slot || "-" }));
+  const bindings = android.concat(web);
   const tb = document.querySelector("#intelBindingTable tbody");
   tb.innerHTML = "";
   for (const b of bindings) {
     tb.insertAdjacentHTML("beforeend", `<tr>
+      <td><span class="badge">${escapeHtml(b.client)}</span></td>
       <td class="mono">${escapeHtml(b.page || "-")}</td>
       <td class="mono">${escapeHtml(b.fieldPath || "-")}</td>
-      <td><span class="badge">${escapeHtml(b.widget || "-")}</span></td>
+      <td><span class="badge">${escapeHtml(b.slot || "-")}</span></td>
       <td class="mono muted clip" title="${escapeHtml(b.sourceFile || "")}">${escapeHtml(shortProv(b.sourceFile, b.sourceLine))}</td>
     </tr>`);
   }
-  if (!bindings.length) tb.insertAdjacentHTML("beforeend", `<tr><td colspan="4" class="muted" style="text-align:center;padding:16px">暂无客户端绑定（Android 项目分析后自动提取 DataBinding 字段）</td></tr>`);
+  if (!bindings.length) tb.insertAdjacentHTML("beforeend", `<tr><td colspan="5" class="muted" style="text-align:center;padding:16px">暂无客户端绑定（Android/Web 项目分析后自动提取字段）</td></tr>`);
 }
 
 async function loadIntelFeatures(id) {
