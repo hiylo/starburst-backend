@@ -351,6 +351,28 @@ func (s *sqlStore) ListIntelEntities(ctx context.Context, projectID, moduleID in
 	return out, rows.Err()
 }
 
+// DeleteIntelModuleEntities removes one module's entity mappings.
+func (s *sqlStore) DeleteIntelModuleEntities(ctx context.Context, projectID, moduleID int64) error {
+	_, err := s.db.ExecContext(ctx, s.q(`
+		DELETE FROM intel_entities WHERE project_id = ? AND module_id = ?`), projectID, moduleID)
+	return err
+}
+
+// AppendIntelEntities inserts entity mappings without wiping the rest.
+func (s *sqlStore) AppendIntelEntities(ctx context.Context, projectID int64, ents []*IntelEntity) error {
+	for _, e := range ents {
+		if _, err := s.db.ExecContext(ctx, s.q(`
+			INSERT INTO intel_entities (project_id, module_id, entity, table_name, column_name,
+				field_type, nullable, is_primary, source_file, source_line)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
+			projectID, e.ModuleID, e.Entity, e.TableName, e.ColumnName,
+			e.FieldType, e.Nullable, e.IsPrimary, e.SourceFile, e.SourceLine); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // ReplaceIntelEndpoints deletes the project's endpoint contracts and re-inserts
 // the given set (a full rescan replaces the prior snapshot).
 func (s *sqlStore) ReplaceIntelEndpoints(ctx context.Context, projectID int64, eps []*IntelEndpoint) error {
@@ -411,6 +433,28 @@ func (s *sqlStore) GetIntelEndpoint(ctx context.Context, id int64) (*IntelEndpoi
 		return nil, err
 	}
 	return ep, nil
+}
+
+// DeleteIntelModuleEndpoints removes one module's endpoint contracts.
+func (s *sqlStore) DeleteIntelModuleEndpoints(ctx context.Context, projectID, moduleID int64) error {
+	_, err := s.db.ExecContext(ctx, s.q(`
+		DELETE FROM intel_endpoints WHERE project_id = ? AND module_id = ?`), projectID, moduleID)
+	return err
+}
+
+// AppendIntelEndpoints inserts endpoint contracts without wiping the rest.
+func (s *sqlStore) AppendIntelEndpoints(ctx context.Context, projectID int64, eps []*IntelEndpoint) error {
+	for _, ep := range eps {
+		if _, err := s.db.ExecContext(ctx, s.q(`
+			INSERT INTO intel_endpoints (project_id, module_id, method, path, response_type,
+				request_json, fields_json, source_file, source_line, summary)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
+			projectID, ep.ModuleID, ep.Method, ep.Path, ep.ResponseType,
+			ep.RequestJSON, ep.FieldsJSON, ep.SourceFile, ep.SourceLine, ep.Summary); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // UpdateIntelEndpointSummary persists the LLM-derived business summary for a

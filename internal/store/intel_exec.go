@@ -113,6 +113,28 @@ func (s *sqlStore) ReplaceIntelTestCases(ctx context.Context, projectID int64, c
 	return nil
 }
 
+// DeleteIntelModuleTestCases removes one module's test cases.
+func (s *sqlStore) DeleteIntelModuleTestCases(ctx context.Context, projectID, moduleID int64) error {
+	_, err := s.db.ExecContext(ctx, s.q(`
+		DELETE FROM test_cases WHERE project_id = ? AND module_id = ?`), projectID, moduleID)
+	return err
+}
+
+// AppendIntelTestCases inserts test cases without wiping the rest.
+func (s *sqlStore) AppendIntelTestCases(ctx context.Context, projectID int64, cases []*TestCase) error {
+	for _, c := range cases {
+		if _, err := s.db.ExecContext(ctx, s.q(`
+			INSERT INTO test_cases (project_id, module_id, module, kind, framework, class, method,
+				path, tags, last_status, last_duration_ms, flaky_count, last_run_at, created_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`),
+			projectID, c.ModuleID, c.Module, c.Kind, c.Framework, c.Class, c.Method,
+			c.Path, c.Tags, c.LastStatus, c.LastDurationMs, c.FlakyCount, c.LastRunAt); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // ListIntelTestCases returns test cases for a project (optionally narrowed to a
 // module).
 func (s *sqlStore) ListIntelTestCases(ctx context.Context, projectID, moduleID int64) ([]*TestCase, error) {

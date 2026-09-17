@@ -266,10 +266,18 @@ type Store interface {
 	ReplaceIntelEntities(ctx context.Context, projectID int64, ents []*IntelEntity) error
 	// ListIntelEntities returns entity mappings for a project/module.
 	ListIntelEntities(ctx context.Context, projectID, moduleID int64) ([]*IntelEntity, error)
+	// DeleteIntelModuleEntities removes one module's entity mappings.
+	DeleteIntelModuleEntities(ctx context.Context, projectID, moduleID int64) error
+	// AppendIntelEntities inserts entity mappings without wiping the rest.
+	AppendIntelEntities(ctx context.Context, projectID int64, ents []*IntelEntity) error
 	// ReplaceIntelEndpoints replaces the project's endpoint contracts.
 	ReplaceIntelEndpoints(ctx context.Context, projectID int64, eps []*IntelEndpoint) error
 	// ListIntelEndpoints returns endpoint contracts for a project/module.
 	ListIntelEndpoints(ctx context.Context, projectID, moduleID int64) ([]*IntelEndpoint, error)
+	// DeleteIntelModuleEndpoints removes one module's endpoint contracts.
+	DeleteIntelModuleEndpoints(ctx context.Context, projectID, moduleID int64) error
+	// AppendIntelEndpoints inserts endpoint contracts without wiping the rest.
+	AppendIntelEndpoints(ctx context.Context, projectID int64, eps []*IntelEndpoint) error
 	// GetIntelEndpoint loads a single endpoint contract by id.
 	GetIntelEndpoint(ctx context.Context, id int64) (*IntelEndpoint, error)
 	// UpdateIntelEndpointSummary persists a business summary for one endpoint.
@@ -281,6 +289,10 @@ type Store interface {
 	ReplaceIntelTestCases(ctx context.Context, projectID int64, cases []*TestCase) error
 	// ListIntelTestCases returns test cases for a project/module.
 	ListIntelTestCases(ctx context.Context, projectID, moduleID int64) ([]*TestCase, error)
+	// DeleteIntelModuleTestCases removes one module's test cases.
+	DeleteIntelModuleTestCases(ctx context.Context, projectID, moduleID int64) error
+	// AppendIntelTestCases inserts test cases without wiping the rest.
+	AppendIntelTestCases(ctx context.Context, projectID int64, cases []*TestCase) error
 	// UpdateIntelTestCaseOutcome records a run outcome on the matching test case.
 	UpdateIntelTestCaseOutcome(ctx context.Context, projectID int64, class, method string, passed bool, durationMs int64, flaky bool) error
 	// CreateIntelTestRun persists a new test run and populates its id.
