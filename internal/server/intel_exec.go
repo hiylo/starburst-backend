@@ -224,6 +224,12 @@ func (s *Server) runIntelTests(ctx context.Context, projectID, moduleID int64) (
 		return nil, fmt.Errorf("unsupported build tool %q for module %s", module.BuildTool, module.RelPath)
 	}
 
+	// Environment gate (§3.6): reject the run before executing when required
+	// middleware/toolchains are missing, with a per-item list.
+	if err := s.envGate(ctx, projectID); err != nil {
+		return nil, err
+	}
+
 	now := time.Now()
 	run := &store.TestRun{
 		ProjectID: projectID,

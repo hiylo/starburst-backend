@@ -1029,6 +1029,54 @@ func dockerRunName(args []string) string {
 	return ""
 }
 
+// TestIntelEnvGateBlocksRun verifies the environment gate: a run is rejected
+// before any command executes when required middleware is missing.
+func TestIntelEnvGateBlocksRun(t *testing.T) {
+	s := newTestServer(t)
+	wh := loginWeb(t, s)
+
+	root := t.TempDir()
+	writeTestFile(t, filepath.Join(root, "pom.xml"), `<project>
+  <properties><java.version>17</java.version></properties>
+  <dependencies>
+    <dependency><groupId>com.mysql</groupId><artifactId>mysql-connector-j</artifactId><version>8.0.33</version></dependency>
+  </dependencies>
+</project>`)
+
+	rec := s.do(t, http.MethodPost, "/api/intel/projects",
+		`{"name":"demo","source":"local","localPath":"`+filepath.ToSlash(root)+`"}`, wh)
+	var proj struct {
+		ID int64 `json:"id"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &proj); err != nil || proj.ID == 0 {
+		t.Fatalf("create project: %s", rec.Body.String())
+	}
+
+	old := envagent.RunDocker
+	defer func() { envagent.RunDocker = old }()
+	envagent.RunDocker = func(ctx context.Context, args ...string) (string, error) {
+		if len(args) > 0 && args[0] == "info" {
+			return "24.0.0", nil
+		}
+		return "", nil
+	}
+
+	rec = s.do(t, http.MethodPost, "/api/intel/analyze",
+		`{"projectId":`+jsonInt(proj.ID)+`}`, wh)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("analyze status %d: %s", rec.Code, rec.Body.String())
+	}
+
+	rec = s.do(t, http.MethodPost, "/api/intel/run",
+		`{"projectId":`+jsonInt(proj.ID)+`}`, wh)
+	if rec.Code == 200 {
+		t.Fatalf("run should be gated, got 200: %s", rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "环境门禁") {
+		t.Errorf("run failure should mention 环境门禁: %s", rec.Body.String())
+	}
+}
+
 func gitRun(t *testing.T, dir string, args ...string) {
 	t.Helper()
 	cmd := exec.Command("git", args...)

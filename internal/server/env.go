@@ -2,8 +2,10 @@ package server
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/hiylo/starburst-backend/internal/intel/envagent"
@@ -60,29 +62,60 @@ func (s *Server) handleIntelEnvEnsure(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Minute)
 	defer cancel()
-	p, err := s.store.GetIntelProject(ctx, req.ProjectID)
+	services, reqs, err := s.ensureEnv(ctx, req.ProjectID)
 	if err != nil {
-		writeErr(w, http.StatusNotFound, "project not found")
-		return
-	}
-	root, err := s.projectRoot(ctx, p)
-	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "resolve project root failed")
-		return
-	}
-	s.persistEnvRequirements(ctx, req.ProjectID, root)
-
-	reqs, _ := s.store.ListIntelEnvRequirements(ctx, req.ProjectID)
-	services, err := s.probeEnvServices(ctx, req.ProjectID, root, reqs)
-	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "probe env failed: "+err.Error())
-		return
-	}
-	if err := s.store.ReplaceIntelEnvServices(ctx, req.ProjectID, services); err != nil {
-		writeErr(w, http.StatusInternalServerError, "persist env status failed")
+		writeErr(w, http.StatusInternalServerError, "检测环境失败: "+err.Error())
 		return
 	}
 	writeEnvResponse(w, req.ProjectID, reqs, services)
+}
+
+// ensureEnv detects the project's environment requirements, probes each one on
+// the local machine and persists per-item status. Shared by the ensure/status
+// handlers and the run gate (which must evaluate readiness before executing).
+func (s *Server) ensureEnv(ctx context.Context, projectID int64) ([]*store.IntelEnvService, []*store.IntelEnvRequirement, error) {
+	p, err := s.store.GetIntelProject(ctx, projectID)
+	if err != nil {
+		return nil, nil, err
+	}
+	root, err := s.projectRoot(ctx, p)
+	if err != nil {
+		return nil, nil, err
+	}
+	s.persistEnvRequirements(ctx, projectID, root)
+
+	reqs, _ := s.store.ListIntelEnvRequirements(ctx, projectID)
+	services, err := s.probeEnvServices(ctx, projectID, root, reqs)
+	if err != nil {
+		return nil, reqs, err
+	}
+	if err := s.store.ReplaceIntelEnvServices(ctx, projectID, services); err != nil {
+		return nil, reqs, err
+	}
+	return services, reqs, nil
+}
+
+// envGate evaluates environment readiness before a test run: every required
+// middleware and toolchain must be ready, otherwise the run is rejected with a
+// per-item missing list (the environment gate of §3.6). Projects whose env
+// state cannot be determined are let through (gate is best-effort).
+func (s *Server) envGate(ctx context.Context, projectID int64) error {
+	services, _, err := s.ensureEnv(ctx, projectID)
+	if err != nil {
+		log.Printf("intel env gate project %d: %v (放行)", projectID, err)
+		return nil
+	}
+	var missing []string
+	for _, svc := range services {
+		if svc.Status != "ready" {
+			missing = append(missing, fmt.Sprintf("%s(%s)", svc.Service, svc.Status))
+		}
+	}
+	if len(missing) > 0 {
+		return fmt.Errorf("环境门禁未通过，缺失项：%s；请到「环境供给」Tab 逐项安装后重试",
+			strings.Join(missing, "、"))
+	}
+	return nil
 }
 
 // handleIntelEnvStatus re-probes the project's environment requirements and
@@ -104,24 +137,9 @@ func (s *Server) handleIntelEnvStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Minute)
 	defer cancel()
-	p, err := s.store.GetIntelProject(ctx, projectID)
+	services, reqs, err := s.ensureEnv(ctx, projectID)
 	if err != nil {
-		writeErr(w, http.StatusNotFound, "project not found")
-		return
-	}
-	root, err := s.projectRoot(ctx, p)
-	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "resolve project root failed")
-		return
-	}
-	reqs, _ := s.store.ListIntelEnvRequirements(ctx, projectID)
-	services, err := s.probeEnvServices(ctx, projectID, root, reqs)
-	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "probe env failed")
-		return
-	}
-	if err := s.store.ReplaceIntelEnvServices(ctx, projectID, services); err != nil {
-		writeErr(w, http.StatusInternalServerError, "persist env status failed")
+		writeErr(w, http.StatusInternalServerError, "检测环境失败")
 		return
 	}
 	writeEnvResponse(w, projectID, reqs, services)
