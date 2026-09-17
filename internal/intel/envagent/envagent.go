@@ -400,3 +400,30 @@ func ToolchainInstallCommand(service, version string) []string {
 	}
 	return nil
 }
+
+// RunSSH executes an ssh command against a remote node (argv direct). Tests
+// substitute a deterministic stub since real ssh needs a node.
+var RunSSH = runSSHExec
+
+func runSSHExec(ctx context.Context, args ...string) (string, error) {
+	cmd := exec.CommandContext(ctx, "ssh", args...)
+	out, err := cmd.CombinedOutput()
+	return string(out), err
+}
+
+// SSHCommandArgs builds the ssh argv to run command on user@host:port. Options
+// are pinned so the call is non-interactive and bounded: BatchMode (no password
+// prompt) + ConnectTimeout 10s. StrictHostKeyChecking accept-new records first
+// contact and fails on changed keys deterministically.
+func SSHCommandArgs(host, user string, port int, command string) []string {
+	args := []string{"-p", strconv.Itoa(port),
+		"-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
+		"-o", "StrictHostKeyChecking=accept-new", "-o", "IdentitiesOnly=yes",
+	}
+	target := host
+	if user != "" {
+		target = user + "@" + host
+	}
+	args = append(args, target, command)
+	return args
+}

@@ -1967,6 +1967,77 @@ func TestFlakyRetry(t *testing.T) {
 	}
 }
 
+// TestIntelRunRemoteNode verifies the run routing: with a node specified, the
+// test command is driven over SSH (stubbed) and the stdout go-JSON is parsed
+// into results instead of running locally.
+func TestIntelRunRemoteNode(t *testing.T) {
+	s := newTestServer(t)
+	wh := loginWeb(t, s)
+
+	// A reachable node target (keeps reachable=true).
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	port := ln.Addr().(*net.TCPAddr).Port
+
+	root := t.TempDir()
+	writeTestFile(t, filepath.Join(root, "go.mod"), "module demo\n\ngo 1.22\n")
+	writeTestFile(t, filepath.Join(root, "main.go"), "package main\nfunc main() {}\n")
+
+	rec := s.do(t, http.MethodPost, "/api/intel/projects",
+		`{"name":"demo","source":"local","localPath":"`+filepath.ToSlash(root)+`"}`, wh)
+	var proj struct {
+		ID int64 `json:"id"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &proj); err != nil || proj.ID == 0 {
+		t.Fatalf("create project: %s", rec.Body.String())
+	}
+	rec = s.do(t, http.MethodPost, "/api/intel/analyze",
+		`{"projectId":`+jsonInt(proj.ID)+`}`, wh)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("analyze status %d: %s", rec.Code, rec.Body.String())
+	}
+	rec = s.do(t, http.MethodPost, "/api/intel/nodes",
+		`{"name":"go-runner","host":"127.0.0.1","port":`+jsonInt(int64(port))+`,"capabilities":"linux-docker"}`, wh)
+	var node struct {
+		Node struct {
+			ID int64 `json:"id"`
+		} `json:"node"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &node); err != nil || node.Node.ID == 0 {
+		t.Fatalf("create node: %s", rec.Body.String())
+	}
+
+	old := envagent.RunSSH
+	defer func() { envagent.RunSSH = old }()
+	called := false
+	var sshArgs []string
+	envagent.RunSSH = func(ctx context.Context, args ...string) (string, error) {
+		called = true
+		sshArgs = args
+		return `{"Action":"pass","Test":"TestPing","Package":"demo","Elapsed":0.01}
+`, nil
+	}
+
+	rec = s.do(t, http.MethodPost, "/api/intel/run",
+		`{"projectId":`+jsonInt(proj.ID)+`,"node":`+jsonInt(node.Node.ID)+`}`, wh)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("remote run status %d: %s", rec.Code, rec.Body.String())
+	}
+	if !called {
+		t.Error("RunSSH was not invoked (run did not route to node)")
+	}
+	joined := strings.Join(sshArgs, " ")
+	if !strings.Contains(joined, "127.0.0.1") {
+		t.Errorf("ssh args missing node host: %v", sshArgs)
+	}
+	if !strings.Contains(joined, "go test") {
+		t.Errorf("ssh args missing test command: %v", sshArgs)
+	}
+}
+
 func gitRun(t *testing.T, dir string, args ...string) {
 	t.Helper()
 	cmd := exec.Command("git", args...)

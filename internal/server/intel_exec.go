@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/hiylo/starburst-backend/internal/intel/envagent"
 	"github.com/hiylo/starburst-backend/internal/intel/report"
 	"github.com/hiylo/starburst-backend/internal/intel/rootcause"
 	"github.com/hiylo/starburst-backend/internal/store"
@@ -151,6 +152,7 @@ func (s *Server) handleIntelRun(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		ProjectID int64 `json:"projectId"`
 		ModuleID  int64 `json:"moduleId"`
+		NodeID    int64 `json:"node"`
 	}
 	if err := readJSONLimited(w, r, &req); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid request body")
@@ -162,7 +164,7 @@ func (s *Server) handleIntelRun(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Minute)
 	defer cancel()
-	run, err := s.runIntelTests(ctx, req.ProjectID, req.ModuleID)
+	run, err := s.runIntelTests(ctx, req.ProjectID, req.ModuleID, req.NodeID)
 	if err != nil {
 		log.Printf("intel run project %d: %v", req.ProjectID, err)
 		writeErr(w, http.StatusInternalServerError, "run failed: "+err.Error())
@@ -230,8 +232,9 @@ func (s *Server) handleIntelRunByID(w http.ResponseWriter, r *http.Request) {
 
 // runIntelTests executes the deterministic test command for a project/module,
 // parses the framework report and persists the run + per-case results, turning
-// failures into intel_issues. It returns the persisted run.
-func (s *Server) runIntelTests(ctx context.Context, projectID, moduleID int64) (*store.TestRun, error) {
+// failures into intel_issues. When nodeID > 0 the command is routed over SSH to
+// a remote execution node instead of the local machine. It returns the run.
+func (s *Server) runIntelTests(ctx context.Context, projectID, moduleID, nodeID int64) (*store.TestRun, error) {
 	p, err := s.store.GetIntelProject(ctx, projectID)
 	if err != nil {
 		return nil, err
@@ -265,9 +268,24 @@ func (s *Server) runIntelTests(ctx context.Context, projectID, moduleID int64) (
 		cmdArgs = wl
 	}
 
-	// Environment gate (§3.6): reject the run before executing when required
-	// middleware/toolchains are missing, with a per-item list.
-	if err := s.envGate(ctx, projectID); err != nil {
+	// Execution target: local (default) or a remote SSH node when specified.
+	remoteNode := (*store.RemoteNode)(nil)
+	if nodeID > 0 {
+		node, err := s.store.GetRemoteNode(ctx, nodeID)
+		if err != nil {
+			return nil, fmt.Errorf("remote node %d not found", nodeID)
+		}
+		if !node.Reachable {
+			return nil, fmt.Errorf("remote node %q 不可达（请先在节点列表检查）", node.Name)
+		}
+		if reportKind != "go" {
+			return nil, fmt.Errorf("远程执行目前仅支持 go 报告（stdout 自包含）；%s 需本机运行", reportKind)
+		}
+		remoteNode = node
+	} else if err := s.envGate(ctx, projectID); err != nil {
+		// Environment gate (§3.6): reject the run before executing when required
+		// middleware/toolchains are missing, with a per-item list. Local runs are
+		// gated; routed runs rely on the node's capability labels instead.
 		return nil, err
 	}
 
@@ -285,13 +303,26 @@ func (s *Server) runIntelTests(ctx context.Context, projectID, moduleID int64) (
 		return nil, err
 	}
 
-	output, err := runCommand(ctx, dir, cmdArgs[0], cmdArgs[1:]...)
+	var output []byte
+	var execErr error
+	if remoteNode != nil {
+		command := strings.Join(cmdArgs, " ")
+		if !strings.HasPrefix(strings.TrimSpace(command), "cd ") {
+			command = "cd ~ && " + command
+		}
+		sshArgs := envagent.SSHCommandArgs(remoteNode.Host, remoteNode.User, remoteNode.Port, command)
+		var out string
+		out, execErr = envagent.RunSSH(ctx, sshArgs...)
+		output = []byte(out)
+	} else {
+		output, execErr = runCommand(ctx, dir, cmdArgs[0], cmdArgs[1:]...)
+	}
 	finished := time.Now()
-	if err != nil {
+	if execErr != nil {
 		run.Status = "failed"
 		run.FinishedAt = &finished
 		_ = s.store.UpdateIntelTestRun(ctx, run)
-		return nil, fmt.Errorf("test command failed: %w", err)
+		return nil, fmt.Errorf("test command failed: %w", execErr)
 	}
 
 	results := parseReport(reportKind, dir, output)
