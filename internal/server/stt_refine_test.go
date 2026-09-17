@@ -42,11 +42,14 @@ func fakeLLM(t *testing.T, reply string) (*httptest.Server, *string) {
 	return srv, &lastUser
 }
 
-// failingLLM always answers 500, to exercise the graceful-degradation path.
+// failingLLM always answers 400, to exercise the graceful-degradation path.
+// A 4xx is a non-retryable client error, so the LLM client fails on the first
+// attempt without the exponential backoff that a 5xx/network error would
+// trigger — keeping the fallback tests fast.
 func failingLLM(t *testing.T) *httptest.Server {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, "boom", http.StatusInternalServerError)
+		http.Error(w, "boom", http.StatusBadRequest)
 	}))
 	t.Cleanup(srv.Close)
 	return srv
@@ -160,8 +163,11 @@ func TestSTTRefineDegradations(t *testing.T) {
 		t.Fatalf("reason %q", out.Reason)
 	}
 
-	// LLM configured but unreachable.
-	s.SetLLM(llm.New("http://127.0.0.1:1", "key", "test-model"))
+	// LLM configured but unreachable (retry disabled: the point is to verify
+	// graceful degradation, not the backoff path).
+	cl := llm.New("http://127.0.0.1:1", "key", "test-model")
+	cl.SetMaxRetries(0)
+	s.SetLLM(cl)
 	rec = s.do(t, http.MethodPost, "/api/stt/refine", payload, th)
 	out = sttRefineResponse{}
 	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
@@ -171,7 +177,7 @@ func TestSTTRefineDegradations(t *testing.T) {
 		t.Fatalf("unreachable-llm: status %d out %+v", rec.Code, out)
 	}
 
-	// LLM answers 500.
+	// LLM returns a non-retryable 4xx error.
 	s.SetLLM(llm.New(failingLLM(t).URL, "key", "test-model"))
 	rec = s.do(t, http.MethodPost, "/api/stt/refine", payload, th)
 	out = sttRefineResponse{}
@@ -179,7 +185,7 @@ func TestSTTRefineDegradations(t *testing.T) {
 		t.Fatalf("decode: %v", err)
 	}
 	if rec.Code != http.StatusOK || out.Changed || out.Reason != "llm failed" {
-		t.Fatalf("llm-500: status %d out %+v", rec.Code, out)
+		t.Fatalf("llm-4xx: status %d out %+v", rec.Code, out)
 	}
 }
 
@@ -330,7 +336,8 @@ func TestRefineWithLLMChunking(t *testing.T) {
 // falls back to local rules instead of failing the whole long request.
 func TestRefineWithLLMChunkFallback(t *testing.T) {
 	s := newTestServer(t)
-	s.SetLLM(llm.New("http://127.0.0.1:1", "key", "test-model"))
+	// 4xx 不可重试 → 首次调用即失败，不触发退避重试，测试保持快速。
+	s.SetLLM(llm.New(failingLLM(t).URL, "key", "test-model"))
 	// 两段连接词拼接：长度过阈值且能分成至少两块，chunk 失败走本地兜底。
 	long := ""
 	for i := 0; i < 34; i++ {

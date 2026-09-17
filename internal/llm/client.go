@@ -20,6 +20,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -38,20 +39,29 @@ type Client struct {
 	apiKey     string
 	model      string
 	httpClient *http.Client
-	maxRetries int // additional attempts after the first failure; 0 = no retry
+	// maxRetries: additional attempts after the first failure; 0 = no retry.
+	maxRetries atomic.Int32
 }
 
 // New builds a Client. If baseURL or apiKey is empty the client is disabled.
 func New(baseURL, apiKey, model string) *Client {
-	return &Client{
+	c := &Client{
 		baseURL: strings.TrimRight(baseURL, "/"),
 		apiKey:  apiKey,
 		model:   model,
 		httpClient: &http.Client{
 			Timeout: 120 * time.Second,
 		},
-		maxRetries: 2,
 	}
+	c.maxRetries.Store(2)
+	return c
+}
+
+// SetMaxRetries overrides the number of retry attempts after the first failure
+// (0 disables retrying entirely). Used by tests to exercise the immediate-fail
+// path without waiting on the exponential backoff.
+func (c *Client) SetMaxRetries(n int) {
+	c.maxRetries.Store(int32(n))
 }
 
 // SetConfig atomically replaces the client's endpoint configuration.
@@ -101,14 +111,22 @@ const (
 // a retry. 429 (rate limit), 5xx (server error) and transient network
 // failures are retryable; 4xx (client error) is not.
 func isRetryable(statusCode int, err error) bool {
-	if err != nil {
-		// Network/timeout errors are transient and worth retrying.
-		return true
-	}
 	if statusCode == http.StatusTooManyRequests {
 		return true
 	}
-	return statusCode >= 500 && statusCode < 600
+	if statusCode >= 500 && statusCode < 600 {
+		return true
+	}
+	if statusCode >= 400 && statusCode < 500 {
+		// 4xx 是客户端错误，重试也不会成功，不应退避等待。
+		return false
+	}
+	if err != nil {
+		// Network/timeout errors carry no HTTP status; they are transient and
+		// worth retrying.
+		return true
+	}
+	return false
 }
 
 // backoffDelay computes the delay before retry attempt n (1-indexed).
@@ -210,7 +228,8 @@ func (c *Client) CompleteJSONStream(ctx context.Context, system, user string, on
 // HTTP call.
 func (c *Client) chatStream(ctx context.Context, messages []ChatMessage, temperature float64, onDelta func(string) error) (string, error) {
 	var lastResp *http.Response
-	for attempt := 0; attempt <= c.maxRetries; attempt++ {
+	maxRetries := int(c.maxRetries.Load())
+	for attempt := 0; attempt <= maxRetries; attempt++ {
 		if attempt > 0 {
 			delay := backoffDelay(attempt, lastResp)
 			select {
@@ -228,7 +247,7 @@ func (c *Client) chatStream(ctx context.Context, messages []ChatMessage, tempera
 		if resp != nil {
 			status = resp.StatusCode
 		}
-		if !isRetryable(status, err) || attempt == c.maxRetries {
+		if !isRetryable(status, err) || attempt == maxRetries {
 			return "", err
 		}
 	}
@@ -316,7 +335,8 @@ func (c *Client) chatStreamOnce(ctx context.Context, messages []ChatMessage, tem
 // for the actual HTTP call.
 func (c *Client) chat(ctx context.Context, messages []ChatMessage, temperature float64) (string, error) {
 	var lastResp *http.Response
-	for attempt := 0; attempt <= c.maxRetries; attempt++ {
+	maxRetries := int(c.maxRetries.Load())
+	for attempt := 0; attempt <= maxRetries; attempt++ {
 		if attempt > 0 {
 			delay := backoffDelay(attempt, lastResp)
 			select {
@@ -334,7 +354,7 @@ func (c *Client) chat(ctx context.Context, messages []ChatMessage, temperature f
 		if resp != nil {
 			status = resp.StatusCode
 		}
-		if !isRetryable(status, err) || attempt == c.maxRetries {
+		if !isRetryable(status, err) || attempt == maxRetries {
 			return "", err
 		}
 	}
