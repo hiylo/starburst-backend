@@ -117,6 +117,7 @@ var migrations = []migration{
 	{name: "env_devices", apply: migrationEnvDevices},
 	{name: "remote_nodes", apply: migrationRemoteNodes},
 	{name: "intel_overrides", apply: migrationIntelOverrides},
+	{name: "intel_feature_chats", apply: migrationIntelFeatureChats},
 }
 
 // migrationIntel creates the Test Intelligence subsystem tables: flat project
@@ -1149,6 +1150,31 @@ func migrationIntelOverrides(ctx context.Context, driver string, db *sql.DB) err
 			updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 		)`, idColumn(driver)),
 		`CREATE INDEX IF NOT EXISTS idx_intel_overrides_pending ON intel_overrides(project_id, status)`,
+	}
+	for _, s := range stmts {
+		if _, err := db.ExecContext(ctx, s); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// migrationIntelFeatureChats creates the per-feature AI-chat history table: each
+// Q&A stores the auto-assembled context (endpoint contracts, latest test
+// results, linked issues) alongside the question and answer so a later run can
+// reproduce how the model reached its conclusion.
+func migrationIntelFeatureChats(ctx context.Context, driver string, db *sql.DB) error {
+	stmts := []string{
+		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS intel_feature_chats (
+			%s,
+			feature_id INTEGER NOT NULL DEFAULT 0,
+			project_id INTEGER NOT NULL DEFAULT 0,
+			question TEXT NOT NULL DEFAULT '',
+			context_json TEXT NOT NULL DEFAULT '',
+			answer TEXT NOT NULL DEFAULT '',
+			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+		)`, idColumn(driver)),
+		`CREATE INDEX IF NOT EXISTS idx_intel_feature_chats_feature ON intel_feature_chats(feature_id, id)`,
 	}
 	for _, s := range stmts {
 		if _, err := db.ExecContext(ctx, s); err != nil {

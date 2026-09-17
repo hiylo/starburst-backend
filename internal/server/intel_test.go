@@ -1768,6 +1768,92 @@ func TestIntelOverridesPending(t *testing.T) {
 	}
 }
 
+// TestIntelFeatureChat verifies the feature-level AI chat deterministic core:
+// the context (endpoint contracts + run results + linked issues) is assembled
+// and the Q&A persisted even without an LLM configured.
+func TestIntelFeatureChat(t *testing.T) {
+	s := newTestServer(t)
+	wh := loginWeb(t, s)
+
+	root := t.TempDir()
+	writeTestFile(t, filepath.Join(root, "pom.xml"), `<project></project>`)
+	writeTestFile(t, filepath.Join(root, "src/main/java/demo/UserController.java"), `package demo;
+import org.springframework.web.bind.annotation.*;
+@RestController
+@RequestMapping("/api/users")
+public class UserController { @GetMapping("/list") public demo.UserEntity list() { return null; } }`)
+	writeTestFile(t, filepath.Join(root, "src/main/java/demo/UserEntity.java"), `package demo;
+public class UserEntity { private Long id; private String nickname; }`)
+
+	rec := s.do(t, http.MethodPost, "/api/intel/projects",
+		`{"name":"demo","source":"local","localPath":"`+filepath.ToSlash(root)+`"}`, wh)
+	var proj struct {
+		ID int64 `json:"id"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &proj); err != nil || proj.ID == 0 {
+		t.Fatalf("create project: %s", rec.Body.String())
+	}
+	rec = s.do(t, http.MethodPost, "/api/intel/analyze",
+		`{"projectId":`+jsonInt(proj.ID)+`}`, wh)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("analyze status %d: %s", rec.Code, rec.Body.String())
+	}
+
+	rec = s.do(t, http.MethodGet, "/api/intel/features?projectId="+jsonInt(proj.ID), "", wh)
+	var fResp struct {
+		Features []struct {
+			ID int64 `json:"id"`
+		} `json:"features"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &fResp); err != nil {
+		t.Fatalf("features parse: %v", err)
+	}
+	if len(fResp.Features) != 1 {
+		t.Fatalf("features = %d, want 1", len(fResp.Features))
+	}
+	featID := fResp.Features[0].ID
+
+	rec = s.do(t, http.MethodPost, "/api/intel/features/"+jsonInt(featID)+"/chat",
+		`{"projectId":`+jsonInt(proj.ID)+`,"question":"为什么列表接口可能返回空？"}`, wh)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("chat status %d: %s", rec.Code, rec.Body.String())
+	}
+	var chatResp struct {
+		Chat struct {
+			ID          int64  `json:"id"`
+			Question    string `json:"question"`
+			ContextJSON string `json:"contextJson"`
+			Answer      string `json:"answer"`
+		} `json:"chat"`
+		Mode string `json:"mode"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &chatResp); err != nil {
+		t.Fatalf("chat parse: %v", err)
+	}
+	if chatResp.Chat.ID == 0 || !strings.Contains(chatResp.Chat.Question, "空") {
+		t.Fatalf("chat = %+v", chatResp.Chat)
+	}
+	if !strings.Contains(chatResp.Chat.ContextJSON, "/api/users/list") {
+		t.Errorf("context missing endpoint contract: %s", chatResp.Chat.ContextJSON)
+	}
+	if !strings.Contains(chatResp.Chat.Answer, "LLM") && chatResp.Mode == "" {
+		t.Errorf("expected no-llm note, got answer=%q mode=%q", chatResp.Chat.Answer, chatResp.Mode)
+	}
+
+	rec = s.do(t, http.MethodGet, "/api/intel/features/"+jsonInt(featID)+"/chats?projectId="+jsonInt(proj.ID), "", wh)
+	var hist struct {
+		Chats []struct {
+			ID int64 `json:"id"`
+		} `json:"chats"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &hist); err != nil {
+		t.Fatalf("chats parse: %v", err)
+	}
+	if len(hist.Chats) != 1 {
+		t.Errorf("chats = %d, want 1", len(hist.Chats))
+	}
+}
+
 func gitRun(t *testing.T, dir string, args ...string) {
 	t.Helper()
 	cmd := exec.Command("git", args...)

@@ -431,6 +431,10 @@ type Store interface {
 	GetIntelOverride(ctx context.Context, id int64) (*IntelOverride, error)
 	// UpdateIntelOverride persists an override's manual value and status.
 	UpdateIntelOverride(ctx context.Context, o *IntelOverride) error
+	// CreateIntelFeatureChat persists a per-feature AI Q&A.
+	CreateIntelFeatureChat(ctx context.Context, c *IntelFeatureChat) error
+	// ListIntelFeatureChats returns a feature's Q&A history, newest first.
+	ListIntelFeatureChats(ctx context.Context, projectID, featureID int64) ([]*IntelFeatureChat, error)
 }
 
 // Open opens a store for the given driver/dsn. It applies all migrations

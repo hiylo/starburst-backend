@@ -209,7 +209,7 @@ func (s *Server) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/intel/features", s.handleIntelFeatures)
 	mux.HandleFunc("/api/intel/features/test", s.handleIntelFeatureTest)
 	mux.HandleFunc("/api/intel/features/order", s.handleIntelFeatureOrder)
-	mux.HandleFunc("/api/intel/features/", s.handleIntelFeatureByID)
+	mux.HandleFunc("/api/intel/features/", s.handleIntelFeaturesByIDOrChat)
 	mux.HandleFunc("/api/intel/issues", s.handleIntelIssues)
 	mux.HandleFunc("/api/intel/run", s.handleIntelRun)
 	mux.HandleFunc("/api/intel/runs", s.handleIntelRuns)
