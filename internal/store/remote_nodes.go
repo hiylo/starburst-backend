@@ -27,7 +27,7 @@ type RemoteNode struct {
 // ListRemoteNodes returns all remote nodes, newest first.
 func (s *sqlStore) ListRemoteNodes(ctx context.Context) ([]*RemoteNode, error) {
 	rows, err := s.db.QueryContext(ctx, s.q(`
-		SELECT id, name, host, port, user, auth, host_key_fp, capabilities,
+		SELECT id, name, host, port, ssh_user, auth, host_key_fp, capabilities,
 			reachable, last_check_at, work_dir, note, created_at FROM remote_nodes
 		ORDER BY id DESC`))
 	if err != nil {
@@ -54,7 +54,7 @@ func (s *sqlStore) ListRemoteNodes(ctx context.Context) ([]*RemoteNode, error) {
 // GetRemoteNode loads one node by id.
 func (s *sqlStore) GetRemoteNode(ctx context.Context, id int64) (*RemoteNode, error) {
 	row := s.db.QueryRowContext(ctx, s.q(`
-		SELECT id, name, host, port, user, auth, host_key_fp, capabilities,
+		SELECT id, name, host, port, ssh_user, auth, host_key_fp, capabilities,
 			reachable, last_check_at, work_dir, note, created_at FROM remote_nodes WHERE id = ?`), id)
 	n := &RemoteNode{}
 	if err := row.Scan(&n.ID, &n.Name, &n.Host, &n.Port, &n.User, &n.Auth,
@@ -77,7 +77,7 @@ func (s *sqlStore) CreateRemoteNode(ctx context.Context, n *RemoteNode) error {
 	}
 	if isPostgres(s.driver) {
 		return s.db.QueryRowContext(ctx, s.q(`
-			INSERT INTO remote_nodes (name, host, port, user, auth, host_key_fp, capabilities,
+			INSERT INTO remote_nodes (name, host, port, ssh_user, auth, host_key_fp, capabilities,
 				reachable, last_check_at, work_dir, note, created_at)
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
 			RETURNING id`),
@@ -86,7 +86,7 @@ func (s *sqlStore) CreateRemoteNode(ctx context.Context, n *RemoteNode) error {
 		).Scan(&n.ID)
 	}
 	res, err := s.db.ExecContext(ctx, s.q(`
-		INSERT INTO remote_nodes (name, host, port, user, auth, host_key_fp, capabilities,
+		INSERT INTO remote_nodes (name, host, port, ssh_user, auth, host_key_fp, capabilities,
 			reachable, last_check_at, work_dir, note, created_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`),
 		n.Name, n.Host, n.Port, n.User, encAuth, n.HostKeyFP, n.Capabilities,
@@ -109,7 +109,7 @@ func (s *sqlStore) UpdateRemoteNode(ctx context.Context, n *RemoteNode) error {
 		return err
 	}
 	_, err = s.db.ExecContext(ctx, s.q(`
-		UPDATE remote_nodes SET name = ?, host = ?, port = ?, user = ?, auth = ?,
+		UPDATE remote_nodes SET name = ?, host = ?, port = ?, ssh_user = ?, auth = ?,
 			host_key_fp = ?, capabilities = ?, reachable = ?, last_check_at = ?, work_dir = ?, note = ?
 		WHERE id = ?`),
 		n.Name, n.Host, n.Port, n.User, encAuth, n.HostKeyFP, n.Capabilities,

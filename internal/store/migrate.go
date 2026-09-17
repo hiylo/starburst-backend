@@ -1110,7 +1110,7 @@ func migrationRemoteNodes(ctx context.Context, driver string, db *sql.DB) error 
 			name TEXT NOT NULL DEFAULT '',
 			host TEXT NOT NULL DEFAULT '',
 			port INTEGER NOT NULL DEFAULT 22,
-			user TEXT NOT NULL DEFAULT '',
+			ssh_user TEXT NOT NULL DEFAULT '',
 			auth TEXT NOT NULL DEFAULT '',
 			host_key_fp TEXT NOT NULL DEFAULT '',
 			capabilities TEXT NOT NULL DEFAULT '',
