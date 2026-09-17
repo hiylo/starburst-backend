@@ -1177,6 +1177,65 @@ func TestWhitelistedTestCommand(t *testing.T) {
 	}
 }
 
+// TestIntelModuleCommandsUpdate verifies the per-module command whitelist edit:
+// a PUT replaces commands_json and the updated list is returned.
+func TestIntelModuleCommandsUpdate(t *testing.T) {
+	s := newTestServer(t)
+	wh := loginWeb(t, s)
+
+	root := t.TempDir()
+	writeTestFile(t, filepath.Join(root, "pom.xml"), `<project></project>`)
+
+	rec := s.do(t, http.MethodPost, "/api/intel/projects",
+		`{"name":"demo","source":"local","localPath":"`+filepath.ToSlash(root)+`"}`, wh)
+	var proj struct {
+		ID int64 `json:"id"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &proj); err != nil || proj.ID == 0 {
+		t.Fatalf("create project: %s", rec.Body.String())
+	}
+	rec = s.do(t, http.MethodPost, "/api/intel/analyze",
+		`{"projectId":`+jsonInt(proj.ID)+`}`, wh)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("analyze status %d: %s", rec.Code, rec.Body.String())
+	}
+
+	rec = s.do(t, http.MethodGet, "/api/intel/projects/"+jsonInt(proj.ID), "", wh)
+	var detail struct {
+		Modules []struct {
+			ID           int64  `json:"id"`
+			CommandsJSON string `json:"commandsJson"`
+		} `json:"modules"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &detail); err != nil {
+		t.Fatalf("detail parse: %v", err)
+	}
+	if len(detail.Modules) != 1 {
+		t.Fatalf("modules = %d, want 1", len(detail.Modules))
+	}
+	mod := detail.Modules[0]
+	if !strings.Contains(mod.CommandsJSON, "mvn test") {
+		t.Errorf("default commands missing mvn test: %s", mod.CommandsJSON)
+	}
+
+	rec = s.do(t, http.MethodPut, "/api/intel/modules/"+jsonInt(mod.ID)+"/commands",
+		`{"commands":["mvn clean install","mvn test -Dcoverage"]}`, wh)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("update commands status %d: %s", rec.Code, rec.Body.String())
+	}
+	var upd struct {
+		Module struct {
+			CommandsJSON string `json:"commandsJson"`
+		} `json:"module"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &upd); err != nil {
+		t.Fatalf("update parse: %v", err)
+	}
+	if !strings.Contains(upd.Module.CommandsJSON, "mvn clean install") {
+		t.Errorf("updated commands missing entry: %s", upd.Module.CommandsJSON)
+	}
+}
+
 func gitRun(t *testing.T, dir string, args ...string) {
 	t.Helper()
 	cmd := exec.Command("git", args...)

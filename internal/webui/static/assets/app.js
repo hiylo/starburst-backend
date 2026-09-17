@@ -2400,12 +2400,25 @@ async function loadIntelDetail(id) {
       <td><span class="badge type-badge">${escapeHtml(INTEL_TYPE_LABELS[m.kindType] || m.kindType || "-")}</span></td>
       <td>${escapeHtml(m.kindRole || "-")}</td>
       <td>${escapeHtml(m.buildTool || "-")}</td>
+      <td class="muted clip" title="${escapeHtml(m.commandsJson || "")}" style="font-size:11px">${escapeHtml((m.commandsJson || "[]").slice(0, 40))}</td>
+      <td><button class="ghost sm" onclick="editIntelModuleCommands(${m.id}, '${escapeHtml(m.commandsJson || "[]")}')">命令</button></td>
     </tr>`);
   }
-  if (!(data.modules || []).length) mtb.insertAdjacentHTML("beforeend", `<tr><td colspan="4" class="muted" style="text-align:center;padding:16px">暂无子模块（分析后自动识别）</td></tr>`);
+  if (!(data.modules || []).length) mtb.insertAdjacentHTML("beforeend", `<tr><td colspan="6" class="muted" style="text-align:center;padding:16px">暂无子模块（分析后自动识别）</td></tr>`);
   document.getElementById("intelDetailStatModules").textContent = (data.modules || []).length;
   await loadIntelContracts(id);
   initIntelChats();
+}
+
+function editIntelModuleCommands(moduleId, commandsJson) {
+  const existing = prompt("每行一条命令（命令白名单，运行测试时将按此执行）", (() => {
+    try { return JSON.parse(commandsJson).join("\n"); } catch (_) { return commandsJson.replace(/"/g, "").slice(1, -1); }
+  })());
+  if (existing === null) return;
+  const list = existing.split("\n").map(s => s.trim()).filter(s => s);
+  api("/api/intel/modules/" + moduleId + "/commands", { method: "PUT", headers: appHeaders(), body: JSON.stringify({ commands: list }) })
+    .then(r => r.json())
+    .then(d => { if (d.error) alert(d.error); else if (intelCurrentProject) loadIntelDetail(intelCurrentProject); });
 }
 
 async function loadIntelContracts(id) {

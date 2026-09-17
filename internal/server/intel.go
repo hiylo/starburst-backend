@@ -294,6 +294,60 @@ func (s *Server) handleIntelModules(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"modules": mods})
 }
 
+// handleIntelModuleCommands updates a module's reviewed command whitelist
+// (commands_json). The body must be a JSON array of command strings; the list
+// is validated before persisting so edited entries cannot smuggle shell
+// metacharacters of their own (argv is split without a shell at run time).
+func (s *Server) handleIntelModuleCommands(w http.ResponseWriter, r *http.Request) {
+	if !s.requireWeb(r) {
+		if _, ok := s.requireToken(r); !ok {
+			writeErr(w, http.StatusUnauthorized, "web session or APP token required")
+			return
+		}
+	}
+	if r.Method != http.MethodPut {
+		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	id, ok := s.intelIDFromPath(r, "/api/intel/modules/")
+	if !ok {
+		return
+	}
+	var req struct {
+		Commands []string `json:"commands"`
+	}
+	if err := readJSONLimited(w, r, &req); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	clean := make([]string, 0, len(req.Commands))
+	for _, c := range req.Commands {
+		c = strings.TrimSpace(c)
+		if c == "" {
+			continue
+		}
+		clean = append(clean, c)
+	}
+	b, err := json.Marshal(clean)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "encode commands failed")
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+	mod, err := s.store.GetIntelModule(ctx, id)
+	if err != nil {
+		writeErr(w, http.StatusNotFound, "module not found")
+		return
+	}
+	if err := s.store.UpdateIntelModuleCommands(ctx, mod.ID, string(b)); err != nil {
+		writeErr(w, http.StatusInternalServerError, "update module commands failed")
+		return
+	}
+	mod.CommandsJSON = string(b)
+	writeJSON(w, http.StatusOK, map[string]any{"module": mod})
+}
+
 // handleIntelGatewayRoutes lists the gateway routes (public exposure) of a
 // project, discovered from gateway config and Nacos metadata.
 func (s *Server) handleIntelGatewayRoutes(w http.ResponseWriter, r *http.Request) {
