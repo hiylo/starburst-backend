@@ -2229,6 +2229,13 @@ import org.springframework.web.bind.annotation.*;
 public class UserController { @GetMapping("/list") public java.util.List<demo.UserEntity> list() { return null; } }`)
 	writeTestFile(t, filepath.Join(root, "src/main/java/demo/UserEntity.java"), `package demo;
 public class UserEntity { private Long id; private String nickname; }`)
+	writeTestFile(t, filepath.Join(root, "src/main/java/demo/GraphQLController.java"), `package demo;
+import org.springframework.graphql.data.method.annotation.*;
+@Controller
+public class GraphQLController {
+    @QueryMapping
+    public String hello() { return "hi"; }
+}`)
 
 	rec := s.do(t, http.MethodPost, "/api/intel/projects",
 		`{"name":"demo","source":"local","localPath":"`+filepath.ToSlash(root)+`"}`, wh)
@@ -2250,17 +2257,21 @@ public class UserEntity { private Long id; private String nickname; }`)
 		t.Fatalf("check-batch status %d: %s", rec.Code, rec.Body.String())
 	}
 	var resp struct {
-		Total         int `json:"total"`
-		ContractReady int `json:"contractReady"`
-		Reachable     int `json:"reachable"`
-		Passed        int `json:"passed"`
-		Failed        int `json:"failed"`
+		Total          int `json:"total"`
+		ContractReady  int `json:"contractReady"`
+		Reachable      int `json:"reachable"`
+		Passed         int `json:"passed"`
+		Failed         int `json:"failed"`
+		GraphQLSkipped int `json:"graphqlSkipped"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("check-batch parse: %v", err)
 	}
-	if resp.Total != 1 || resp.ContractReady != 1 || resp.Reachable != 1 {
-		t.Errorf("check-batch = %+v, want total/contract/reachable all 1", resp)
+	if resp.Total != 2 || resp.GraphQLSkipped != 1 {
+		t.Errorf("check-batch total/skipped = %d/%d, want 2/1", resp.Total, resp.GraphQLSkipped)
+	}
+	if resp.ContractReady != 1 || resp.Reachable != 1 {
+		t.Errorf("check-batch = %+v, want contract/reachable all 1", resp)
 	}
 	if resp.Passed != 1 || resp.Failed != 0 {
 		t.Errorf("check-batch passed/failed = %d/%d, want 1/0", resp.Passed, resp.Failed)

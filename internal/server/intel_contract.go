@@ -113,8 +113,14 @@ func (s *Server) handleIntelContractCheckBatch(w http.ResponseWriter, r *http.Re
 		return
 	}
 	results := make([]map[string]any, 0, len(eps))
-	contractReady, reachable, passed, failed := 0, 0, 0, 0
+	contractReady, reachable, passed, failed, graphqlSkipped := 0, 0, 0, 0, 0
 	for _, ep := range eps {
+		// GraphQL operations are not REST-probeable (their fields resolve via
+		// the schema, not a URL); they are counted and skipped.
+		if ep.Method == "QUERY" || ep.Method == "MUTATION" || ep.Method == "SUBSCRIPTION" {
+			graphqlSkipped++
+			continue
+		}
 		out := s.testFeatureEndpoint(ctx, base, ep)
 		results = append(results, out)
 		if ep.FieldsJSON != "" {
@@ -132,13 +138,14 @@ func (s *Server) handleIntelContractCheckBatch(w http.ResponseWriter, r *http.Re
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"baseUrl":       base.String(),
-		"endpoints":     eps,
-		"results":       results,
-		"total":         len(eps),
-		"contractReady": contractReady,
-		"reachable":     reachable,
-		"passed":        passed,
-		"failed":        failed,
+		"baseUrl":        base.String(),
+		"endpoints":      eps,
+		"results":        results,
+		"total":          len(eps),
+		"contractReady":  contractReady,
+		"reachable":      reachable,
+		"passed":         passed,
+		"failed":         failed,
+		"graphqlSkipped": graphqlSkipped,
 	})
 }
