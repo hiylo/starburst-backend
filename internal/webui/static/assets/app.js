@@ -3510,9 +3510,51 @@ async function loadIntelRuns(id) {
       <td><span class="intel-status ${r.status === "passed" ? "analyzed" : ""}">${escapeHtml(r.status || "-")}</span></td>
       <td class="muted" style="font-size:12px">${r.startedAt ? new Date(r.startedAt).toLocaleString() : "-"}</td>
       <td>${dur}</td>
+      <td><button class="ghost sm" onclick="showIntelRunDetail(${r.id})">详情</button></td>
     </tr>`);
   }
-  if (!runs.length) tb.insertAdjacentHTML("beforeend", `<tr><td colspan="6" class="muted" style="text-align:center;padding:16px">暂无运行记录（点击右上角「运行测试」触发）</td></tr>`);
+  if (!runs.length) tb.insertAdjacentHTML("beforeend", `<tr><td colspan="7" class="muted" style="text-align:center;padding:16px">暂无运行记录（点击右上角「运行测试」触发）</td></tr>`);
+}
+
+async function showIntelRunDetail(runId) {
+  const box = document.getElementById("intelRunDetail");
+  if (!box) return;
+  box.innerHTML = `<div class="muted" style="padding:8px">加载中…</div>`;
+  const res = await api("/api/intel/runs/" + runId, { headers: appHeaders() });
+  const data = await res.json();
+  if (!res.ok) { box.innerHTML = `<div class="muted" style="padding:8px">${escapeHtml(data.error || "加载失败")}</div>`; return; }
+  const run = data.run || {};
+  const results = data.results || [];
+  const rows = results.map(rt => {
+    const ok = rt.passed;
+    const rcBtn = ok ? "" : ` <button class="ghost sm" onclick="showResultRootcause(${rt.id})">归因</button>`;
+    return `<tr>
+      <td class="mono" style="font-size:12px">${escapeHtml(rt.endpoint || "-")}</td>
+      <td><span class="intel-status ${ok ? "analyzed" : ""}">${ok ? "通过" : "失败"}</span></td>
+      <td class="mono muted" style="font-size:11px" id="rootcause-${rt.id}">${rcBtn}</td>
+    </tr>`;
+  }).join("");
+  box.innerHTML = `<div class="card" style="margin:0">
+    <div class="row" style="justify-content:space-between">
+      <strong>运行 #${run.id || ""}</strong>
+      <span class="intel-status ${run.status === "passed" ? "analyzed" : ""}">${escapeHtml(run.status || "-")}</span>
+    </div>
+    <div class="mono muted" style="font-size:11px;margin-top:4px">${escapeHtml(run.command || "")}</div>
+    <div class="table-wrap" style="margin-top:8px">
+      <table><thead><tr><th>用例</th><th>结果</th><th>归因</th></tr></thead><tbody>${rows || `<tr><td colspan="3" class="muted" style="text-align:center;padding:8px">无结果</td></tr>`}</tbody></table>
+    </div>
+  </div>`;
+}
+
+async function showResultRootcause(resultId) {
+  const box = document.getElementById("rootcause-" + resultId);
+  if (!box) return;
+  box.textContent = "加载归因…";
+  const res = await api("/api/intel/results/" + resultId + "/rootcause", { headers: appHeaders() });
+  const data = await res.json();
+  if (!res.ok) { box.textContent = data.error || "归因失败"; return; }
+  const rc = data.rootcause || {};
+  box.innerHTML = `<div class="mono" style="font-size:11px;white-space:pre-wrap;background:var(--surface-2);border:1px solid var(--hairline);border-radius:var(--r-sm);padding:6px">${escapeHtml(JSON.stringify(rc, null, 2))}</div>`;
 }
 
 async function runIntelTests() {
