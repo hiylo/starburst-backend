@@ -291,7 +291,31 @@ func (s *Server) handleIntelModules(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "load modules failed")
 		return
 	}
+	s.applyModuleOverrides(ctx, id, mods)
 	writeJSON(w, http.StatusOK, map[string]any{"modules": mods})
+}
+
+// applyModuleOverrides merges human-confirmed overrides (status=applied,
+// target=module, field=role) into the module list at read time, so the manual
+// correction is the authoritative value while the auto-detected one stays in
+// the DB for comparison.
+func (s *Server) applyModuleOverrides(ctx context.Context, projectID int64, mods []*store.IntelModule) {
+	overrides, err := s.store.ListIntelOverrides(ctx, projectID, false)
+	if err != nil {
+		return
+	}
+	byPath := make(map[string]string)
+	for _, o := range overrides {
+		if o.Status != "applied" || o.Target != "module" || o.Field != "role" || o.ManualValue == "" {
+			continue
+		}
+		byPath[o.RowKey] = o.ManualValue
+	}
+	for _, m := range mods {
+		if v, ok := byPath[m.RelPath]; ok {
+			m.KindRole = v
+		}
+	}
 }
 
 // handleIntelModuleCommands updates a module's reviewed command whitelist
@@ -547,6 +571,7 @@ func (s *Server) getIntelProject(w http.ResponseWriter, r *http.Request, id int6
 		writeErr(w, http.StatusInternalServerError, "load modules failed")
 		return
 	}
+	s.applyModuleOverrides(ctx, id, mods)
 	writeJSON(w, http.StatusOK, map[string]any{"project": p, "modules": mods})
 }
 

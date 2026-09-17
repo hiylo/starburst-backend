@@ -2096,6 +2096,63 @@ func TestIntelRunRemoteNode(t *testing.T) {
 	}
 }
 
+// TestIntelModuleOverrideApplied verifies the overrides layer consumes a
+// confirmed module-role override at read time (the manual value wins while the
+// auto role stays stored).
+func TestIntelModuleOverrideApplied(t *testing.T) {
+	s := newTestServer(t)
+	wh := loginWeb(t, s)
+
+	root := t.TempDir()
+	writeTestFile(t, filepath.Join(root, "pom.xml"), `<project></project>`)
+
+	rec := s.do(t, http.MethodPost, "/api/intel/projects",
+		`{"name":"demo","source":"local","localPath":"`+filepath.ToSlash(root)+`"}`, wh)
+	var proj struct {
+		ID int64 `json:"id"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &proj); err != nil || proj.ID == 0 {
+		t.Fatalf("create project: %s", rec.Body.String())
+	}
+	rec = s.do(t, http.MethodPost, "/api/intel/analyze",
+		`{"projectId":`+jsonInt(proj.ID)+`}`, wh)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("analyze status %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// A confirmed override targeting the root module's role.
+	ctx := context.Background()
+	if err := s.store.CreateIntelOverride(ctx, &store.IntelOverride{
+		ProjectID:   proj.ID,
+		Target:      "module",
+		RowKey:      ".",
+		Field:       "role",
+		ManualValue: "app",
+		Confidence:  "high",
+		Status:      "applied",
+		Source:      "manual",
+	}); err != nil {
+		t.Fatalf("create override: %v", err)
+	}
+
+	rec = s.do(t, http.MethodGet, "/api/intel/projects/"+jsonInt(proj.ID), "", wh)
+	var detail struct {
+		Modules []struct {
+			RelPath  string `json:"relPath"`
+			KindRole string `json:"kindRole"`
+		} `json:"modules"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &detail); err != nil {
+		t.Fatalf("detail parse: %v", err)
+	}
+	if len(detail.Modules) != 1 {
+		t.Fatalf("modules = %d, want 1", len(detail.Modules))
+	}
+	if detail.Modules[0].KindRole != "app" {
+		t.Errorf("module role = %q, want overridden to app", detail.Modules[0].KindRole)
+	}
+}
+
 func gitRun(t *testing.T, dir string, args ...string) {
 	t.Helper()
 	cmd := exec.Command("git", args...)
