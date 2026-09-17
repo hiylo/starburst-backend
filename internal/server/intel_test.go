@@ -2313,6 +2313,27 @@ func TestIntelRunAll(t *testing.T) {
 	}
 }
 
+// TestSplitEndpointAndFlaky covers the per-case outcome mapping helpers.
+func TestSplitEndpointAndFlaky(t *testing.T) {
+	class, method := splitEndpoint("pkg.Class.TestFoo")
+	if class != "pkg.Class" || method != "TestFoo" {
+		t.Errorf("splitEndpoint(pkg.Class.TestFoo) = %q/%q", class, method)
+	}
+	class, method = splitEndpoint(".TestBar")
+	if class != "" || method != "TestBar" {
+		t.Errorf("splitEndpoint(.TestBar) = %q/%q", class, method)
+	}
+	if !isFlakyResult(`{"flaky":true,"note":"x"}`) {
+		t.Error("flaky marker should be detected")
+	}
+	if isFlakyResult(`{"error":"boom"}`) {
+		t.Error("non-flaky failure must not be flagged")
+	}
+	if isFlakyResult("") {
+		t.Error("empty failures not flaky")
+	}
+}
+
 func gitRun(t *testing.T, dir string, args ...string) {
 	t.Helper()
 	cmd := exec.Command("git", args...)

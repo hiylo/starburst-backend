@@ -454,10 +454,18 @@ func TestRerunWorkflowFromFailed(t *testing.T) {
 		}
 		got[s] = tk.Status
 	}
-	if got["s1"] != TaskSucceeded { t.Fatalf("s1 = %q want succeeded (kept)", got["s1"]) }
-	if got["s2"] != TaskQueued { t.Fatalf("s2 = %q want queued (rerun from here)", got["s2"]) }
-	if got["s3"] != TaskPending { t.Fatalf("s3 = %q want pending (waits on s2)", got["s3"]) }
-	if got["s4"] != TaskRunning { t.Fatalf("s4 = %q want running (untouched)", got["s4"]) }
+	if got["s1"] != TaskSucceeded {
+		t.Fatalf("s1 = %q want succeeded (kept)", got["s1"])
+	}
+	if got["s2"] != TaskQueued {
+		t.Fatalf("s2 = %q want queued (rerun from here)", got["s2"])
+	}
+	if got["s3"] != TaskPending {
+		t.Fatalf("s3 = %q want pending (waits on s2)", got["s3"])
+	}
+	if got["s4"] != TaskRunning {
+		t.Fatalf("s4 = %q want running (untouched)", got["s4"])
+	}
 	// 全部成功后 rerun 是 no-op。
 	for _, s := range []string{"s1", "s2", "s3"} {
 		if err := st.CompleteTask(ctx, s, "ok"); err != nil {
@@ -836,5 +844,40 @@ func TestSessionEventSanitizePayload(t *testing.T) {
 	}
 	if len(rows) != 1 || string(rows[0].Payload) != `{"delta":"\ufffdboom"}` {
 		t.Fatalf("stored payload = %s", rows[0].Payload)
+	}
+}
+
+func TestUpdateIntelTestCaseOutcome(t *testing.T) {
+	ctx := context.Background()
+	st := newTestStore(t)
+
+	if err := st.ReplaceIntelTestCases(ctx, 1, []*TestCase{
+		{ProjectID: 1, ModuleID: 1, Kind: "go", Class: "pkg", Method: "TestFoo", Path: "pkg/foo_test.go"},
+	}); err != nil {
+		t.Fatalf("replace cases: %v", err)
+	}
+
+	// First run: passed, flaky (one re-run flipped it).
+	if err := st.UpdateIntelTestCaseOutcome(ctx, 1, "pkg", "TestFoo", true, 12, true); err != nil {
+		t.Fatalf("update outcome: %v", err)
+	}
+	cases, err := st.ListIntelTestCases(ctx, 1, 0)
+	if err != nil || len(cases) != 1 {
+		t.Fatalf("list cases: %v len=%d", err, len(cases))
+	}
+	if cases[0].LastStatus != "passed" || cases[0].FlakyCount != 1 || cases[0].LastDurationMs != 12 {
+		t.Errorf("after flaky pass = %+v", cases[0])
+	}
+
+	// A real failure bumps status to failed but not flaky count.
+	if err := st.UpdateIntelTestCaseOutcome(ctx, 1, "pkg", "TestFoo", false, 9, false); err != nil {
+		t.Fatalf("update outcome: %v", err)
+	}
+	cases, err = st.ListIntelTestCases(ctx, 1, 0)
+	if err != nil {
+		t.Fatalf("list cases: %v", err)
+	}
+	if cases[0].LastStatus != "failed" || cases[0].FlakyCount != 1 {
+		t.Errorf("after real failure = %+v", cases[0])
 	}
 }

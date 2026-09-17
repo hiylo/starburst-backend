@@ -429,6 +429,7 @@ func (s *Server) runIntelTests(ctx context.Context, projectID, moduleID, nodeID 
 	if err := s.store.AddIntelTestResults(ctx, results); err != nil {
 		return nil, err
 	}
+	s.recordTestCaseOutcomes(ctx, projectID, results)
 	s.recordRunIssues(ctx, run, projectID, module.ID, results)
 
 	failed := 0
@@ -580,6 +581,47 @@ func flakyRetry(ctx context.Context, dir, reportKind string, results []*store.Te
 			return
 		}
 	}
+}
+
+// recordTestCaseOutcomes writes each run result back to its discovered test
+// case asset (last_status / duration / flaky_count), keeping the 测试资产清单
+// consistent with actual runs.
+func (s *Server) recordTestCaseOutcomes(ctx context.Context, projectID int64, results []*store.TestResult) {
+	for _, res := range results {
+		if res == nil {
+			continue
+		}
+		class, method := splitEndpoint(res.Endpoint)
+		flaky := isFlakyResult(res.FailuresJSON)
+		_ = s.store.UpdateIntelTestCaseOutcome(ctx, projectID, class, method, res.Passed, 0, flaky)
+	}
+}
+
+// splitEndpoint splits a result endpoint ("Class.method" or ".method") into its
+// class (may be empty) and method parts.
+func splitEndpoint(endpoint string) (string, string) {
+	idx := strings.LastIndexByte(endpoint, '.')
+	if idx < 0 {
+		return "", endpoint
+	}
+	if idx == 0 {
+		return "", endpoint[1:]
+	}
+	return endpoint[:idx], endpoint[idx+1:]
+}
+
+// isFlakyResult reports whether a result's failures JSON carries the flaky
+// marker written by flakyRetry.
+func isFlakyResult(failuresJSON string) bool {
+	if !strings.Contains(failuresJSON, "flaky") {
+		return false
+	}
+	var m map[string]any
+	if json.Unmarshal([]byte(failuresJSON), &m) != nil {
+		return false
+	}
+	v, ok := m["flaky"].(bool)
+	return ok && v
 }
 
 // runCommand runs an executable with a bounded timeout and returns stdout.

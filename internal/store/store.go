@@ -277,6 +277,8 @@ type Store interface {
 	ReplaceIntelTestCases(ctx context.Context, projectID int64, cases []*TestCase) error
 	// ListIntelTestCases returns test cases for a project/module.
 	ListIntelTestCases(ctx context.Context, projectID, moduleID int64) ([]*TestCase, error)
+	// UpdateIntelTestCaseOutcome records a run outcome on the matching test case.
+	UpdateIntelTestCaseOutcome(ctx context.Context, projectID int64, class, method string, passed bool, durationMs int64, flaky bool) error
 	// CreateIntelTestRun persists a new test run and populates its id.
 	CreateIntelTestRun(ctx context.Context, run *TestRun) error
 	// GetIntelTestRun loads a single test run.

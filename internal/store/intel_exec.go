@@ -145,6 +145,32 @@ func (s *sqlStore) ListIntelTestCases(ctx context.Context, projectID, moduleID i
 	return out, rows.Err()
 }
 
+// UpdateIntelTestCaseOutcome records a run outcome on the matching test case
+// (matched by method, plus class when non-empty) and bumps flaky_count when the
+// outcome is marked flaky. It updates at most the first matching row so the
+// asset list stays deterministic.
+func (s *sqlStore) UpdateIntelTestCaseOutcome(ctx context.Context, projectID int64, class, method string, passed bool, durationMs int64, flaky bool) error {
+	if method == "" {
+		return nil
+	}
+	status := "failed"
+	if passed {
+		status = "passed"
+	}
+	flakyInt := 0
+	if flaky {
+		flakyInt = 1
+	}
+	_, err := s.db.ExecContext(ctx, s.q(`
+		UPDATE test_cases SET last_status = ?, last_duration_ms = ?,
+			flaky_count = flaky_count + ?, last_run_at = CURRENT_TIMESTAMP
+		WHERE id = (
+			SELECT id FROM test_cases WHERE project_id = ? AND method = ? AND (? = '' OR class = ?)
+			ORDER BY id LIMIT 1
+		)`), status, durationMs, flakyInt, projectID, method, class, class)
+	return err
+}
+
 // CreateIntelTestRun persists a new run and populates its auto-generated id.
 func (s *sqlStore) CreateIntelTestRun(ctx context.Context, run *TestRun) error {
 	if isPostgres(s.driver) {
