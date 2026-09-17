@@ -3270,7 +3270,7 @@ function renderIntelEntities(ents) {
 function shortProv(file, line) {
   if (!file) return "-";
   const name = file.split("/").pop().split("\\").pop();
-  return name + ":" + (line || 0);
+  return line ? (name + ":" + line) : name;
 }
 
 /* ---------- 模拟请求（接口契约 → 自动填参 + curl/JSON） ---------- */
@@ -4214,7 +4214,7 @@ async function runIntelIndex() {
   const data = await res.json();
   btns.forEach(b => { b.disabled = false; b.textContent = "重建索引"; });
   if (!res.ok) { show(document.getElementById("ragMsg"), data.error || "索引失败"); return; }
-  show(document.getElementById("ragMsg"), "索引完成，共 " + (data.chunks || 0) + " 条（含契约与文档）", true);
+  show(document.getElementById("ragMsg"), "索引完成，共 " + (data.chunks || 0) + " 条（含项目概览、契约与文档）", true);
 }
 
 /* ---------- 知识库对话（项目级多轮，左侧会话列表可收起） ---------- */
@@ -4268,7 +4268,7 @@ function newIntelChat() {
 
 function ragShowEmpty() {
   document.getElementById("ragMessages").innerHTML =
-    `<div class="rag-empty">向知识库提问，支持连续追问<br><span>基于已索引的项目契约与代码</span></div>`;
+    `<div class="rag-empty">向知识库提问，支持连续追问<br><span>基于已索引的项目概览、契约与文档</span></div>`;
 }
 
 function ragQuestionKeydown(e) {
