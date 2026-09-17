@@ -364,18 +364,33 @@ func RandomPassword(n int) string {
 }
 
 // RunSystem executes a system install command (argv direct) after optionally
-// wrapping with sudo when not running as root. Overridable for tests.
+// wrapping with sudo when running as root-less but passwordless sudo works.
+// Overridable for tests.
 var RunSystem = runSystemExec
 
+// IsRootCheck reports whether the process runs as root (install needs no
+// elevation). A var so tests can simulate a non-root install.
+var IsRootCheck = func() bool { return os.Geteuid() == 0 }
+
 func runSystemExec(ctx context.Context, args ...string) (string, error) {
-	if os.Geteuid() != 0 {
-		if _, err := exec.LookPath("sudo"); err == nil {
-			args = append([]string{"sudo"}, args...)
-		}
+	if !IsRootCheck() && CheckSudo(ctx) {
+		args = append([]string{"sudo"}, args...)
 	}
 	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
 	out, err := cmd.CombinedOutput()
 	return string(out), err
+}
+
+// CheckSudo reports whether non-interactive passwordless sudo is available, so
+// a toolchain install can elevate without a prompt. Tests override it.
+var CheckSudo = checkSudoExec
+
+func checkSudoExec(ctx context.Context) bool {
+	if IsRootCheck() {
+		return true
+	}
+	cmd := exec.CommandContext(ctx, "sudo", "-n", "true")
+	return cmd.Run() == nil
 }
 
 // ToolchainInstallCommand returns the deterministic per-item install argv for

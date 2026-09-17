@@ -1910,6 +1910,64 @@ func TestIntelEnvToolchainInstall(t *testing.T) {
 	}
 }
 
+// TestIntelEnvToolchainRequiresRoot verifies the toolchain install interaction:
+// without root or passwordless sudo, the handler returns the exact command so
+// the user can run it interactively instead of failing silently.
+func TestIntelEnvToolchainRequiresRoot(t *testing.T) {
+	s := newTestServer(t)
+	wh := loginWeb(t, s)
+
+	root := t.TempDir()
+	writeTestFile(t, filepath.Join(root, "pom.xml"), `<project>
+  <properties><java.version>17</java.version></properties>
+</project>`)
+
+	rec := s.do(t, http.MethodPost, "/api/intel/projects",
+		`{"name":"demo","source":"local","localPath":"`+filepath.ToSlash(root)+`"}`, wh)
+	var proj struct {
+		ID int64 `json:"id"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &proj); err != nil || proj.ID == 0 {
+		t.Fatalf("create project: %s", rec.Body.String())
+	}
+	rec = s.do(t, http.MethodPost, "/api/intel/analyze",
+		`{"projectId":`+jsonInt(proj.ID)+`}`, wh)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("analyze status %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// Simulate non-root without passwordless sudo.
+	oldRoot := envagent.IsRootCheck
+	defer func() { envagent.IsRootCheck = oldRoot }()
+	envagent.IsRootCheck = func() bool { return false }
+	oldSudo := envagent.CheckSudo
+	defer func() { envagent.CheckSudo = oldSudo }()
+	envagent.CheckSudo = func(ctx context.Context) bool { return false }
+	oldRun := envagent.RunSystem
+	defer func() { envagent.RunSystem = oldRun }()
+	called := false
+	envagent.RunSystem = func(ctx context.Context, args ...string) (string, error) {
+		called = true
+		return "", nil
+	}
+
+	rec = s.do(t, http.MethodPost, "/api/intel/env/install",
+		`{"projectId":`+jsonInt(proj.ID)+`,"service":"jdk"}`, wh)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("install status = %d, want 400 (root required)", rec.Code)
+	}
+	if called {
+		t.Error("install command must not run without elevation")
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "openjdk-17-jdk") {
+		t.Errorf("response should include the sudo command: %s", body)
+	}
+	if !strings.Contains(body, "root") {
+		t.Errorf("response should explain root requirement: %s", body)
+	}
+}
+
 // TestFlakyRetry verifies the deterministic flaky governance: a failed Go case
 // that passes on the bounded retry is marked flaky (recorded as passed) and is
 // not turned into a bug; a still-failing rerun keeps it failed.

@@ -185,9 +185,17 @@ func (s *Server) handleIntelEnvInstall(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusBadRequest, "该工具链暂不支持自动安装（请手动安装）")
 			return
 		}
+		elevated := envagent.IsRootCheck() || envagent.CheckSudo(ctx)
+		sudoCmd := "sudo " + strings.Join(cmds, " ")
+		if !elevated {
+			writeErr(w, http.StatusBadRequest,
+				"该工具链安装需要 root 权限，但当前无免密 sudo。请在本机以 root 执行后重新点击「安装」复检（或先配置免密 sudo）：\n\n"+sudoCmd)
+			return
+		}
 		out, err := envagent.RunSystem(ctx, cmds...)
 		if err != nil {
-			writeErr(w, http.StatusInternalServerError, "安装失败: "+err.Error()+" "+truncateStr(out, 300))
+			writeErr(w, http.StatusInternalServerError,
+				"安装失败: "+err.Error()+" "+truncateStr(out, 300)+"\n（可手动执行：\n"+sudoCmd+"\n）")
 			return
 		}
 		status, provider, _, healthy, _ := envagent.Probe(ctx, req.ProjectID, req.Service, "toolchain", version)
@@ -205,7 +213,7 @@ func (s *Server) handleIntelEnvInstall(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusInternalServerError, "persist env status failed")
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"service": svc})
+		writeJSON(w, http.StatusOK, map[string]any{"service": svc, "elevated": elevated, "command": sudoCmd})
 		return
 	}
 	if _, ok := envagent.Middleware(req.Service); !ok {
