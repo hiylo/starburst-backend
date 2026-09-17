@@ -156,6 +156,64 @@ func TestScanModuleNonJava(t *testing.T) {
 	}
 }
 
+func TestScanModuleInterfaceController(t *testing.T) {
+	root := t.TempDir()
+	writeTree(t, root, map[string]string{
+		"pom.xml": `<project></project>`,
+		"src/main/java/demo/FriendProvider.java": `package demo;
+import org.springframework.cloud.openfeign.FeignClient;
+import org.springframework.web.bind.annotation.*;
+@FeignClient(name = "friend")
+public interface FriendProvider {
+    @GetMapping("/friends")
+    Object list();
+    @DeleteMapping("/friends/{id}")
+    Object delete(@PathVariable Long id);
+}`,
+		"src/main/java/demo/FriendController.java": `package demo;
+import org.springframework.web.bind.annotation.*;
+@RestController
+public class FriendController implements FriendProvider {
+    public Object list() { return null; }
+    public Object delete(Long id) { return null; }
+}`,
+		"src/main/java/demo/ShopController.java": `package demo;
+import org.springframework.web.bind.annotation.*;
+@RestController
+public class ShopController implements ShopProvider {
+    @GetMapping("/shop")
+    public Object direct() { return null; }
+}`,
+		"src/main/java/demo/ShopProvider.java": `package demo;
+import org.springframework.cloud.openfeign.FeignClient;
+import org.springframework.web.bind.annotation.*;
+@FeignClient(name = "shop")
+public interface ShopProvider {
+    @GetMapping("/shop")
+    Object get();
+    @GetMapping("/shop/all")
+    Object all();
+}`,
+	})
+	sum, err := ScanModule(root, ".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]bool{}
+	for _, ep := range sum.Endpoints {
+		key := ep.Method + " " + ep.Path
+		if got[key] {
+			t.Fatalf("duplicate endpoint %s", key)
+		}
+		got[key] = true
+	}
+	for _, want := range []string{"GET /friends", "DELETE /friends/{id}", "GET /shop", "GET /shop/all"} {
+		if !got[want] {
+			t.Errorf("missing interface endpoint %s, got %v", want, got)
+		}
+	}
+}
+
 func TestToSnake(t *testing.T) {
 	cases := map[string]string{
 		"id":           "id",

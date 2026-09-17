@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 
 	"github.com/hiylo/starburst-backend/internal/store"
 )
@@ -22,6 +23,10 @@ var (
 	reEntity          = regexp.MustCompile(`@Entity\b`)
 	reTable           = regexp.MustCompile(`@Table\s*\(\s*name\s*=\s*"([^"]+)"`)
 	reClass           = regexp.MustCompile(`\bclass\s+([A-Za-z0-9_]+)`)
+	reInterface       = regexp.MustCompile(`\binterface\s+([A-Za-z0-9_]+)`)
+	reImplements      = regexp.MustCompile(`\bimplements\s+([A-Za-z0-9_]+(?:\s*,\s*[A-Za-z0-9_]+)*)`)
+	reImport          = regexp.MustCompile(`^import\s+(?:static\s+)?([\w.]+)\s*;`)
+	rePackage         = regexp.MustCompile(`^package\s+([\w.]+)\s*;`)
 	reColumn          = regexp.MustCompile(`@Column`)
 	reColumnName      = regexp.MustCompile(`@Column\s*\(\s*name\s*=\s*"([^"]+)"`)
 	reColumnNullable  = regexp.MustCompile(`nullable\s*=\s*(true|false)`)
@@ -37,8 +42,9 @@ var (
 )
 
 // scanJavaFiles scans a set of .java files and returns the extracted entity
-// mappings and endpoint contracts with provenance.
-func scanJavaFiles(files []string) ([]*store.IntelEntity, []*store.IntelEndpoint) {
+// mappings and endpoint contracts with provenance. idx is the repo-wide
+// FQCN→file index used to resolve controller interface (Feign) contracts.
+func scanJavaFiles(files []string, idx map[string]string) ([]*store.IntelEntity, []*store.IntelEndpoint) {
 	ents := make([]*store.IntelEntity, 0)
 	eps := make([]*store.IntelEndpoint, 0)
 	for _, f := range files {
@@ -47,13 +53,31 @@ func scanJavaFiles(files []string) ([]*store.IntelEntity, []*store.IntelEndpoint
 			continue
 		}
 		if isController(lines) {
-			eps = append(eps, scanController(f, lines)...)
+			eps = append(eps, scanController(f, lines, idx)...)
 		}
 		if isEntity(lines) {
 			ents = append(ents, scanEntity(f, lines)...)
 		}
 	}
-	return ents, eps
+	return ents, dedupeEndpoints(eps)
+}
+
+// dedupeEndpoints collapses endpoints sharing a (method, path) key, keeping the
+// first occurrence (the direct controller mapping, which precedes any
+// interface-inherited duplicate). Cross-module same-path endpoints are not
+// deduplicated: they are distinct services (e.g. a BFF proxy vs the provider).
+func dedupeEndpoints(eps []*store.IntelEndpoint) []*store.IntelEndpoint {
+	seen := make(map[string]bool)
+	out := make([]*store.IntelEndpoint, 0, len(eps))
+	for _, ep := range eps {
+		key := ep.Method + " " + ep.Path
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, ep)
+	}
+	return out
 }
 
 func readLines(path string) ([]string, error) {
@@ -165,7 +189,10 @@ func scanEntity(file string, lines []string) []*store.IntelEntity {
 // scanController extracts endpoint contracts from a controller class: the class
 // level @RequestMapping prefix combines with method-level mappings. A bare
 // @GetMapping etc. without arguments is treated as the class prefix path ("").
-func scanController(file string, lines []string) []*store.IntelEndpoint {
+// When the controller implements a Feign provider interface, the mappings
+// declared on that interface are resolved (via idx) and added as endpoints with
+// the interface file as provenance.
+func scanController(file string, lines []string, idx map[string]string) []*store.IntelEndpoint {
 	out := make([]*store.IntelEndpoint, 0)
 	classPrefix := ""
 	classLine := -1
@@ -220,7 +247,167 @@ func scanController(file string, lines []string) []*store.IntelEndpoint {
 			SourceLine:   i + 1,
 		})
 	}
+	// Resolve endpoints inherited from implemented Feign provider interfaces.
+	out = append(out, resolveInterfaceEndpoints(lines, idx)...)
 	return out
+}
+
+// resolveInterfaceEndpoints finds the interfaces a controller implements and,
+// for each one that declares REST mappings, extracts those mappings (attributed
+// to the interface file, the source of truth for the path). This covers the
+// common "controller implements Feign contract interface" layout where the
+// @GetMapping etc. live on the interface rather than the controller.
+func resolveInterfaceEndpoints(lines []string, idx map[string]string) []*store.IntelEndpoint {
+	if len(idx) == 0 {
+		return nil
+	}
+	pkg := packageOf(lines)
+	imports := importsOf(lines)
+	out := make([]*store.IntelEndpoint, 0)
+	seen := make(map[string]bool)
+	for _, l := range lines {
+		m := reImplements.FindStringSubmatch(l)
+		if m == nil {
+			continue
+		}
+		for _, name := range strings.Split(m[1], ",") {
+			name = strings.TrimSpace(name)
+			if name == "" {
+				continue
+			}
+			fqcn := imports[name]
+			if fqcn == "" {
+				if pkg != "" {
+					fqcn = pkg + "." + name
+				} else {
+					fqcn = name
+				}
+			}
+			ifaceFile, ok := idx[fqcn]
+			if !ok || seen[ifaceFile] {
+				continue
+			}
+			seen[ifaceFile] = true
+			ifaceLines, err := readLines(ifaceFile)
+			if err != nil {
+				continue
+			}
+			for i, il := range ifaceLines {
+				mm := methodMappingAt(il)
+				if mm == nil {
+					continue
+				}
+				path := joinPath("", mm[1])
+				respType, _, _ := methodReturnAt(ifaceLines, i)
+				out = append(out, &store.IntelEndpoint{
+					Method:       mapMethod(mm[0]),
+					Path:         path,
+					ResponseType: respType,
+					RequestJSON:  extractRequestInfo(ifaceLines, i),
+					SourceFile:   ifaceFile,
+					SourceLine:   i + 1,
+				})
+			}
+		}
+	}
+	return out
+}
+
+// packageOf extracts the package declaration of a Java file.
+func packageOf(lines []string) string {
+	for _, l := range lines {
+		if m := rePackage.FindStringSubmatch(l); m != nil {
+			return m[1]
+		}
+	}
+	return ""
+}
+
+// importsOf maps imported simple names to their fully-qualified names.
+func importsOf(lines []string) map[string]string {
+	out := make(map[string]string)
+	for _, l := range lines {
+		if m := reImport.FindStringSubmatch(l); m != nil {
+			fqcn := m[1]
+			out[fqcn[strings.LastIndexByte(fqcn, '.')+1:]] = fqcn
+		}
+	}
+	return out
+}
+
+// classIndexCache memoizes the repo-wide FQCN→file index per root so a
+// monorepo scan builds it once instead of once per module.
+var (
+	classIndexMu    sync.Mutex
+	classIndexByKey = map[string]map[string]string{}
+)
+
+// classIndexFor returns the FQCN→absolute-path index for a repository root,
+// building and caching it on first use.
+func classIndexFor(root string) map[string]string {
+	classIndexMu.Lock()
+	defer classIndexMu.Unlock()
+	if idx, ok := classIndexByKey[root]; ok {
+		return idx
+	}
+	idx := buildClassIndex(root)
+	classIndexByKey[root] = idx
+	return idx
+}
+
+// buildClassIndex walks root for .java files and maps each top-level class /
+// interface fully-qualified name to its absolute file path.
+func buildClassIndex(root string) map[string]string {
+	idx := make(map[string]string)
+	_ = filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil
+		}
+		if info.IsDir() {
+			name := info.Name()
+			if name == ".git" || name == "target" || name == "node_modules" ||
+				name == ".gradle" || name == "build_artifacts" || name == "dist" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(path, ".java") {
+			return nil
+		}
+		pkg, cls := readPackageAndClass(path)
+		if cls != "" {
+			fqcn := cls
+			if pkg != "" {
+				fqcn = pkg + "." + cls
+			}
+			idx[fqcn] = path
+		}
+		return nil
+	})
+	return idx
+}
+
+// readPackageAndClass reads the package and the first top-level class or
+// interface name from a Java file.
+func readPackageAndClass(path string) (string, string) {
+	lines, err := readLines(path)
+	if err != nil {
+		return "", ""
+	}
+	pkg := ""
+	for _, l := range lines {
+		if m := rePackage.FindStringSubmatch(l); m != nil {
+			pkg = m[1]
+			continue
+		}
+		if m := reClass.FindStringSubmatch(l); m != nil {
+			return pkg, m[1]
+		}
+		if m := reInterface.FindStringSubmatch(l); m != nil {
+			return pkg, m[1]
+		}
+	}
+	return pkg, ""
 }
 
 // paramInfo is one request parameter (path variable, query parameter or body).

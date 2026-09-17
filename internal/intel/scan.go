@@ -225,7 +225,7 @@ func ScanModule(root, relPath string) (*scanSummary, error) {
 	if len(files) == 0 {
 		return &scanSummary{}, nil
 	}
-	ents, eps := scanJavaFiles(files)
+	ents, eps := scanJavaFiles(files, classIndexFor(root))
 	return &scanSummary{Entities: ents, Endpoints: eps}, nil
 }
 
