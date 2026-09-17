@@ -415,6 +415,7 @@ func (s *Server) handleIntelEnvSchemaInit(w http.ResponseWriter, r *http.Request
 		writeJSON(w, http.StatusOK, map[string]any{"scripts": []any{}, "executed": 0, "note": "未发现 SQL 迁移脚本（Flyway/Liquibase/*.sql）"})
 		return
 	}
+	dbName := schemainit.DBName(root)
 
 	type scriptResult struct {
 		Rel string `json:"rel"`
@@ -430,6 +431,9 @@ func (s *Server) handleIntelEnvSchemaInit(w http.ResponseWriter, r *http.Request
 		}
 		args := []string{"exec", "-i", svc.ContainerName, "mysql",
 			"-uroot", "-p" + svc.Password}
+		if dbName != "" {
+			args = append(args, dbName)
+		}
 		if _, err := envagent.RunDockerInput(ctx, string(data), args...); err != nil {
 			results = append(results, scriptResult{Rel: script.Rel, Err: err.Error()})
 			continue
@@ -447,6 +451,7 @@ func (s *Server) handleIntelEnvSchemaInit(w http.ResponseWriter, r *http.Request
 		"executed":  executed,
 		"total":     len(results),
 		"container": svc.ContainerName,
+		"dbName":    dbName,
 	})
 }
 

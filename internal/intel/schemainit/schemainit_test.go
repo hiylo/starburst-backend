@@ -42,3 +42,29 @@ func TestDiscover(t *testing.T) {
 		t.Errorf("V1 not before V2: %+v", scripts)
 	}
 }
+
+func TestDBName(t *testing.T) {
+	root := t.TempDir()
+	write := func(rel, content string) {
+		t.Helper()
+		p := filepath.Join(root, rel)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Two modules declare different datasources: deterministic pick = first alphabetically.
+	write("a/src/main/resources/application.yml", "spring:\n  datasource:\n    url: jdbc:mysql://127.0.0.1:3306/app_a\n")
+	write("b/src/main/resources/application.properties", "spring.datasource.url=jdbc:mysql://127.0.0.1:3306/app_b\n")
+
+	if got := DBName(root); got != "app_a" {
+		t.Errorf("DBName = %q, want app_a", got)
+	}
+
+	empty := t.TempDir()
+	if got := DBName(empty); got != "" {
+		t.Errorf("DBName(no config) = %q, want empty", got)
+	}
+}
