@@ -6,24 +6,54 @@ import (
 	"github.com/hiylo/starburst-backend/internal/store"
 )
 
-// DefaultCommands returns the default build/test command templates for a
-// detected kind type. These are the candidate commands the user whitelists on
-// the project detail page (a placeholder set for M1; the full build/test/
-// package surface lands with the execution milestone).
+// DefaultCommands returns the default build/test/package command templates for
+// a detected kind type. These are the candidate commands the user whitelists on
+// the project detail page. The set covers the common per-tool build, test and
+// package surface; entries containing a "test" intent are picked up at run time
+// by whitelistedTestCommand (argv-parsed, never shell), everything else stays
+// an explicit whitelist candidate for one-click execution.
 func DefaultCommands(kindType string) []string {
 	switch kindType {
 	case "java":
-		return []string{"mvn test", "mvn package", "mvn clean install"}
+		return []string{
+			"mvn test",
+			"mvn package",
+			"mvn clean install",
+			"mvn verify",
+			"mvn -o test",
+		}
 	case "android":
-		return []string{"./gradlew test", "./gradlew assembleDebug"}
+		return []string{
+			"./gradlew test",
+			"./gradlew testDebugUnitTest",
+			"./gradlew assembleDebug",
+			"./gradlew lint",
+		}
 	case "go":
-		return []string{"go test ./...", "go build ./...", "go vet ./..."}
+		return []string{
+			"go test ./...",
+			"go build ./...",
+			"go vet ./...",
+			"go test -race ./...",
+		}
 	case "web", "node":
-		return []string{"npm test", "npm run build"}
+		return []string{
+			"npm test",
+			"npm run build",
+			"npm run lint",
+			"npm run type-check",
+		}
 	case "ios":
-		return []string{"xcodebuild test"}
+		return []string{
+			"xcodebuild test",
+			"xcodebuild build",
+		}
 	case "bff":
-		return []string{"npm test"}
+		return []string{
+			"npm test",
+			"npm run build",
+			"npm run lint",
+		}
 	default:
 		return nil
 	}

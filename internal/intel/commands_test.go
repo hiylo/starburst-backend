@@ -9,13 +9,13 @@ import (
 
 func TestDefaultCommands(t *testing.T) {
 	cases := map[string][]string{
-		"java":    {"mvn test", "mvn package", "mvn clean install"},
-		"android": {"./gradlew test", "./gradlew assembleDebug"},
-		"go":      {"go test ./...", "go build ./...", "go vet ./..."},
-		"web":     {"npm test", "npm run build"},
-		"node":    {"npm test", "npm run build"},
-		"ios":     {"xcodebuild test"},
-		"bff":     {"npm test"},
+		"java":    {"mvn test", "mvn package", "mvn clean install", "mvn verify", "mvn -o test"},
+		"android": {"./gradlew test", "./gradlew testDebugUnitTest", "./gradlew assembleDebug", "./gradlew lint"},
+		"go":      {"go test ./...", "go build ./...", "go vet ./...", "go test -race ./..."},
+		"web":     {"npm test", "npm run build", "npm run lint", "npm run type-check"},
+		"node":    {"npm test", "npm run build", "npm run lint", "npm run type-check"},
+		"ios":     {"xcodebuild test", "xcodebuild build"},
+		"bff":     {"npm test", "npm run build", "npm run lint"},
 		"unknown": {},
 	}
 	for kind, want := range cases {
