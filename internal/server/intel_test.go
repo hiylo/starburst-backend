@@ -790,6 +790,70 @@ func TestIntelWebBindings(t *testing.T) {
 	}
 }
 
+// TestIntelIosBindings verifies the iOS client field-binding pipeline: an iOS
+// module's SwiftUI views are extracted into the must-display field list and
+// exposed through /api/intel/ios-bindings.
+func TestIntelIosBindings(t *testing.T) {
+	s := newTestServer(t)
+	wh := loginWeb(t, s)
+
+	root := t.TempDir()
+	writeTestFile(t, filepath.Join(root, "clients/echo-app-ios/EchoApp.xcodeproj/project.pbxproj"), ``)
+	writeTestFile(t, filepath.Join(root, "clients/echo-app-ios/EchoApp/Views/Home/PostCardView.swift"),
+		`import SwiftUI
+struct PostCardView: View {
+    let post: Post
+    var body: some View {
+        VStack {
+            Text(post.content)
+            EchoAsyncImage(url: post.coverURL)
+        }
+    }
+}`)
+
+	rec := s.do(t, http.MethodPost, "/api/intel/projects",
+		`{"name":"demo","source":"local","localPath":"`+filepath.ToSlash(root)+`"}`, wh)
+	var proj struct {
+		ID int64 `json:"id"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &proj); err != nil || proj.ID == 0 {
+		t.Fatalf("create project: %s", rec.Body.String())
+	}
+	rec = s.do(t, http.MethodPost, "/api/intel/analyze",
+		`{"projectId":`+jsonInt(proj.ID)+`}`, wh)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("analyze status %d: %s", rec.Code, rec.Body.String())
+	}
+
+	rec = s.do(t, http.MethodGet, "/api/intel/ios-bindings?projectId="+jsonInt(proj.ID), "", wh)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("ios-bindings status %d: %s", rec.Code, rec.Body.String())
+	}
+	var bResp struct {
+		Bindings []struct {
+			Page      string `json:"page"`
+			FieldPath string `json:"fieldPath"`
+			Slot      string `json:"slot"`
+		} `json:"bindings"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &bResp); err != nil {
+		t.Fatalf("bindings parse: %v", err)
+	}
+	if len(bResp.Bindings) != 2 {
+		t.Fatalf("bindings = %d, want 2: %+v", len(bResp.Bindings), bResp.Bindings)
+	}
+	got := map[string]string{}
+	for _, b := range bResp.Bindings {
+		got[b.FieldPath] = b.Slot
+	}
+	if got["post.content"] != "text" {
+		t.Errorf("post.content slot = %q, want text", got["post.content"])
+	}
+	if got["post.coverURL"] != "image" {
+		t.Errorf("post.coverURL slot = %q, want image", got["post.coverURL"])
+	}
+}
+
 func gitRun(t *testing.T, dir string, args ...string) {
 	t.Helper()
 	cmd := exec.Command("git", args...)

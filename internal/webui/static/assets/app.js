@@ -2626,13 +2626,15 @@ async function checkIntelContract() {
 const SEV_LABELS = { critical: "严重", high: "高", medium: "中", low: "低" };
 
 async function loadIntelBindings(id) {
-  const [aRes, wRes] = await Promise.all([
+  const [aRes, wRes, iRes] = await Promise.all([
     api("/api/intel/android-bindings?projectId=" + id, { headers: appHeaders() }),
     api("/api/intel/web-bindings?projectId=" + id, { headers: appHeaders() }),
+    api("/api/intel/ios-bindings?projectId=" + id, { headers: appHeaders() }),
   ]);
   const android = ((await aRes.json()).bindings || []).map(b => ({ ...b, client: "android", slot: b.widget || "-" }));
   const web = ((await wRes.json()).bindings || []).map(b => ({ ...b, client: "web", slot: b.slot || "-" }));
-  const bindings = android.concat(web);
+  const ios = ((await iRes.json()).bindings || []).map(b => ({ ...b, client: "ios", slot: b.slot || "-" }));
+  const bindings = android.concat(web, ios);
   const tb = document.querySelector("#intelBindingTable tbody");
   tb.innerHTML = "";
   for (const b of bindings) {

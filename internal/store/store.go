@@ -371,6 +371,10 @@ type Store interface {
 	ReplaceIntelWebBindings(ctx context.Context, projectID int64, bindings []*IntelWebBinding) error
 	// ListIntelWebBindings returns the project's Web field bindings.
 	ListIntelWebBindings(ctx context.Context, projectID int64) ([]*IntelWebBinding, error)
+	// ReplaceIntelIosBindings replaces the project's iOS field bindings (full rescan).
+	ReplaceIntelIosBindings(ctx context.Context, projectID int64, bindings []*IntelIosBinding) error
+	// ListIntelIosBindings returns the project's iOS field bindings.
+	ListIntelIosBindings(ctx context.Context, projectID int64) ([]*IntelIosBinding, error)
 }
 
 // Open opens a store for the given driver/dsn. It applies all migrations

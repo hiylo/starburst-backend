@@ -111,6 +111,7 @@ var migrations = []migration{
 	{name: "intel_android_bindings", apply: migrationIntelAndroidBindings},
 	{name: "intel_web_bindings", apply: migrationIntelWebBindings},
 	{name: "sync_bundle", apply: migrationSyncBundle},
+	{name: "intel_ios_bindings", apply: migrationIntelIOSBindings},
 }
 
 // migrationIntel creates the Test Intelligence subsystem tables: flat project
@@ -902,6 +903,31 @@ func migrationIntelDedup(ctx context.Context, driver string, db *sql.DB) error {
 		`DELETE FROM intel_findings WHERE id NOT IN (
 			SELECT MIN(id) FROM intel_findings
 			GROUP BY project_id, detector, cve_or_rule_id, location)`,
+	}
+	for _, s := range stmts {
+		if _, err := db.ExecContext(ctx, s); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// migrationIntelIOSBindings creates the iOS client field-binding table: SwiftUI
+// view "page -> field path" extractions (the must-display field list).
+func migrationIntelIOSBindings(ctx context.Context, driver string, db *sql.DB) error {
+	stmts := []string{
+		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS intel_ios_bindings (
+			%s,
+			project_id INTEGER NOT NULL DEFAULT 0,
+			module_id INTEGER NOT NULL DEFAULT 0,
+			page TEXT NOT NULL DEFAULT '',
+			field_path TEXT NOT NULL DEFAULT '',
+			slot TEXT NOT NULL DEFAULT '',
+			source_file TEXT NOT NULL DEFAULT '',
+			source_line INTEGER NOT NULL DEFAULT 0,
+			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+		)`, idColumn(driver)),
+		`CREATE INDEX IF NOT EXISTS idx_intel_ios_bindings_project ON intel_ios_bindings(project_id, module_id)`,
 	}
 	for _, s := range stmts {
 		if _, err := db.ExecContext(ctx, s); err != nil {

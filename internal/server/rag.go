@@ -251,6 +251,38 @@ func (s *Server) buildIntelChunks(ctx context.Context, projectID int64) ([]*stor
 			})
 		}
 	}
+	// iOS client bindings become queryable facts as well.
+	if bindings, err := s.store.ListIntelIosBindings(ctx, projectID); err == nil {
+		byPage := map[string][]*store.IntelIosBinding{}
+		var pageOrder []string
+		for _, b := range bindings {
+			if _, ok := byPage[b.Page]; !ok {
+				pageOrder = append(pageOrder, b.Page)
+			}
+			byPage[b.Page] = append(byPage[b.Page], b)
+		}
+		for _, page := range pageOrder {
+			bs := byPage[page]
+			var sb strings.Builder
+			sb.WriteString("iOS 页面 ")
+			sb.WriteString(page)
+			sb.WriteString(" 必展示字段绑定：")
+			for _, b := range bs {
+				sb.WriteString("\n- ")
+				sb.WriteString(b.Slot)
+				sb.WriteString(" 绑定 ")
+				sb.WriteString(b.FieldPath)
+			}
+			add(&store.RagChunk{
+				ModuleID:   bs[0].ModuleID,
+				Kind:       "ios_binding",
+				Title:      "iOS 页面 " + page,
+				Content:    sb.String(),
+				SourceFile: bs[0].SourceFile,
+				SourceLine: bs[0].SourceLine,
+			})
+		}
+	}
 	return chunks, nil
 }
 

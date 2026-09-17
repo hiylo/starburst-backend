@@ -21,6 +21,7 @@ import (
 	"github.com/hiylo/starburst-backend/internal/intel/envdetect"
 	"github.com/hiylo/starburst-backend/internal/intel/feature"
 	"github.com/hiylo/starburst-backend/internal/intel/gateway"
+	"github.com/hiylo/starburst-backend/internal/intel/ios"
 	"github.com/hiylo/starburst-backend/internal/intel/sbom"
 	"github.com/hiylo/starburst-backend/internal/intel/testassets"
 	"github.com/hiylo/starburst-backend/internal/intel/web"
@@ -235,6 +236,33 @@ func (s *Server) handleIntelWebBindings(w http.ResponseWriter, r *http.Request) 
 	bindings, err := s.store.ListIntelWebBindings(ctx, projectID)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "load web bindings failed")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"bindings": bindings})
+}
+
+// handleIntelIosBindings lists the project's iOS client field bindings (the
+// must-display field list extracted from SwiftUI views).
+func (s *Server) handleIntelIosBindings(w http.ResponseWriter, r *http.Request) {
+	if !s.requireWeb(r) {
+		if _, ok := s.requireToken(r); !ok {
+			writeErr(w, http.StatusUnauthorized, "web session or APP token required")
+			return
+		}
+	}
+	if r.Method != http.MethodGet {
+		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	projectID, ok := s.intelQueryProject(w, r)
+	if !ok {
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+	bindings, err := s.store.ListIntelIosBindings(ctx, projectID)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "load ios bindings failed")
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"bindings": bindings})
@@ -581,6 +609,9 @@ func (s *Server) runIntelAnalyze(ctx context.Context, projectID int64) error {
 	if err := s.persistWebBindings(ctx, projectID, root, mods); err != nil {
 		log.Printf("intel web bindings project %d: %v", projectID, err)
 	}
+	if err := s.persistIosBindings(ctx, projectID, root, mods); err != nil {
+		log.Printf("intel ios bindings project %d: %v", projectID, err)
+	}
 	if err := s.persistGatewayRoutes(ctx, projectID, root); err != nil {
 		log.Printf("intel gateway routes project %d: %v", projectID, err)
 	}
@@ -730,6 +761,37 @@ func (s *Server) persistWebBindings(ctx context.Context, projectID int64, root s
 		}
 	}
 	return s.store.ReplaceIntelWebBindings(ctx, projectID, bindings)
+}
+
+// persistIosBindings extracts SwiftUI view "page -> field path" bindings for
+// every iOS module and persists them as the client's must-display field list.
+func (s *Server) persistIosBindings(ctx context.Context, projectID int64, root string, mods []*store.IntelModule) error {
+	bindings := make([]*store.IntelIosBinding, 0)
+	for _, m := range mods {
+		if m.KindType != "ios" {
+			continue
+		}
+		dir := filepath.Join(root, m.RelPath)
+		if fi, err := os.Stat(dir); err != nil || !fi.IsDir() {
+			continue
+		}
+		bs, err := ios.ExtractBindings(dir)
+		if err != nil {
+			continue
+		}
+		for _, b := range bs {
+			src, line := splitAndroidSource(root, dir, b.Source)
+			bindings = append(bindings, &store.IntelIosBinding{
+				ModuleID:   m.ID,
+				Page:       b.Page,
+				FieldPath:  b.FieldPath,
+				Slot:       b.Slot,
+				SourceFile: src,
+				SourceLine: line,
+			})
+		}
+	}
+	return s.store.ReplaceIntelIosBindings(ctx, projectID, bindings)
 }
 
 // splitAndroidSource splits a binding's "rel/path.xml:line" source (relative to
