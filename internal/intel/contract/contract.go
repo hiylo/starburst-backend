@@ -37,6 +37,13 @@ func CheckResponse(specs []FieldSpec, responseJSON []byte) ([]CheckResult, error
 	if err := json.Unmarshal(responseJSON, &root); err != nil {
 		return nil, err
 	}
+	// GraphQL responses are wrapped in {"data": ...}; unwrap it when present so
+	// the field specs apply to the payload rather than the envelope.
+	if m, ok := root.(map[string]any); ok {
+		if inner, has := m["data"]; has {
+			root = inner
+		}
+	}
 
 	var obj map[string]any
 	unexpected := ""

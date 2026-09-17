@@ -188,3 +188,39 @@ func TestCheckEndpoints(t *testing.T) {
 		t.Fatalf("CheckEndpoints() should skip endpoints with no response, got %#v", got["absent"])
 	}
 }
+
+func TestCheckResponseGraphQLEnvelope(t *testing.T) {
+	specs := []FieldSpec{
+		{Name: "id", Required: true, Type: "number"},
+		{Name: "title", Required: true, Type: "string"},
+	}
+	// A GraphQL-style {"data": {...}} payload must validate against the specs.
+	results, err := CheckResponse(specs, []byte(`{"data":{"id":1,"title":"hello"}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range results {
+		if r.Status != "passed" {
+			t.Errorf("envelope field %s = %q, want passed", r.Field, r.Status)
+		}
+	}
+	// Without the envelope the same payload would report missing.
+	results, err = CheckResponse(specs, []byte(`{"id":1,"title":"hello"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range results {
+		if r.Status != "passed" {
+			t.Errorf("plain field %s = %q, want passed", r.Field, r.Status)
+		}
+	}
+	// Non-GraphQL object with its own "data" field that is NOT the payload still
+	// unwraps; this matches the BFF convention where data is the payload.
+	results, err = CheckResponse(specs, []byte(`{"data":{"id":1}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if results[1].Status != "missing" {
+		t.Errorf("title under data envelope = %q, want missing", results[1].Status)
+	}
+}
