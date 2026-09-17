@@ -289,6 +289,8 @@ type Store interface {
 	UpdateIntelIssue(ctx context.Context, issue *IntelIssue) error
 	// ReplaceIntelFeatures replaces a project's feature-point set (rescan).
 	ReplaceIntelFeatures(ctx context.Context, projectID int64, feats []*IntelFeature) error
+	// GetIntelFeature loads a single feature point by id.
+	GetIntelFeature(ctx context.Context, id int64) (*IntelFeature, error)
 	// ListIntelFeatures returns feature points for a project.
 	ListIntelFeatures(ctx context.Context, projectID int64) ([]*IntelFeature, error)
 	// UpdateIntelFeature persists mutable feature fields.

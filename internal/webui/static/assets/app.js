@@ -2652,15 +2652,36 @@ async function loadIntelFeatures(id) {
   for (const f of feats) {
     let ends = [];
     try { ends = JSON.parse(f.endsJson || "[]"); } catch (_) {}
-    const endRows = (ends || []).map(e => `<span class="mono" style="font-size:11px">${escapeHtml(e.method || "")} ${escapeHtml(e.path || "")}</span>`).join("、");
+    const endBadges = (ends || []).map(e => `<span class="badge">${escapeHtml(e)}</span>`).join(" ") || `<span class="muted" style="font-size:11px">未知</span>`;
     wrap.insertAdjacentHTML("beforeend", `<div class="card" style="margin:0">
       <div class="row" style="justify-content:space-between">
         <strong>${escapeHtml(f.name || "-")}</strong>
-        <span class="muted" style="font-size:12px">${ends.length} 个接口 · ${escapeHtml(f.source || "auto")}</span>
+        <div class="row" style="gap:6px">
+          <span class="muted" style="font-size:12px">涉及端 ${endBadges}</span>
+          <button class="ghost sm" onclick="testIntelFeature(${f.id})">单测</button>
+        </div>
       </div>
-      <div class="muted" style="font-size:12px;margin-top:6px">${endRows || "（无关联接口）"}</div>
+      <div id="intelFeatureResult-${f.id}" class="muted" style="font-size:12px;margin-top:6px"></div>
     </div>`);
   }
+}
+
+async function testIntelFeature(featureId) {
+  const base = prompt("请输入被测服务地址（如 http://localhost:8080）", "http://localhost:8080");
+  if (!base) return;
+  const box = document.getElementById("intelFeatureResult-" + featureId);
+  if (box) box.textContent = "单测中…";
+  const res = await api("/api/intel/features/test", { method: "POST", headers: appHeaders(), body: JSON.stringify({ projectId: intelCurrentProject, featureId, baseUrl: base }) });
+  const data = await res.json();
+  if (!res.ok) { if (box) box.textContent = data.error || "单测失败"; return; }
+  const rs = data.results || [];
+  let okCount = 0, failCount = 0;
+  const lines = rs.map(r => {
+    if (r.ok && (!r.contract || r.contract.failed === 0)) okCount++; else failCount++;
+    const c = r.contract ? `契约 ${r.contract.passed}/${r.contract.passed + r.contract.failed}` : "无契约";
+    return `${r.method} ${r.path} → ${r.status || "ERR"} ${c}${r.error ? " · " + r.error : ""}`;
+  });
+  if (box) box.innerHTML = `<span class="mono" style="font-size:11px">${okCount} 通 / ${failCount} 败</span>` + lines.map(l => `<div class="mono" style="font-size:11px">${escapeHtml(l)}</div>`).join("");
 }
 
 async function loadIntelCases(id) {

@@ -113,3 +113,23 @@ func TestCluster(t *testing.T) {
 		})
 	}
 }
+
+func TestMatchEndpoints(t *testing.T) {
+	eps := []*store.IntelEndpoint{
+		{ID: 1, Method: "GET", Path: "/banner/list", SourceFile: "com/x/BannerController.java"},
+		{ID: 2, Method: "GET", Path: "/banner/detail", SourceFile: "com/x/BannerController.java"},
+		{ID: 3, Method: "GET", Path: "/order/list", SourceFile: "com/x/OrderController.java"},
+		{ID: 4, Method: "GET", Path: "/user/profile", SourceFile: ""},
+	}
+	byController := MatchEndpoints(eps, "Banner")
+	if len(byController) != 2 || byController[0].ID != 1 || byController[1].ID != 2 {
+		t.Fatalf("MatchEndpoints(Banner) = %+v, want ids [1 2]", byController)
+	}
+	byPath := MatchEndpoints(eps, "/user")
+	if len(byPath) != 1 || byPath[0].ID != 4 {
+		t.Fatalf("MatchEndpoints(/user) = %+v, want id [4]", byPath)
+	}
+	if got := MatchEndpoints(eps, ""); got != nil {
+		t.Fatalf("MatchEndpoints(empty) = %+v, want nil", got)
+	}
+}

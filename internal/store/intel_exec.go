@@ -367,6 +367,20 @@ func (s *sqlStore) ListIntelFeatures(ctx context.Context, projectID int64) ([]*I
 	return out, rows.Err()
 }
 
+// GetIntelFeature loads a single feature point by id.
+func (s *sqlStore) GetIntelFeature(ctx context.Context, id int64) (*IntelFeature, error) {
+	row := s.db.QueryRowContext(ctx, s.q(`
+		SELECT id, project_id, name, summary, ends_json, sort_order, source, anchor,
+			status, created_at, updated_at
+		FROM intel_features WHERE id = ?`), id)
+	f := &IntelFeature{}
+	if err := row.Scan(&f.ID, &f.ProjectID, &f.Name, &f.Summary, &f.EndsJSON,
+		&f.SortOrder, &f.Source, &f.Anchor, &f.Status, &f.CreatedAt, &f.UpdatedAt); err != nil {
+		return nil, err
+	}
+	return f, nil
+}
+
 // UpdateIntelFeature persists mutable feature fields.
 func (s *sqlStore) UpdateIntelFeature(ctx context.Context, feat *IntelFeature) error {
 	_, err := s.db.ExecContext(ctx, s.q(`

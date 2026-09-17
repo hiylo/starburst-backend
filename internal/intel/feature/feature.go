@@ -80,6 +80,32 @@ func Cluster(endpoints []*store.IntelEndpoint) []Candidate {
 	return out
 }
 
+// MatchEndpoints returns the endpoints that belong to a feature with the given
+// anchor: high-confidence controller-name clusters match the controller class
+// name (SourceFile basename minus "Controller"), medium-confidence path clusters
+// match the leading path segment (anchor begins with "/").
+func MatchEndpoints(endpoints []*store.IntelEndpoint, anchor string) []*store.IntelEndpoint {
+	if anchor == "" {
+		return nil
+	}
+	out := make([]*store.IntelEndpoint, 0)
+	for _, ep := range endpoints {
+		if ep == nil {
+			continue
+		}
+		if c := controllerName(ep.SourceFile); c != "" {
+			if c == anchor {
+				out = append(out, ep)
+			}
+			continue
+		}
+		if strings.HasPrefix(anchor, "/") && strings.HasPrefix(ep.Path, anchor) {
+			out = append(out, ep)
+		}
+	}
+	return out
+}
+
 // clusterKey resolves the grouping key plus the derived anchor, name and
 // confidence for a single endpoint. It returns an empty key when the endpoint
 // cannot be clustered.

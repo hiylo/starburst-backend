@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -621,6 +622,105 @@ func TestIntelAndroidBindings(t *testing.T) {
 	}
 	if bResp.Bindings[0].Page != "activity_main" {
 		t.Errorf("page = %q, want activity_main", bResp.Bindings[0].Page)
+	}
+}
+
+// TestIntelFeatureSingleTest verifies the feature single-test: it calls a
+// feature's endpoints against a live base URL and validates the response body
+// against the extracted field contract.
+func TestIntelFeatureSingleTest(t *testing.T) {
+	s := newTestServer(t)
+	wh := loginWeb(t, s)
+
+	// A live backend that returns a matching DTO-shaped response.
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`[{"id":1,"nickname":"alice"}]`))
+	}))
+	defer backend.Close()
+
+	root := t.TempDir()
+	writeTestFile(t, filepath.Join(root, "pom.xml"), `<project></project>`)
+	writeTestFile(t, filepath.Join(root, "src/main/java/demo/UserController.java"), `package demo;
+import org.springframework.web.bind.annotation.*;
+@RestController
+@RequestMapping("/api/users")
+public class UserController {
+    @GetMapping("/list")
+    public java.util.List<demo.UserEntity> list() { return null; }
+}`)
+	writeTestFile(t, filepath.Join(root, "src/main/java/demo/UserEntity.java"), `package demo;
+import javax.persistence.*;
+@Entity
+@Table(name = "sys_user")
+public class UserEntity {
+    @Id
+    @Column(name = "id", nullable = false)
+    private Long id;
+    @Column(name = "nickname")
+    private String nickname;
+}`)
+
+	rec := s.do(t, http.MethodPost, "/api/intel/projects",
+		`{"name":"demo","source":"local","localPath":"`+filepath.ToSlash(root)+`"}`, wh)
+	var proj struct {
+		ID int64 `json:"id"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &proj); err != nil || proj.ID == 0 {
+		t.Fatalf("create project: %s", rec.Body.String())
+	}
+	rec = s.do(t, http.MethodPost, "/api/intel/analyze",
+		`{"projectId":`+jsonInt(proj.ID)+`}`, wh)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("analyze status %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// Resolve the auto-clustered feature (controller name "User").
+	rec = s.do(t, http.MethodGet, "/api/intel/features?projectId="+jsonInt(proj.ID), "", wh)
+	var fResp struct {
+		Features []struct {
+			ID     int64  `json:"id"`
+			Anchor string `json:"anchor"`
+		} `json:"features"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &fResp); err != nil {
+		t.Fatalf("features parse: %v", err)
+	}
+	if len(fResp.Features) != 1 || fResp.Features[0].Anchor != "User" {
+		t.Fatalf("features = %+v, want one User feature", fResp.Features)
+	}
+	featID := fResp.Features[0].ID
+
+	rec = s.do(t, http.MethodPost, "/api/intel/features/test",
+		`{"projectId":`+jsonInt(proj.ID)+`,"featureId":`+jsonInt(featID)+`,"baseUrl":"`+backend.URL+`"}`, wh)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("feature test status %d: %s", rec.Code, rec.Body.String())
+	}
+	var tResp struct {
+		Results []struct {
+			Method   string `json:"method"`
+			Path     string `json:"path"`
+			Status   int    `json:"status"`
+			OK       bool   `json:"ok"`
+			Contract *struct {
+				Passed int `json:"passed"`
+				Failed int `json:"failed"`
+			} `json:"contract"`
+		} `json:"results"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &tResp); err != nil {
+		t.Fatalf("feature test parse: %v", err)
+	}
+	if len(tResp.Results) != 1 {
+		t.Fatalf("results = %d, want 1: %s", len(tResp.Results), rec.Body.String())
+	}
+	r := tResp.Results[0]
+	if r.Status != 200 || !r.OK {
+		t.Errorf("endpoint not reachable: status=%d ok=%v", r.Status, r.OK)
+	}
+	if r.Contract == nil || r.Contract.Failed != 0 {
+		t.Errorf("contract check failed: %+v", r.Contract)
 	}
 }
 
