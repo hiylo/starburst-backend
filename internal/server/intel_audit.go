@@ -329,9 +329,7 @@ func (s *Server) generateFixForFinding(ctx context.Context, projectID, findingID
 		OldText string `json:"oldText"`
 		NewText string `json:"newText"`
 	}
-	system := "你是代码修复助手。根据告警信息和源文件片段，提出一个最小、精确的修复。" +
-		"只输出 JSON：{\"title\":\"...\",\"oldText\":\"...\",\"newText\":\"...\"}。" +
-		"oldText 必须逐字来自源文件（唯一出现），newText 是替换后的内容。"
+	system := loadPrompt("fix_generate", "你是代码修复助手，提出最小精确修复，输出 JSON {title,oldText,newText}，oldText 必须逐字来自源文件。")
 	user := fmt.Sprintf("告警：%s\n位置：%s:%d\n\n源文件 %s 片段：\n%s",
 		finding.Summary, relFile, line, relFile, content)
 	if err := s.llm.CompleteJSON(ctx, system, user, &proposal); err != nil {

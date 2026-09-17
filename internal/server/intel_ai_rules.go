@@ -277,7 +277,7 @@ func (s *Server) runSingleAIRule(ctx context.Context, projectID int64, rule *sto
 		Find   bool   `json:"find"`
 		Reason string `json:"reason"`
 	}
-	system := "你是规则扫描助手。判断给定规则是否命中给定内容片段。只输出 JSON {\"find\":true/false,\"reason\":\"...\"}。"
+	system := loadPrompt("ai_rule_scan", "你是规则扫描助手。判断给定规则是否命中给定内容片段，只输出 JSON {find:true/false, reason}。")
 	user := fmt.Sprintf("规则[%s]:%s\n\n内容[%s]:\n%s", rule.Name, rule.Prompt, title, content)
 	if err := s.llm.CompleteJSON(ctx, system, user, &result); err != nil {
 		return false, err

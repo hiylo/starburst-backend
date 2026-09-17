@@ -206,7 +206,7 @@ func (s *Server) handleIntelOverrideSuggest(w http.ResponseWriter, r *http.Reque
 		} `json:"overrides"`
 	}
 	var draft propose
-	system := "你是测试智能人工校正助手。基于子模块清单与用户指令，提出需要人工确认的字段覆写（JSON {\"overrides\":[{target,rowKey,field,autoValue,manualValue,reason}]}）。只提有明确依据的，宁缺毋滥。"
+	system := loadPrompt("override_suggest", "你是测试智能人工校正助手，基于子模块清单与指令提出字段覆写草稿，只提有明确依据的。")
 	user := sb.String()
 	if strings.TrimSpace(req.Instruction) != "" {
 		user += "\n用户指令：" + req.Instruction
