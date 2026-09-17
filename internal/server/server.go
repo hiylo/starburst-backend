@@ -50,6 +50,15 @@ type Server struct {
 	// intelAnalyzeMu 串行化同一项目的分析（全量/增量），避免创建与保存流程
 	// 触发重入时并发扫描同一仓库。
 	intelAnalyzeMu sync.Map // int64 projectID → *sync.Mutex
+	// intelExecMu 串行化同一项目的测试执行（单项目内一次只跑一个 run），
+	// 避免多个测试进程同时写同一模块的构建产物。
+	intelExecMu sync.Map // int64 projectID → *sync.Mutex
+	// intelExecSem 全局测试执行并发水位：限制同时进行的测试进程数，
+	// 防止 run-all 并行把所有 CPU/IO 打满。
+	intelExecSem chan struct{}
+	// intelCancelMu 保护 intelCancels：runID → cancel，供取消接口终止执行。
+	intelCancelMu sync.Mutex
+	intelCancels  map[int64]context.CancelFunc
 	// sessionStatuses 是采集器从 session.status/idle 事件聚合的最新会话状态
 	//（sessionId → "busy"|"idle"|"retry"|"error"），用于给 App 提供比上游
 	// /session/status 快照更准确、更完整的状态视图。
@@ -73,15 +82,17 @@ func (s *Server) SetMaxConcurrency(n int) { s.maxConcurrency = n }
 // New assembles the server with its dependencies.
 func New(cfg *config.Config, st store.Store, am *auth.Manager, oc *opencode.Client, hub *push.Hub) *Server {
 	return &Server{
-		cfg:        cfg,
-		store:      st,
-		auth:       am,
-		openCode:   oc,
-		hub:        hub,
-		loginLimit: newLoginLimiter(5, 5*time.Minute),
-		genLimit:   newLoginLimiter(20, time.Minute),
-		touchSeen:  make(map[string]time.Time),
-		auditCh:    make(chan *store.AuditEntry, 512),
+		cfg:          cfg,
+		store:        st,
+		auth:         am,
+		openCode:     oc,
+		hub:          hub,
+		loginLimit:   newLoginLimiter(5, 5*time.Minute),
+		genLimit:     newLoginLimiter(20, time.Minute),
+		touchSeen:    make(map[string]time.Time),
+		auditCh:      make(chan *store.AuditEntry, 512),
+		intelExecSem: make(chan struct{}, intelExecConcurrency),
+		intelCancels: make(map[int64]context.CancelFunc),
 	}
 }
 

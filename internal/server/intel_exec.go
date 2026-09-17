@@ -137,9 +137,10 @@ func (s *Server) handleIntelIssues(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"issues": issues})
 }
 
-// handleIntelRun triggers a synchronous test run (M3: deterministic command per
-// build tool, report parsing, results persisted). Async worker-pool execution
-// lands with the execution milestone.
+// handleIntelRun enqueues a test run (M3: deterministic command per build tool,
+// report parsing, results persisted). The run executes asynchronously under a
+// per-project lock and a global concurrency cap; progress flows through the
+// push hub and the run row, and the caller receives the run id immediately.
 func (s *Server) handleIntelRun(w http.ResponseWriter, r *http.Request) {
 	if !s.requireWeb(r) {
 		if _, ok := s.requireToken(r); !ok {
@@ -165,11 +166,11 @@ func (s *Server) handleIntelRun(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "projectId is required")
 		return
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Minute)
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
-	run, err := s.runIntelTests(ctx, req.ProjectID, req.ModuleID, req.NodeID, req.Force)
+	run, err := s.enqueueIntelRun(ctx, req.ProjectID, req.ModuleID, req.NodeID, req.Force)
 	if err != nil {
-		log.Printf("intel run project %d: %v", req.ProjectID, err)
+		log.Printf("intel run enqueue project %d: %v", req.ProjectID, err)
 		writeErr(w, http.StatusInternalServerError, "run failed: "+err.Error())
 		return
 	}
@@ -212,8 +213,9 @@ func (s *Server) handleIntelResultRootcause(w http.ResponseWriter, r *http.Reque
 	writeJSON(w, http.StatusOK, map[string]any{"result": res, "rootcause": rootcause})
 }
 
-// handleIntelRunAll runs the deterministic test command across every module of
-// a project (one-click regression) and aggregates the per-module runs.
+// handleIntelRunAll enqueues a one-click regression across every module of a
+// project. The aggregate run executes asynchronously; each module gets its own
+// run row with per-module progress, and the summary is aggregated at the end.
 func (s *Server) handleIntelRunAll(w http.ResponseWriter, r *http.Request) {
 	if !s.requireWeb(r) {
 		if _, ok := s.requireToken(r); !ok {
@@ -237,33 +239,15 @@ func (s *Server) handleIntelRunAll(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "projectId is required")
 		return
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Minute)
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
-	mods, err := s.store.ListIntelModules(ctx, req.ProjectID)
+	run, err := s.enqueueIntelRunAll(ctx, req.ProjectID, req.Force)
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "load modules failed")
+		log.Printf("intel run-all enqueue project %d: %v", req.ProjectID, err)
+		writeErr(w, http.StatusInternalServerError, "run-all failed: "+err.Error())
 		return
 	}
-	runs := make([]*store.TestRun, 0, len(mods))
-	errors := make([]map[string]string, 0)
-	passed, failed := 0, 0
-	for _, m := range mods {
-		run, err := s.runIntelTests(ctx, req.ProjectID, m.ID, 0, req.Force)
-		if err != nil {
-			errors = append(errors, map[string]string{"module": m.RelPath, "error": err.Error()})
-			failed++
-			continue
-		}
-		runs = append(runs, run)
-		if run.Status == "passed" {
-			passed++
-		} else {
-			failed++
-		}
-	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"runs": runs, "errors": errors, "total": len(mods), "passed": passed, "failed": failed,
-	})
+	writeJSON(w, http.StatusOK, map[string]any{"run": run})
 }
 
 // handleIntelRuns lists test runs for a project, newest first.
@@ -292,13 +276,29 @@ func (s *Server) handleIntelRuns(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"runs": runs})
 }
 
-// handleIntelRunByID returns one run with its per-case results.
+// handleIntelRunByID returns one run with its per-case results (GET), or
+// cancels a running run (POST .../cancel).
 func (s *Server) handleIntelRunByID(w http.ResponseWriter, r *http.Request) {
 	if !s.requireWeb(r) {
 		if _, ok := s.requireToken(r); !ok {
 			writeErr(w, http.StatusUnauthorized, "web session or APP token required")
 			return
 		}
+	}
+	rest := strings.TrimPrefix(r.URL.Path, "/api/intel/runs/")
+	rest = strings.TrimSuffix(rest, "/")
+	if strings.HasSuffix(rest, "/cancel") && r.Method == http.MethodPost {
+		id, err := strconv.ParseInt(strings.TrimSuffix(rest, "/cancel"), 10, 64)
+		if err != nil || id <= 0 {
+			writeErr(w, http.StatusBadRequest, "invalid run id")
+			return
+		}
+		if !s.cancelIntelRun(id) {
+			writeErr(w, http.StatusNotFound, "run not running or already finished")
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+		return
 	}
 	if r.Method != http.MethodGet {
 		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -327,23 +327,23 @@ func (s *Server) handleIntelRunByID(w http.ResponseWriter, r *http.Request) {
 // parses the framework report and persists the run + per-case results, turning
 // failures into intel_issues. When nodeID > 0 the command is routed over SSH to
 // a remote execution node instead of the local machine. It returns the run.
-func (s *Server) runIntelTests(ctx context.Context, projectID, moduleID, nodeID int64, force bool) (*store.TestRun, error) {
+func (s *Server) runIntelTests(ctx context.Context, projectID, moduleID, nodeID int64, force bool, run *store.TestRun) error {
 	p, err := s.store.GetIntelProject(ctx, projectID)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	root, err := s.projectRoot(ctx, p)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
 	mods, err := s.store.ListIntelModules(ctx, projectID)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	module, ok := pickIntelModule(mods, moduleID)
 	if !ok {
-		return nil, fmt.Errorf("module %d not found", moduleID)
+		return fmt.Errorf("module %d not found", moduleID)
 	}
 
 	// 模块可能来自关联源码仓库（多端多仓库，"@end/" 前缀）：用该仓库的根目录，
@@ -361,7 +361,7 @@ func (s *Server) runIntelTests(ctx context.Context, projectID, moduleID, nodeID 
 	}
 	cmdArgs, reportKind := testCommandFor(module.BuildTool, module.KindType)
 	if len(cmdArgs) == 0 {
-		return nil, fmt.Errorf("unsupported build tool %q for module %s", module.BuildTool, module.RelPath)
+		return fmt.Errorf("unsupported build tool %q for module %s", module.BuildTool, module.RelPath)
 	}
 	// Honor the human-reviewed project-level command whitelist
 	// (projects.commands_json) when it offers a matching test command for this
@@ -371,18 +371,22 @@ func (s *Server) runIntelTests(ctx context.Context, projectID, moduleID, nodeID 
 		cmdArgs = wl
 	}
 
+	run.ModuleID = module.ID
+	run.Kind = reportKind
+	run.Command = strings.Join(cmdArgs, " ")
+
 	// Execution target: local (default) or a remote SSH node when specified.
 	remoteNode := (*store.RemoteNode)(nil)
 	if nodeID > 0 {
 		node, err := s.store.GetRemoteNode(ctx, nodeID)
 		if err != nil {
-			return nil, fmt.Errorf("remote node %d not found", nodeID)
+			return fmt.Errorf("remote node %d not found", nodeID)
 		}
 		if !node.Reachable {
-			return nil, fmt.Errorf("remote node %q 不可达（请先在节点列表检查）", node.Name)
+			return fmt.Errorf("remote node %q 不可达（请先在节点列表检查）", node.Name)
 		}
 		if reportKind != "go" {
-			return nil, fmt.Errorf("远程执行目前仅支持 go 报告（stdout 自包含）；%s 需本机运行", reportKind)
+			return fmt.Errorf("远程执行目前仅支持 go 报告（stdout 自包含）；%s 需本机运行", reportKind)
 		}
 		remoteNode = node
 	} else if !force {
@@ -391,22 +395,8 @@ func (s *Server) runIntelTests(ctx context.Context, projectID, moduleID, nodeID 
 			// required middleware/toolchains are missing, with a per-item list.
 			// Local runs are gated unless force bypasses; routed runs rely on the
 			// node's capability labels instead.
-			return nil, err
+			return err
 		}
-	}
-
-	now := time.Now()
-	run := &store.TestRun{
-		ProjectID: projectID,
-		ModuleID:  module.ID,
-		Scope:     "module",
-		Kind:      reportKind,
-		Command:   strings.Join(cmdArgs, " "),
-		Status:    "running",
-		StartedAt: &now,
-	}
-	if err := s.store.CreateIntelTestRun(ctx, run); err != nil {
-		return nil, err
 	}
 
 	var output []byte
@@ -423,11 +413,11 @@ func (s *Server) runIntelTests(ctx context.Context, projectID, moduleID, nodeID 
 		// remote interpretation layer).
 		for _, tok := range cmdArgs {
 			if hasShellMeta(tok) {
-				return nil, fmt.Errorf("远程命令含 shell 元字符，已拒绝执行（参数：%q）", tok)
+				return fmt.Errorf("远程命令含 shell 元字符，已拒绝执行（参数：%q）", tok)
 			}
 		}
 		if hasShellMeta(wd) {
-			return nil, fmt.Errorf("远程工作目录含 shell 元字符：%q", wd)
+			return fmt.Errorf("远程工作目录含 shell 元字符：%q", wd)
 		}
 		if !strings.HasPrefix(strings.TrimSpace(command), "cd ") {
 			command = "cd " + wd + " && " + command
@@ -439,14 +429,13 @@ func (s *Server) runIntelTests(ctx context.Context, projectID, moduleID, nodeID 
 	} else {
 		output, execErr = runCommand(ctx, dir, cmdArgs[0], cmdArgs[1:]...)
 	}
-	finished := time.Now()
 	if execErr != nil {
-		run.Status = "failed"
-		run.FinishedAt = &finished
-		_ = s.store.UpdateIntelTestRun(ctx, run)
-		return nil, fmt.Errorf("test command failed: %w", execErr)
+		// 保留输出尾部（截断到上限），失败原因一并记录，供详情页排查。
+		run.Output = truncateOutput(output)
+		return fmt.Errorf("test command failed: %w", execErr)
 	}
 
+	run.Output = truncateOutput(output)
 	results := parseReport(reportKind, dir, output)
 	flakyRetry(ctx, dir, reportKind, results)
 	// npm/other script runners produce no per-case report on stdout; synthesize a
@@ -459,7 +448,7 @@ func (s *Server) runIntelTests(ctx context.Context, projectID, moduleID, nodeID 
 		})
 	}
 	if err := s.store.AddIntelTestResults(ctx, results); err != nil {
-		return nil, err
+		return err
 	}
 	s.recordTestCaseOutcomes(ctx, projectID, results)
 	s.recordRunIssues(ctx, run, projectID, module.ID, results)
@@ -472,14 +461,28 @@ func (s *Server) runIntelTests(ctx context.Context, projectID, moduleID, nodeID 
 	}
 	if failed > 0 {
 		run.Status = "failed"
+		run.Progress = fmt.Sprintf("失败 %d 个用例", failed)
 	} else {
 		run.Status = "passed"
+		run.Progress = fmt.Sprintf("通过 %d 个用例", len(results))
 	}
+	finished := time.Now()
 	run.FinishedAt = &finished
 	if err := s.store.UpdateIntelTestRun(ctx, run); err != nil {
-		return nil, err
+		return err
 	}
-	return run, nil
+	s.pushIntelRunEvent(run)
+	return nil
+}
+
+// truncateOutput bounds captured test output to intelOutputLimit bytes, keeping
+// the tail so the most relevant (failure) lines survive.
+func truncateOutput(out []byte) string {
+	if len(out) <= intelOutputLimit {
+		return string(out)
+	}
+	tail := out[len(out)-intelOutputLimit:]
+	return "[输出已截断，保留末尾 " + strconv.Itoa(intelOutputLimit) + " 字节]\n" + string(tail)
 }
 
 // testCommandFor returns the deterministic test command + report kind for a
