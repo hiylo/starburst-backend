@@ -355,15 +355,15 @@ func (s *Server) runIntelSecurityScan(ctx context.Context, projectID int64, enti
 		}
 		seen[key] = true
 		finding := &store.IntelFinding{
-			ProjectID:  projectID,
-			ModuleID:   e.ModuleID,
-			Detector:   "security",
-			Severity:   string(w.Severity),
-			Category:   "sensitive_field",
+			ProjectID:   projectID,
+			ModuleID:    e.ModuleID,
+			Detector:    "security",
+			Severity:    string(w.Severity),
+			Category:    "sensitive_field",
 			CveOrRuleID: w.Kind,
-			Location:   loc,
-			Summary:    w.Message,
-			Status:     "open",
+			Location:    loc,
+			Summary:     w.Message,
+			Status:      "open",
 		}
 		if _, err := s.store.CreateIntelFindingIfAbsent(ctx, finding); err != nil {
 			log.Printf("intel security finding: %v", err)
