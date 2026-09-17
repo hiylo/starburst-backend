@@ -1323,6 +1323,72 @@ func TestIntelEnvExternalConfig(t *testing.T) {
 	}
 }
 
+// TestIntelAIRulesCRUD verifies the AI suggestion rules management API.
+func TestIntelAIRulesCRUD(t *testing.T) {
+	s := newTestServer(t)
+	wh := loginWeb(t, s)
+
+	rec := s.do(t, http.MethodPost, "/api/intel/ai-rules",
+		`{"name":"避免裸 SQL","prompt":"识别代码中直接拼接 SQL 的位置并给出建议","target":"risk","severity":"high"}`, wh)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("create rule status %d: %s", rec.Code, rec.Body.String())
+	}
+	var created struct {
+		Rule struct {
+			ID     int64  `json:"id"`
+			Name   string `json:"name"`
+			Prompt string `json:"prompt"`
+			Target string `json:"target"`
+		} `json:"rule"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &created); err != nil {
+		t.Fatalf("create parse: %v", err)
+	}
+	if created.Rule.ID == 0 || created.Rule.Name != "避免裸 SQL" {
+		t.Fatalf("created rule = %+v", created.Rule)
+	}
+
+	rec = s.do(t, http.MethodGet, "/api/intel/ai-rules", "", wh)
+	var list struct {
+		Rules []struct {
+			ID      int64  `json:"id"`
+			Name    string `json:"name"`
+			Enabled bool   `json:"enabled"`
+		} `json:"rules"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &list); err != nil {
+		t.Fatalf("list parse: %v", err)
+	}
+	if len(list.Rules) != 1 || list.Rules[0].ID != created.Rule.ID {
+		t.Fatalf("list = %+v, want 1 rule", list.Rules)
+	}
+
+	rec = s.do(t, http.MethodPut, "/api/intel/ai-rules/"+jsonInt(created.Rule.ID),
+		`{"enabled":false}`, wh)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("update status %d: %s", rec.Code, rec.Body.String())
+	}
+	rec = s.do(t, http.MethodGet, "/api/intel/ai-rules?enabled=true", "", wh)
+	if err := json.Unmarshal(rec.Body.Bytes(), &list); err != nil {
+		t.Fatalf("enabled list parse: %v", err)
+	}
+	if len(list.Rules) != 0 {
+		t.Errorf("enabled list = %d, want 0 after disabling", len(list.Rules))
+	}
+
+	rec = s.do(t, http.MethodDelete, "/api/intel/ai-rules/"+jsonInt(created.Rule.ID), "", wh)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("delete status %d: %s", rec.Code, rec.Body.String())
+	}
+	rec = s.do(t, http.MethodGet, "/api/intel/ai-rules", "", wh)
+	if err := json.Unmarshal(rec.Body.Bytes(), &list); err != nil {
+		t.Fatalf("list parse: %v", err)
+	}
+	if len(list.Rules) != 0 {
+		t.Errorf("after delete rules = %d, want 0", len(list.Rules))
+	}
+}
+
 func gitRun(t *testing.T, dir string, args ...string) {
 	t.Helper()
 	cmd := exec.Command("git", args...)

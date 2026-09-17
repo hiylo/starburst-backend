@@ -389,6 +389,16 @@ type Store interface {
 	UpsertIntelEnvServices(ctx context.Context, projectID int64, services []*IntelEnvService) error
 	// ListIntelEnvServices returns the project's environment status rows.
 	ListIntelEnvServices(ctx context.Context, projectID int64) ([]*IntelEnvService, error)
+	// ListIntelAIRules returns all AI suggestion rules (optionally enabled only).
+	ListIntelAIRules(ctx context.Context, onlyEnabled bool) ([]*IntelAIRule, error)
+	// GetIntelAIRule loads one AI rule by id.
+	GetIntelAIRule(ctx context.Context, id int64) (*IntelAIRule, error)
+	// CreateIntelAIRule inserts an AI rule and fills its id.
+	CreateIntelAIRule(ctx context.Context, r *IntelAIRule) error
+	// UpdateIntelAIRule persists an AI rule's mutable fields.
+	UpdateIntelAIRule(ctx context.Context, r *IntelAIRule) error
+	// DeleteIntelAIRule removes an AI rule by id.
+	DeleteIntelAIRule(ctx context.Context, id int64) error
 }
 
 // Open opens a store for the given driver/dsn. It applies all migrations

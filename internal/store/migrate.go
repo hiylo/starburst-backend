@@ -113,6 +113,7 @@ var migrations = []migration{
 	{name: "sync_bundle", apply: migrationSyncBundle},
 	{name: "intel_ios_bindings", apply: migrationIntelIOSBindings},
 	{name: "env", apply: migrationEnv},
+	{name: "intel_ai_rules", apply: migrationIntelAIRules},
 }
 
 // migrationIntel creates the Test Intelligence subsystem tables: flat project
@@ -1026,6 +1027,35 @@ func migrationEnv(ctx context.Context, driver string, db *sql.DB) error {
 			updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 		)`, idColumn(driver)),
 		`CREATE INDEX IF NOT EXISTS idx_env_services_project ON env_services(project_id)`,
+	}
+	for _, s := range stmts {
+		if _, err := db.ExecContext(ctx, s); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// migrationIntelAIRules creates the AI suggestion rules table (prompt rules
+// that run over the project to surface risk/performance/compliance suggestions,
+// per the global config section). Rules are global, not per-project: they are
+// enabled or disabled, ordered, and optionally polished from a previous draft.
+func migrationIntelAIRules(ctx context.Context, driver string, db *sql.DB) error {
+	stmts := []string{
+		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS intel_ai_rules (
+			%s,
+			name TEXT NOT NULL DEFAULT '',
+			prompt TEXT NOT NULL DEFAULT '',
+			scope TEXT NOT NULL DEFAULT 'all',
+			target TEXT NOT NULL DEFAULT '',
+			severity TEXT NOT NULL DEFAULT 'medium',
+			enabled BOOLEAN NOT NULL DEFAULT TRUE,
+			sort_order INTEGER NOT NULL DEFAULT 0,
+			polished_from TEXT NOT NULL DEFAULT '',
+			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+		)`, idColumn(driver)),
+		`CREATE INDEX IF NOT EXISTS idx_intel_ai_rules_enabled ON intel_ai_rules(enabled, sort_order)`,
 	}
 	for _, s := range stmts {
 		if _, err := db.ExecContext(ctx, s); err != nil {

@@ -227,6 +227,9 @@ func (s *Server) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/intel/env/install", s.handleIntelEnvInstall)
 	mux.HandleFunc("/api/intel/env/stop", s.handleIntelEnvStop)
 	mux.HandleFunc("/api/intel/env/external", s.handleIntelEnvExternal)
+	mux.HandleFunc("/api/intel/ai-rules", s.handleIntelAIRules)
+	mux.HandleFunc("/api/intel/ai-rules/", s.handleIntelAIRuleByID)
+	mux.HandleFunc("/api/intel/scan/rules", s.handleIntelRuleScan)
 	mux.HandleFunc("/", s.handleIndex)
 }
 
