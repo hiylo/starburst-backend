@@ -1,9 +1,11 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -387,6 +389,80 @@ public class UserControllerTest {
 	after := count("/api/intel/findings", "findings")
 	if after != before {
 		t.Errorf("findings grew %d -> %d across re-analyze (accumulation)", before, after)
+	}
+}
+
+// TestIntelGitProjectClone verifies that a source=git project is cloned into
+// the configured repos_dir on first analyze and then analyzed like a local one.
+func TestIntelGitProjectClone(t *testing.T) {
+	s := newTestServer(t)
+	wh := loginWeb(t, s)
+
+	// Build a git repo with a Java module.
+	repo := t.TempDir()
+	writeTestFile(t, filepath.Join(repo, "pom.xml"), `<project></project>`)
+	writeTestFile(t, filepath.Join(repo, "src/main/java/demo/UserEntity.java"), `package demo;
+import javax.persistence.*;
+@Entity
+@Table(name = "sys_user")
+public class UserEntity {
+    @Id
+    @Column(name = "id", nullable = false)
+    private Long id;
+}`)
+	gitRun(t, repo, "init", "-b", "main")
+	gitRun(t, repo, "config", "user.email", "test@example.com")
+	gitRun(t, repo, "config", "user.name", "test")
+	gitRun(t, repo, "add", ".")
+	gitRun(t, repo, "commit", "-m", "init")
+
+	reposDir := t.TempDir()
+	if err := s.store.SetSetting(context.Background(), "intel.repos_dir", reposDir); err != nil {
+		t.Fatalf("set repos_dir: %v", err)
+	}
+
+	rec := s.do(t, http.MethodPost, "/api/intel/projects",
+		`{"name":"gitdemo","source":"git","gitUrl":"`+filepath.ToSlash(repo)+`","gitRef":"main"}`, wh)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("create git project status %d: %s", rec.Code, rec.Body.String())
+	}
+	var proj struct {
+		ID int64 `json:"id"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &proj); err != nil || proj.ID == 0 {
+		t.Fatalf("create response: %s", rec.Body.String())
+	}
+
+	rec = s.do(t, http.MethodPost, "/api/intel/analyze",
+		`{"projectId":`+jsonInt(proj.ID)+`}`, wh)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("analyze git project status %d: %s", rec.Code, rec.Body.String())
+	}
+
+	rec = s.do(t, http.MethodGet, "/api/intel/entities?projectId="+jsonInt(proj.ID), "", wh)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("entities status %d", rec.Code)
+	}
+	var entResp struct {
+		Entities []struct {
+			Table  string `json:"table"`
+			Column string `json:"column"`
+		} `json:"entities"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &entResp); err != nil {
+		t.Fatalf("entities parse: %v", err)
+	}
+	if len(entResp.Entities) != 1 || entResp.Entities[0].Column != "id" {
+		t.Fatalf("git clone analyze did not yield the id column, got %+v", entResp.Entities)
+	}
+}
+
+func gitRun(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git %v: %v: %s", args, err, out)
 	}
 }
 

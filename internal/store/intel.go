@@ -164,20 +164,29 @@ func (s *sqlStore) MarkIntelProjectAnalyzed(ctx context.Context, id int64, snaps
 
 // DeleteIntelProject removes a project and all its intel data.
 func (s *sqlStore) DeleteIntelProject(ctx context.Context, id int64) error {
-	if _, err := s.db.ExecContext(ctx, s.q(`DELETE FROM project_modules WHERE project_id = ?`), id); err != nil {
-		return err
+	stmts := []string{
+		`DELETE FROM intel_chat_messages WHERE chat_id IN (SELECT id FROM intel_chats WHERE project_id = ?)`,
+		`DELETE FROM intel_chats WHERE project_id = ?`,
+		`DELETE FROM test_results WHERE project_id = ?`,
+		`DELETE FROM test_runs WHERE project_id = ?`,
+		`DELETE FROM test_cases WHERE project_id = ?`,
+		`DELETE FROM intel_fixes WHERE project_id = ?`,
+		`DELETE FROM intel_findings WHERE project_id = ?`,
+		`DELETE FROM intel_issues WHERE project_id = ?`,
+		`DELETE FROM intel_features WHERE project_id = ?`,
+		`DELETE FROM intel_overviews WHERE project_id = ?`,
+		`DELETE FROM intel_impacts WHERE project_id = ?`,
+		`DELETE FROM intel_gateway_routes WHERE project_id = ?`,
+		`DELETE FROM intel_chunks WHERE project_id = ?`,
+		`DELETE FROM intel_endpoints WHERE project_id = ?`,
+		`DELETE FROM intel_entities WHERE project_id = ?`,
+		`DELETE FROM project_modules WHERE project_id = ?`,
+		`DELETE FROM projects WHERE id = ?`,
 	}
-	if _, err := s.db.ExecContext(ctx, s.q(`DELETE FROM intel_entities WHERE project_id = ?`), id); err != nil {
-		return err
-	}
-	if _, err := s.db.ExecContext(ctx, s.q(`DELETE FROM intel_endpoints WHERE project_id = ?`), id); err != nil {
-		return err
-	}
-	if _, err := s.db.ExecContext(ctx, s.q(`DELETE FROM intel_chunks WHERE project_id = ?`), id); err != nil {
-		return err
-	}
-	if _, err := s.db.ExecContext(ctx, s.q(`DELETE FROM projects WHERE id = ?`), id); err != nil {
-		return err
+	for _, stmt := range stmts {
+		if _, err := s.db.ExecContext(ctx, s.q(stmt), id); err != nil {
+			return err
+		}
 	}
 	return nil
 }

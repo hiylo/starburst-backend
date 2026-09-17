@@ -3,9 +3,11 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -795,7 +797,48 @@ func (s *Server) projectRoot(ctx context.Context, p *store.IntelProject) (string
 	if err != nil || reposDir == "" {
 		return "", errSettingMissing("intel.repos_dir not configured for git projects")
 	}
-	return filepath.Join(reposDir, safeName(p.Name)), nil
+	target := filepath.Join(reposDir, safeName(p.Name))
+	if err := s.ensureGitClone(ctx, p, target); err != nil {
+		return "", err
+	}
+	return target, nil
+}
+
+// ensureGitClone clones a git project into target on first use, and refreshes
+// an existing clone to the requested ref. It shells out to git with explicit
+// argv (no shell) so a user-supplied URL cannot inject commands.
+func (s *Server) ensureGitClone(ctx context.Context, p *store.IntelProject, target string) error {
+	if _, err := os.Stat(filepath.Join(target, ".git")); err != nil {
+		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+			return err
+		}
+		args := []string{"clone", "--depth", "1"}
+		if p.GitRef != "" {
+			args = append(args, "--branch", p.GitRef)
+		}
+		args = append(args, p.GitURL, target)
+		cmd := exec.CommandContext(ctx, "git", args...)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			return fmt.Errorf("git clone: %w: %s", err, strings.TrimSpace(string(out)))
+		}
+		return nil
+	}
+	// Refresh: fetch the requested ref and hard-reset so re-analyze sees HEAD.
+	fetch := exec.CommandContext(ctx, "git", "fetch", "--depth", "1", "origin")
+	fetch.Dir = target
+	if out, err := fetch.CombinedOutput(); err != nil {
+		return fmt.Errorf("git fetch: %w: %s", err, strings.TrimSpace(string(out)))
+	}
+	ref := p.GitRef
+	if ref == "" {
+		ref = "HEAD"
+	}
+	reset := exec.CommandContext(ctx, "git", "reset", "--hard", "origin/"+ref)
+	reset.Dir = target
+	if out, err := reset.CombinedOutput(); err != nil {
+		return fmt.Errorf("git reset: %w: %s", err, strings.TrimSpace(string(out)))
+	}
+	return nil
 }
 
 func errNotDir(root string) error { return &pathErr{msg: "project path is not a directory: " + root} }
