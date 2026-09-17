@@ -1075,6 +1075,10 @@ function connectTaskWS() {
       handleWbPush(msg.payload);
       return;
     }
+    if (msg.type === "intel.run.event" && msg.payload && msg.payload.run) {
+      refreshIntelRunsIfVisible();
+      return;
+    }
     if (!msg.payload) return;
     if (msg.type === "task.summary") {
       updateTaskAI(msg.payload.id, msg.payload.summary, false);
@@ -3983,19 +3987,29 @@ async function loadIntelRuns(id) {
   const runs = data.runs || [];
   const tb = document.querySelector("#intelRunTable tbody");
   tb.innerHTML = "";
+  let anyActive = false;
   for (const r of runs) {
     const dur = r.finishedAt && r.startedAt ? Math.round((new Date(r.finishedAt) - new Date(r.startedAt)) / 1000) + "s" : "-";
-    tb.insertAdjacentHTML("beforeend", `<tr>
+    const active = (r.status === "queued" || r.status === "running");
+    if (active) anyActive = true;
+    const statusCls = r.status === "passed" ? "analyzed" : (active ? "" : "");
+    const progress = active && r.progress ? ` <span class="muted" style="font-size:11px">（${escapeHtml(r.progress)}）</span>` : "";
+    const cancelBtn = active ? ` <button class="ghost sm" onclick="cancelIntelRun(${r.id})">取消</button>` : "";
+    tb.insertAdjacentHTML("beforeend", `<tr data-active="${active ? "1" : "0"}">
       <td>#${r.id}</td>
       <td>${escapeHtml(r.scope || "module")}</td>
-      <td class="mono clip" title="${escapeHtml(r.command || "")}">${escapeHtml(r.command || "-")}</td>
-      <td><span class="intel-status ${r.status === "passed" ? "analyzed" : ""}">${escapeHtml(r.status || "-")}</span></td>
+      <td class="mono clip" title="${escapeHtml(r.command || "")}">${escapeHtml(r.command || "-")}${progress}</td>
+      <td><span class="intel-status ${statusCls}">${escapeHtml(r.status || "-")}</span></td>
       <td class="muted" style="font-size:12px">${r.startedAt ? new Date(r.startedAt).toLocaleString() : "-"}</td>
       <td>${dur}</td>
-      <td><button class="ghost sm" onclick="showIntelRunDetail(${r.id})">详情</button></td>
+      <td><button class="ghost sm" onclick="showIntelRunDetail(${r.id})">详情</button>${cancelBtn}</td>
     </tr>`);
   }
   if (!runs.length) tb.insertAdjacentHTML("beforeend", `<tr><td colspan="7" class="muted" style="text-align:center;padding:16px">暂无运行记录（点击右上角「运行测试」触发）</td></tr>`);
+  if (anyActive) {
+    clearTimeout(intelRunPollTimer);
+    intelRunPollTimer = setTimeout(pollIntelRunningRuns, 2000);
+  }
 }
 
 async function showIntelRunDetail(runId) {
@@ -4007,6 +4021,7 @@ async function showIntelRunDetail(runId) {
   if (!res.ok) { box.innerHTML = `<div class="muted" style="padding:8px">${escapeHtml(data.error || "加载失败")}</div>`; return; }
   const run = data.run || {};
   const results = data.results || [];
+  const active = (run.status === "queued" || run.status === "running");
   const rows = results.map(rt => {
     const ok = rt.passed;
     const flaky = ok && (rt.failuresJson || "").indexOf("flaky") !== -1;
@@ -4020,16 +4035,31 @@ async function showIntelRunDetail(runId) {
       <td class="mono muted" style="font-size:11px" id="rootcause-${rt.id}">${rcBtn}</td>
     </tr>`;
   }).join("");
+  const outHtml = run.output
+    ? `<div class="mono" style="margin-top:8px;font-size:11.5px;white-space:pre-wrap;background:var(--surface-2);border:1px solid var(--hairline);border-radius:var(--r-sm);padding:8px;max-height:280px;overflow:auto">${escapeHtml(run.output)}</div>`
+    : "";
+  const progressHtml = run.progress
+    ? `<div class="muted" style="font-size:12px;margin-top:4px">${escapeHtml(run.progress)}</div>`
+    : "";
   box.innerHTML = `<div class="card" style="margin:0">
     <div class="row" style="justify-content:space-between">
       <strong>运行 #${run.id || ""}</strong>
-      <span class="intel-status ${run.status === "passed" ? "analyzed" : ""}">${escapeHtml(run.status || "-")}</span>
+      <div class="row">
+        <span class="intel-status ${run.status === "passed" ? "analyzed" : ""}">${escapeHtml(run.status || "-")}</span>
+        ${active ? ` <button class="ghost sm" onclick="cancelIntelRun(${run.id})">取消</button>` : ""}
+      </div>
     </div>
     <div class="mono muted" style="font-size:11px;margin-top:4px">${escapeHtml(run.command || "")}</div>
+    ${progressHtml}
     <div class="table-wrap" style="margin-top:8px">
       <table><thead><tr><th>用例</th><th>结果</th><th>归因</th></tr></thead><tbody>${rows || `<tr><td colspan="3" class="muted" style="text-align:center;padding:8px">无结果</td></tr>`}</tbody></table>
     </div>
+    ${outHtml}
   </div>`;
+  // 运行中：定时刷新详情，展示最新 progress/output。
+  if (active) {
+    setTimeout(() => { if (document.getElementById("intelRunDetail")) showIntelRunDetail(run.id); }, 2000);
+  }
 }
 
 async function showResultRootcause(resultId) {
@@ -4043,32 +4073,63 @@ async function showResultRootcause(resultId) {
   box.innerHTML = `<div class="mono" style="font-size:11px;white-space:pre-wrap;background:var(--surface-2);border:1px solid var(--hairline);border-radius:var(--r-sm);padding:6px">${escapeHtml(JSON.stringify(rc, null, 2))}</div>`;
 }
 
+let intelRunPollTimer = null;
+
+// refreshIntelRunsIfVisible reloads the runs table when the runs tab is open.
+function refreshIntelRunsIfVisible() {
+  if (!intelCurrentProject) return;
+  const panel = document.getElementById("intelPanel-runs");
+  if (!panel || panel.classList.contains("hidden")) return;
+  loadIntelRuns(intelCurrentProject);
+}
+
+// pollIntelRunningRuns refreshes the runs table while any run is active, so
+// progress stays live even if the push socket is not connected.
+function pollIntelRunningRuns() {
+  clearTimeout(intelRunPollTimer);
+  const panel = document.getElementById("intelPanel-runs");
+  if (!panel || panel.classList.contains("hidden")) return;
+  const rows = document.querySelectorAll('#intelRunTable tbody tr[data-active="1"]');
+  if (rows.length === 0) return;
+  if (intelCurrentProject) loadIntelRuns(intelCurrentProject);
+  intelRunPollTimer = setTimeout(pollIntelRunningRuns, 2000);
+}
+
 async function runIntelTests() {
   const id = intelCurrentProject;
   if (!id) return;
   if (!confirm("运行测试？\n（环境缺失时默认被门禁拦截，可下一步选择强制继续）")) return;
   const force = confirm("环境缺失时强制继续执行？\n确定=跳过门禁，取消=按门禁拦截");
   const st = document.getElementById("intelAnalyzeStatus");
-  if (st) st.textContent = "运行测试中…";
+  if (st) st.textContent = "已排队，等待执行…";
   const res = await api("/api/intel/run", { method: "POST", headers: appHeaders(), body: JSON.stringify({ projectId: id, force }) });
   const data = await res.json();
   if (!res.ok) { if (st) st.textContent = ""; show(document.getElementById("intelMsg"), data.error || "运行失败"); return; }
-  if (st) st.textContent = "运行完成：" + (data.run ? data.run.status : "");
+  if (st) st.textContent = "已入队（#运行异步执行中）";
+  switchIntelTab("runs");
   loadIntelRuns(id);
 }
 
 async function runIntelTestsAll() {
   const id = intelCurrentProject;
   if (!id) return;
-  if (!confirm("一键回归：顺序运行项目全部模块的测试命令，继续？")) return;
+  if (!confirm("一键回归：并行运行项目全部模块的测试命令，继续？")) return;
   const st = document.getElementById("intelAnalyzeStatus");
-  if (st) st.textContent = "一键回归中…";
+  if (st) st.textContent = "已排队，等待一键回归…";
   const res = await api("/api/intel/run-all", { method: "POST", headers: appHeaders(), body: JSON.stringify({ projectId: id }) });
   const data = await res.json();
   if (!res.ok) { if (st) st.textContent = ""; show(document.getElementById("intelMsg"), data.error || "回归失败"); return; }
-  if (st) st.textContent = `回归完成：${data.passed || 0} 通 / ${(data.failed || 0)} 败（共 ${data.total || 0} 模块）`;
-  show(document.getElementById("intelMsg"), `一键回归：${data.passed || 0} 模块通过 / ${(data.failed || 0)} 失败`);
+  if (st) st.textContent = "一键回归已入队（异步执行中）";
+  switchIntelTab("runs");
   loadIntelRuns(id);
+}
+
+async function cancelIntelRun(runId) {
+  const res = await api("/api/intel/runs/" + runId + "/cancel", { method: "POST", headers: appHeaders() });
+  const data = await res.json();
+  if (!res.ok) { toast("取消失败", data.error || "该运行已结束或不可取消", "warn"); return; }
+  toast("已请求取消", "测试运行正在终止", "info");
+  if (intelCurrentProject) loadIntelRuns(intelCurrentProject);
 }
 
 async function loadIntelImpact(id) {
