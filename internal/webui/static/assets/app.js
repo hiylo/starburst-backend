@@ -2769,7 +2769,6 @@ async function loadIntelProjects() {
       <td><span class="intel-status ${isAnalyzed ? "analyzed" : "pending"}">${isAnalyzed ? "已分析" : "待分析"}</span></td>
       <td>
         <button class="ghost sm" data-id="${p.id}">详情</button>
-        <button class="ghost sm" data-analyze="${p.id}">分析</button>
         <button class="tertiary sm" data-del="${p.id}">删除</button>
       </td>
     </tr>`);
@@ -2777,8 +2776,6 @@ async function loadIntelProjects() {
   tb.onclick = (e) => {
     const btn = e.target.closest("button[data-id]");
     if (btn) { openIntelDetail(Number(btn.dataset.id)); return; }
-    const az = e.target.closest("button[data-analyze]");
-    if (az) { runIntelAnalyze(Number(az.dataset.analyze)); return; }
     const del = e.target.closest("button[data-del]");
     if (del) { deleteIntelProject(Number(del.dataset.del)); }
   };
@@ -2804,7 +2801,7 @@ async function createIntelProject() {
   const res = await api("/api/intel/projects", { method: "POST", headers: appHeaders(), body: JSON.stringify(body) });
   const data = await res.json();
   if (!res.ok) { show(document.getElementById("intelMsg"), data.error || "添加失败"); return; }
-  show(document.getElementById("intelMsg"), "已添加：" + escapeHtml(data.name));
+  show(document.getElementById("intelMsg"), "已添加：" + escapeHtml(data.name) + "（自动分析中，稍后刷新可见结果）");
   document.getElementById("intelMsg").classList.add("ok");
   document.getElementById("intelName").value = "";
   document.getElementById("intelPath").value = "";
@@ -2985,7 +2982,7 @@ async function saveIntelProjectManage() {
   closeIntelProjectManage();
   loadIntelDetail(intelCurrentProject);
   loadIntelProjects();
-  if (changed) toast("已保存", "来源/目录已变更，请重新执行分析", "info");
+  if (changed) toast("已保存", "来源/目录已变更，将自动进行增量分析", "info");
 }
 
 // 编辑项目级命令白名单：每行一条命令，运行测试时按工具匹配执行（argv 不经 shell）。
