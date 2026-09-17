@@ -3069,6 +3069,16 @@ async function suggestIntelOverride() {
   alert("AI 建议草稿（仅预览，请人工核对后自行添加覆写）：\n\n" + JSON.stringify(data.drafts || [], null, 2));
 }
 
+async function scanIntelRules() {
+  if (!intelCurrentProject) return;
+  if (!confirm("用全部启用的 AI 建议规则扫描本项目的知识块（接口契约/文档/绑定），命中将落库为审计问题（ai-rule）？")) return;
+  const res = await api("/api/intel/scan/rules", { method: "POST", headers: appHeaders(), body: JSON.stringify({ projectId: intelCurrentProject }) });
+  const data = await res.json();
+  if (!res.ok) { alert(data.error || "扫描失败"); return; }
+  alert(`扫描完成：命中 ${data.created || 0} 条问题（审计 Tab 查看）`);
+  if (typeof loadIntelFindings === "function") loadIntelFindings(intelCurrentProject);
+}
+
 async function loadIntelBindings(id) {
   const [aRes, wRes, iRes] = await Promise.all([
     api("/api/intel/android-bindings?projectId=" + id, { headers: appHeaders() }),

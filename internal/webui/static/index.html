@@ -531,7 +531,10 @@
               <div class="intel-panel hidden" id="intelPanel-pending">
                 <div class="row" style="justify-content:space-between;align-items:center;margin-bottom:var(--sp-sm)">
                   <div class="muted" style="font-size:12px">低置信度自动值 / LLM 建议，人工确认后固化为覆写</div>
-                  <button class="ghost sm" onclick="suggestIntelOverride()">AI 建议</button>
+                  <div class="row" style="gap:6px">
+                    <button class="ghost sm" onclick="scanIntelRules()">规则扫描</button>
+                    <button class="ghost sm" onclick="suggestIntelOverride()">AI 建议</button>
+                  </div>
                 </div>
                 <div id="intelPendingList" style="display:flex;flex-direction:column;gap:var(--sp-sm)"></div>
               </div>
