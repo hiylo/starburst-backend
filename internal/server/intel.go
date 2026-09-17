@@ -780,7 +780,7 @@ func (s *Server) ensureModuleSummary(ctx context.Context, mod *store.IntelModule
 	if len(endpoints) > 0 {
 		sb.WriteString("\n接口契约：\n")
 		for i, ep := range endpoints {
-			if i >= 20 {
+			if i >= 30 {
 				break
 			}
 			fmt.Fprintf(&sb, "- %s %s 返回=%s%s\n", ep.Method, ep.Path, ep.ResponseType,
@@ -797,6 +797,16 @@ func (s *Server) ensureModuleSummary(ctx context.Context, mod *store.IntelModule
 			seen[e.TableName] = true
 			fmt.Fprintf(&sb, "- %s\n", e.TableName)
 		}
+	}
+	if routes, err := s.store.ListIntelGatewayRoutes(ctx, mod.ProjectID); err == nil && len(routes) > 0 {
+		sb.WriteString("\n网关路由上下文：\n")
+		for i, rt := range routes {
+			if i >= 10 {
+				break
+			}
+			fmt.Fprintf(&sb, "- %s -> %s %s\n", rt.Service, rt.URI, rt.PathsJSON)
+		}
+		sb.WriteString("（未列入网关直通路由的路径由网关兜底按服务名转发，认证类路径一般由网关放行/认证中心处理）\n")
 	}
 	var out struct {
 		Summary string `json:"summary"`
