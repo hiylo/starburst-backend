@@ -2492,6 +2492,7 @@ let mockPath = "/";
 let mockParams = [];
 let mockBodyType = "";
 let mockEndpointId = 0;
+let mockIsGraphQL = false;
 
 function mockValue(type, name) {
   const t = (type || "").toLowerCase();
@@ -2519,6 +2520,23 @@ function buildMockUrl(method, path, params) {
   return url;
 }
 
+const GQL_METHODS = { QUERY: "query", MUTATION: "mutation", SUBSCRIPTION: "subscription" };
+
+function renderGraphQLDoc(verb, field, params) {
+  const op = GQL_METHODS[verb] || "query";
+  const args = (params || []).filter(p => p.source === "arg");
+  let argStr = "";
+  if (args.length) {
+    argStr = "(" + args.map(p => `${p.name}: ${JSON.stringify(mockValue(p.type, p.name))}`).join(", ") + ")";
+  }
+  return `${op} ${field}${argStr} {\n  # 按需填写返回字段\n}`;
+}
+
+function renderGraphQLCurl(field, doc) {
+  const body = JSON.stringify({ query: doc });
+  return `curl -X POST 'http://localhost:8080/graphql' \\\n  -H 'Content-Type: application/json' \\\n  -d '${body.replace(/'/g, "'\\''")}'`;
+}
+
 function openIntelMock(idx) {
   const ep = intelEndpointsCache[idx];
   if (!ep) return;
@@ -2531,11 +2549,19 @@ function openIntelMock(idx) {
   mockParams = params;
   mockBodyType = bodyType;
   mockEndpointId = ep.id || 0;
+  mockIsGraphQL = GQL_METHODS[mockMethod] ? true : false;
   document.getElementById("intelMockTitle").textContent =
-    `${mockMethod} ${mockPath}${bodyType ? "  ·  请求体类型 " + bodyType : ""}${ep.summary ? "  ·  " + ep.summary : ""}`;
-  document.getElementById("intelMockUrl").value = buildMockUrl(mockMethod, mockPath, params);
-  document.getElementById("intelMockBody").value = bodyType ? "{\n}" : "";
-  document.getElementById("intelMockCurl").value = renderMockCurl();
+    `${mockMethod} ${mockPath}${mockIsGraphQL ? " · GraphQL 操作" : ""}${bodyType ? "  ·  请求体类型 " + bodyType : ""}${ep.summary ? "  ·  " + ep.summary : ""}`;
+  if (mockIsGraphQL) {
+    const doc = renderGraphQLDoc(mockMethod, mockPath, params);
+    document.getElementById("intelMockUrl").value = "POST http://localhost:8080/graphql";
+    document.getElementById("intelMockBody").value = doc;
+    document.getElementById("intelMockCurl").value = renderGraphQLCurl(mockPath, doc);
+  } else {
+    document.getElementById("intelMockUrl").value = buildMockUrl(mockMethod, mockPath, params);
+    document.getElementById("intelMockBody").value = bodyType ? "{\n}" : "";
+    document.getElementById("intelMockCurl").value = renderMockCurl();
+  }
   document.getElementById("intelMockStatus").textContent = "";
   document.getElementById("intelContractJson").value = "";
   document.getElementById("intelContractStatus").textContent = "";
@@ -2558,7 +2584,9 @@ function closeIntelMock() {
 }
 
 async function copyIntelMock() {
-  const curl = renderMockCurl();
+  const curl = mockIsGraphQL
+    ? renderGraphQLCurl(mockPath, document.getElementById("intelMockBody").value)
+    : renderMockCurl();
   document.getElementById("intelMockCurl").value = curl;
   try {
     await navigator.clipboard.writeText(curl);
