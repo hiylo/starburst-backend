@@ -214,6 +214,7 @@ func (s *Server) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/intel/run", s.handleIntelRun)
 	mux.HandleFunc("/api/intel/runs", s.handleIntelRuns)
 	mux.HandleFunc("/api/intel/runs/", s.handleIntelRunByID)
+	mux.HandleFunc("/api/intel/results/", s.handleIntelResultRootcause)
 	mux.HandleFunc("/api/intel/findings", s.handleIntelFindings)
 	mux.HandleFunc("/api/intel/findings/", s.handleIntelFindingWaive)
 	mux.HandleFunc("/api/intel/fixes", s.handleIntelFixes)

@@ -2161,6 +2161,49 @@ func TestIntelModuleOverrideApplied(t *testing.T) {
 	}
 }
 
+// TestIntelResultRootcause verifies the per-case attribution endpoint: a stored
+// root-cause report is returned parsed alongside the result.
+func TestIntelResultRootcause(t *testing.T) {
+	s := newTestServer(t)
+	wh := loginWeb(t, s)
+
+	ctx := context.Background()
+	if err := s.store.AddIntelTestResults(ctx, []*store.TestResult{{
+		RunID:         1,
+		Endpoint:      "pkg.TestFoo",
+		Passed:        false,
+		FailuresJSON:  `{"suite":"pkg"}`,
+		RootcauseJSON: `{"type":"panic","hint":"nil pointer dereference"}`,
+	}}); err != nil {
+		t.Fatalf("add result: %v", err)
+	}
+	results, err := s.store.ListIntelTestResults(ctx, 1)
+	if err != nil || len(results) != 1 {
+		t.Fatalf("list results: %v len=%d", err, len(results))
+	}
+
+	rec := s.do(t, http.MethodGet, "/api/intel/results/"+jsonInt(results[0].ID)+"/rootcause", "", wh)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("rootcause status %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Result struct {
+			Endpoint string `json:"endpoint"`
+			Passed   bool   `json:"passed"`
+		} `json:"result"`
+		Rootcause map[string]any `json:"rootcause"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("rootcause parse: %v", err)
+	}
+	if resp.Result.Endpoint != "pkg.TestFoo" || resp.Result.Passed {
+		t.Errorf("result = %+v", resp.Result)
+	}
+	if resp.Rootcause["hint"] != "nil pointer dereference" {
+		t.Errorf("rootcause = %+v", resp.Rootcause)
+	}
+}
+
 func gitRun(t *testing.T, dir string, args ...string) {
 	t.Helper()
 	cmd := exec.Command("git", args...)

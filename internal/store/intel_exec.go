@@ -231,6 +231,20 @@ func (s *sqlStore) AddIntelTestResults(ctx context.Context, results []*TestResul
 	return nil
 }
 
+// GetIntelTestResult loads a single per-case result by id.
+func (s *sqlStore) GetIntelTestResult(ctx context.Context, id int64) (*TestResult, error) {
+	row := s.db.QueryRowContext(ctx, s.q(`
+		SELECT id, run_id, project_id, module_id, case_id, kind, endpoint,
+			passed, failures_json, rootcause_json, created_at
+		FROM test_results WHERE id = ?`), id)
+	r := &TestResult{}
+	if err := row.Scan(&r.ID, &r.RunID, &r.ProjectID, &r.ModuleID, &r.CaseID,
+		&r.Kind, &r.Endpoint, &r.Passed, &r.FailuresJSON, &r.RootcauseJSON, &r.CreatedAt); err != nil {
+		return nil, err
+	}
+	return r, nil
+}
+
 // ListIntelTestResults returns per-case results for a run.
 func (s *sqlStore) ListIntelTestResults(ctx context.Context, runID int64) ([]*TestResult, error) {
 	rows, err := s.db.QueryContext(ctx, s.q(`

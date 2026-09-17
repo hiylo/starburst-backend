@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -171,6 +172,42 @@ func (s *Server) handleIntelRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"run": run})
+}
+
+// handleIntelResultRootcause returns a single per-case result with its parsed
+// root-cause report (the attribution view for a failed case).
+func (s *Server) handleIntelResultRootcause(w http.ResponseWriter, r *http.Request) {
+	if !s.requireWeb(r) {
+		if _, ok := s.requireToken(r); !ok {
+			writeErr(w, http.StatusUnauthorized, "web session or APP token required")
+			return
+		}
+	}
+	if r.Method != http.MethodGet {
+		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	rest := strings.TrimPrefix(r.URL.Path, "/api/intel/results/")
+	rest = strings.TrimSuffix(rest, "/")
+	rest = strings.TrimSuffix(rest, "/rootcause")
+	rest = strings.TrimSuffix(rest, "/")
+	id, err := strconv.ParseInt(rest, 10, 64)
+	if err != nil || id <= 0 {
+		writeErr(w, http.StatusBadRequest, "invalid result id")
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+	res, err := s.store.GetIntelTestResult(ctx, id)
+	if err != nil {
+		writeErr(w, http.StatusNotFound, "result not found")
+		return
+	}
+	var rootcause any
+	if res.RootcauseJSON != "" {
+		_ = json.Unmarshal([]byte(res.RootcauseJSON), &rootcause)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"result": res, "rootcause": rootcause})
 }
 
 // handleIntelRuns lists test runs for a project, newest first.

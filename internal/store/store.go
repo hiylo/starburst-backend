@@ -289,6 +289,8 @@ type Store interface {
 	AddIntelTestResults(ctx context.Context, results []*TestResult) error
 	// ListIntelTestResults returns results for a run.
 	ListIntelTestResults(ctx context.Context, runID int64) ([]*TestResult, error)
+	// GetIntelTestResult loads a single per-case result by id.
+	GetIntelTestResult(ctx context.Context, id int64) (*TestResult, error)
 
 	// ---- Test Intelligence: issues & features ----
 
