@@ -195,7 +195,7 @@ func (s *Server) handleIntelFeatureChat(w http.ResponseWriter, r *http.Request) 
 	label := ""
 	if s.llm != nil && s.llm.Enabled() {
 		system := "你是测试智能归因助手。基于给定上下文（功能点接口契约、最近运行实测结果、挂载问题）回答用户关于该功能点的问题，并给出结论依据。上下文全部来源于仓库自动分析。"
-		answer = s.llmComplete(ctx, system, contextJSON+"\n\n问题："+req.Question)
+		answer = cleanLLMText(s.llmComplete(ctx, system, contextJSON+"\n\n问题："+req.Question), llmTextMax)
 		label = "ai"
 	} else {
 		answer = "（未配置编排 LLM，已保存上下文；配置后可自动回答）"

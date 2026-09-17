@@ -285,7 +285,7 @@ func (s *Server) runSingleAIRule(ctx context.Context, projectID int64, rule *sto
 	if !result.Find {
 		return false, nil
 	}
-	reason := strings.TrimSpace(result.Reason)
+	reason := cleanLLMText(result.Reason, 500)
 	if reason == "" {
 		reason = rule.Name + " 命中"
 	}

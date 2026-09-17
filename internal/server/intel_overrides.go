@@ -215,5 +215,27 @@ func (s *Server) handleIntelOverrideSuggest(w http.ResponseWriter, r *http.Reque
 		writeErr(w, http.StatusInternalServerError, "LLM 建议失败: "+err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"drafts": draft.Overrides})
+	// Deterministic gate: reject drafts without an anchorable target/field and a
+	// final manual value; cap the batch and field lengths.
+	valid := make([]struct {
+		Target      string `json:"target"`
+		RowKey      string `json:"rowKey"`
+		Field       string `json:"field"`
+		AutoValue   string `json:"autoValue"`
+		ManualValue string `json:"manualValue"`
+		Reason      string `json:"reason"`
+	}, 0, len(draft.Overrides))
+	for _, o := range draft.Overrides {
+		o.Target = cleanLLMText(o.Target, 64)
+		o.RowKey = cleanLLMText(o.RowKey, 128)
+		o.Field = cleanLLMText(o.Field, 64)
+		o.AutoValue = cleanLLMText(o.AutoValue, 200)
+		o.ManualValue = cleanLLMText(o.ManualValue, 200)
+		o.Reason = cleanLLMText(o.Reason, 300)
+		if o.Target == "" || o.Field == "" || o.ManualValue == "" {
+			continue
+		}
+		valid = append(valid, o)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"drafts": capLLMList(valid, 20)})
 }

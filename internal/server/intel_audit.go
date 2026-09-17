@@ -338,6 +338,7 @@ func (s *Server) generateFixForFinding(ctx context.Context, projectID, findingID
 		return nil, err
 	}
 	proposal.OldText = strings.TrimSpace(proposal.OldText)
+	proposal.NewText = cleanLLMText(proposal.NewText, 4000)
 	if proposal.OldText == "" || proposal.OldText == proposal.NewText {
 		return nil, fmt.Errorf("model returned no usable edit")
 	}
@@ -356,7 +357,7 @@ func (s *Server) generateFixForFinding(ctx context.Context, projectID, findingID
 	if err != nil {
 		return nil, err
 	}
-	title := strings.TrimSpace(proposal.Title)
+	title := cleanLLMText(proposal.Title, 200)
 	if title == "" {
 		title = finding.Summary
 	}
