@@ -2264,6 +2264,55 @@ public class UserEntity { private Long id; private String nickname; }`)
 	}
 }
 
+// TestIntelRunAll verifies the one-click regression: every module's test
+// command is executed and aggregated (a trivial go module passes with zero
+// cases since there are no test functions).
+func TestIntelRunAll(t *testing.T) {
+	s := newTestServer(t)
+	wh := loginWeb(t, s)
+
+	root := t.TempDir()
+	writeTestFile(t, filepath.Join(root, "go.mod"), "module demo\n\ngo 1.22\n")
+	writeTestFile(t, filepath.Join(root, "main.go"), "package main\nfunc main() {}\n")
+
+	rec := s.do(t, http.MethodPost, "/api/intel/projects",
+		`{"name":"demo","source":"local","localPath":"`+filepath.ToSlash(root)+`"}`, wh)
+	var proj struct {
+		ID int64 `json:"id"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &proj); err != nil || proj.ID == 0 {
+		t.Fatalf("create project: %s", rec.Body.String())
+	}
+	rec = s.do(t, http.MethodPost, "/api/intel/analyze",
+		`{"projectId":`+jsonInt(proj.ID)+`}`, wh)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("analyze status %d: %s", rec.Code, rec.Body.String())
+	}
+
+	rec = s.do(t, http.MethodPost, "/api/intel/run-all",
+		`{"projectId":`+jsonInt(proj.ID)+`}`, wh)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("run-all status %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Runs []struct {
+			Status string `json:"status"`
+		} `json:"runs"`
+		Total  int `json:"total"`
+		Passed int `json:"passed"`
+		Failed int `json:"failed"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("run-all parse: %v", err)
+	}
+	if resp.Total != 1 || len(resp.Runs) != 1 {
+		t.Fatalf("run-all total/runs = %d/%d, want 1/1", resp.Total, len(resp.Runs))
+	}
+	if resp.Passed != 1 || resp.Failed != 0 {
+		t.Errorf("run-all passed/failed = %d/%d, want 1/0", resp.Passed, resp.Failed)
+	}
+}
+
 func gitRun(t *testing.T, dir string, args ...string) {
 	t.Helper()
 	cmd := exec.Command("git", args...)

@@ -210,6 +210,59 @@ func (s *Server) handleIntelResultRootcause(w http.ResponseWriter, r *http.Reque
 	writeJSON(w, http.StatusOK, map[string]any{"result": res, "rootcause": rootcause})
 }
 
+// handleIntelRunAll runs the deterministic test command across every module of
+// a project (one-click regression) and aggregates the per-module runs.
+func (s *Server) handleIntelRunAll(w http.ResponseWriter, r *http.Request) {
+	if !s.requireWeb(r) {
+		if _, ok := s.requireToken(r); !ok {
+			writeErr(w, http.StatusUnauthorized, "web session or APP token required")
+			return
+		}
+	}
+	if r.Method != http.MethodPost {
+		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	var req struct {
+		ProjectID int64 `json:"projectId"`
+	}
+	if err := readJSONLimited(w, r, &req); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if req.ProjectID <= 0 {
+		writeErr(w, http.StatusBadRequest, "projectId is required")
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Minute)
+	defer cancel()
+	mods, err := s.store.ListIntelModules(ctx, req.ProjectID)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "load modules failed")
+		return
+	}
+	runs := make([]*store.TestRun, 0, len(mods))
+	errors := make([]map[string]string, 0)
+	passed, failed := 0, 0
+	for _, m := range mods {
+		run, err := s.runIntelTests(ctx, req.ProjectID, m.ID, 0)
+		if err != nil {
+			errors = append(errors, map[string]string{"module": m.RelPath, "error": err.Error()})
+			failed++
+			continue
+		}
+		runs = append(runs, run)
+		if run.Status == "passed" {
+			passed++
+		} else {
+			failed++
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"runs": runs, "errors": errors, "total": len(mods), "passed": passed, "failed": failed,
+	})
+}
+
 // handleIntelRuns lists test runs for a project, newest first.
 func (s *Server) handleIntelRuns(w http.ResponseWriter, r *http.Request) {
 	if !s.requireWeb(r) {
