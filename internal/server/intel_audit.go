@@ -163,6 +163,7 @@ func (s *Server) handleIntelFixAction(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusInternalServerError, "应用修复失败: "+err.Error())
 			return
 		}
+		s.markFindingFixed(ctx, fx.FindingID)
 	case "reject":
 		fx.Status = "rejected"
 	case "rollback":
@@ -229,6 +230,20 @@ func (s *Server) applyIntelFix(ctx context.Context, rec *store.IntelFix) error {
 	rec.AppliedBackup = string(buf)
 	rec.Status = "applied"
 	return nil
+}
+
+// markFindingFixed closes the loop when a fix is applied: the linked finding
+// moves to fixed so the audit view reflects the human-confirmed remediation.
+func (s *Server) markFindingFixed(ctx context.Context, findingID int64) {
+	if findingID <= 0 {
+		return
+	}
+	f, err := s.store.GetIntelFinding(ctx, findingID)
+	if err != nil {
+		return
+	}
+	f.Status = "fixed"
+	_ = s.store.UpdateIntelFinding(ctx, f)
 }
 
 // rollbackIntelFix restores the pre-apply content of every file a fix touched.
