@@ -1506,6 +1506,141 @@ public class OrderController {
 	}
 }
 
+// TestIntelAnalyzeIncremental verifies the module add/remove incremental path:
+// adding an associated source repo appends its module's contracts without
+// wiping the untouched main-module data, and removing it deletes that module's
+// data again. The auto-incremental analyzes run in background (fired by the
+// sources PUT handler), so the test polls for the async side-effects.
+func TestIntelAnalyzeIncremental(t *testing.T) {
+	s := newTestServer(t)
+	wh := loginWeb(t, s)
+
+	mainRoot := t.TempDir()
+	writeTestFile(t, filepath.Join(mainRoot, "pom.xml"), `<project></project>`)
+	writeTestFile(t, filepath.Join(mainRoot, "src/main/java/demo/UserController.java"), `package demo;
+import org.springframework.web.bind.annotation.*;
+@RestController
+@RequestMapping("/api/users")
+public class UserController {
+    @GetMapping("/list")
+    public java.util.List<Object> list() { return null; }
+}`)
+
+	rec := s.do(t, http.MethodPost, "/api/intel/projects",
+		`{"name":"inc","source":"local","localPath":"`+filepath.ToSlash(mainRoot)+`"}`, wh)
+	var proj struct {
+		ID int64 `json:"id"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &proj); err != nil || proj.ID == 0 {
+		t.Fatalf("create project: %s", rec.Body.String())
+	}
+	// 显式全量分析（等创建时的后台首次分析完成后执行，保证结果是稳定的）。
+	rec = s.do(t, http.MethodPost, "/api/intel/analyze", `{"projectId":`+jsonInt(proj.ID)+`}`, wh)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("analyze status %d: %s", rec.Code, rec.Body.String())
+	}
+
+	projectModules := func() []string {
+		r := s.do(t, http.MethodGet, "/api/intel/projects/"+jsonInt(proj.ID), "", wh)
+		var d struct {
+			Modules []struct {
+				RelPath string `json:"relPath"`
+			} `json:"modules"`
+		}
+		_ = json.Unmarshal(r.Body.Bytes(), &d)
+		out := make([]string, 0, len(d.Modules))
+		for _, mod := range d.Modules {
+			out = append(out, mod.RelPath)
+		}
+		return out
+	}
+	endpointPaths := func() []string {
+		r := s.do(t, http.MethodGet, "/api/intel/endpoints?projectId="+jsonInt(proj.ID), "", wh)
+		var d struct {
+			Endpoints []struct {
+				Path string `json:"path"`
+			} `json:"endpoints"`
+		}
+		_ = json.Unmarshal(r.Body.Bytes(), &d)
+		out := make([]string, 0, len(d.Endpoints))
+		for _, e := range d.Endpoints {
+			out = append(out, e.Path)
+		}
+		return out
+	}
+	hasRel := func(mods []string, target string) bool {
+		for _, m := range mods {
+			if strings.HasPrefix(m, target) {
+				return true
+			}
+		}
+		return false
+	}
+	hasPath := func(paths []string, sub string) bool {
+		for _, p := range paths {
+			if strings.Contains(p, sub) {
+				return true
+			}
+		}
+		return false
+	}
+	pollUntil := func(cond func() bool, what string) {
+		t.Helper()
+		deadline := time.Now().Add(30 * time.Second)
+		for time.Now().Before(deadline) {
+			if cond() {
+				return
+			}
+			time.Sleep(200 * time.Millisecond)
+		}
+		t.Fatalf("timed out waiting for %s (modules=%v endpoints=%v)", what, projectModules(), endpointPaths())
+	}
+
+	// 主仓库全量分析后：主模块 + 主端点。
+	if !hasRel(projectModules(), ".") {
+		t.Fatalf("main module missing after analyze: %v", projectModules())
+	}
+	if !hasPath(endpointPaths(), "/api/users") {
+		t.Fatalf("main endpoint missing after analyze: %v", endpointPaths())
+	}
+
+	// 添加关联源码仓库 → 增量分析应把 @web 模块与其契约追加进来，且不动主模块数据。
+	webRoot := t.TempDir()
+	writeTestFile(t, filepath.Join(webRoot, "pom.xml"), `<project></project>`)
+	writeTestFile(t, filepath.Join(webRoot, "src/main/java/web/OrderController.java"), `package web;
+import org.springframework.web.bind.annotation.*;
+@RestController
+@RequestMapping("/api/orders")
+public class OrderController {
+    @GetMapping("/list")
+    public java.util.List<Object> list() { return null; }
+}`)
+	rec = s.do(t, http.MethodPut, "/api/intel/projects/"+jsonInt(proj.ID)+"/sources",
+		`{"sources":[{"endName":"web","source":"local","localPath":"`+filepath.ToSlash(webRoot)+`"}]}`, wh)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("put sources status %d: %s", rec.Code, rec.Body.String())
+	}
+	pollUntil(func() bool {
+		return hasRel(projectModules(), "@web/") && hasPath(endpointPaths(), "/api/orders")
+	}, "associated web module scanned")
+	if !hasRel(projectModules(), ".") || !hasPath(endpointPaths(), "/api/users") {
+		t.Fatalf("main module data lost after incremental add: modules=%v endpoints=%v",
+			projectModules(), endpointPaths())
+	}
+
+	// 移除关联源码 → 增量应删除 @web 模块及其契约，主仓库数据保留。
+	rec = s.do(t, http.MethodPut, "/api/intel/projects/"+jsonInt(proj.ID)+"/sources", `{"sources":[]}`, wh)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("clear sources status %d: %s", rec.Code, rec.Body.String())
+	}
+	pollUntil(func() bool {
+		return !hasRel(projectModules(), "@web/") && !hasPath(endpointPaths(), "/api/orders")
+	}, "associated web module removed")
+	if !hasPath(endpointPaths(), "/api/users") {
+		t.Fatalf("main endpoint missing after incremental remove: %v", endpointPaths())
+	}
+}
+
 // TestIntelEnvExternalConfig verifies an externally provided middleware
 // endpoint: it is probed once, persisted with provider=external, and survives
 // subsequent re-probes (the gate treats it as ready when reachable).

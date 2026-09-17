@@ -47,6 +47,9 @@ type Server struct {
 	// touchMu 保护 touchSeen，实现 TouchToken 写库节流。
 	touchMu   sync.Mutex
 	touchSeen map[string]time.Time
+	// intelAnalyzeMu 串行化同一项目的分析（全量/增量），避免创建与保存流程
+	// 触发重入时并发扫描同一仓库。
+	intelAnalyzeMu sync.Map // int64 projectID → *sync.Mutex
 	// sessionStatuses 是采集器从 session.status/idle 事件聚合的最新会话状态
 	//（sessionId → "busy"|"idle"|"retry"|"error"），用于给 App 提供比上游
 	// /session/status 快照更准确、更完整的状态视图。
