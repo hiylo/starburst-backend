@@ -155,6 +155,7 @@ func (s *Server) handleIntelRun(w http.ResponseWriter, r *http.Request) {
 		ProjectID int64 `json:"projectId"`
 		ModuleID  int64 `json:"moduleId"`
 		NodeID    int64 `json:"node"`
+		Force     bool  `json:"force"`
 	}
 	if err := readJSONLimited(w, r, &req); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid request body")
@@ -166,7 +167,7 @@ func (s *Server) handleIntelRun(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Minute)
 	defer cancel()
-	run, err := s.runIntelTests(ctx, req.ProjectID, req.ModuleID, req.NodeID)
+	run, err := s.runIntelTests(ctx, req.ProjectID, req.ModuleID, req.NodeID, req.Force)
 	if err != nil {
 		log.Printf("intel run project %d: %v", req.ProjectID, err)
 		writeErr(w, http.StatusInternalServerError, "run failed: "+err.Error())
@@ -226,6 +227,7 @@ func (s *Server) handleIntelRunAll(w http.ResponseWriter, r *http.Request) {
 	}
 	var req struct {
 		ProjectID int64 `json:"projectId"`
+		Force     bool  `json:"force"`
 	}
 	if err := readJSONLimited(w, r, &req); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid request body")
@@ -246,7 +248,7 @@ func (s *Server) handleIntelRunAll(w http.ResponseWriter, r *http.Request) {
 	errors := make([]map[string]string, 0)
 	passed, failed := 0, 0
 	for _, m := range mods {
-		run, err := s.runIntelTests(ctx, req.ProjectID, m.ID, 0)
+		run, err := s.runIntelTests(ctx, req.ProjectID, m.ID, 0, req.Force)
 		if err != nil {
 			errors = append(errors, map[string]string{"module": m.RelPath, "error": err.Error()})
 			failed++
@@ -325,7 +327,7 @@ func (s *Server) handleIntelRunByID(w http.ResponseWriter, r *http.Request) {
 // parses the framework report and persists the run + per-case results, turning
 // failures into intel_issues. When nodeID > 0 the command is routed over SSH to
 // a remote execution node instead of the local machine. It returns the run.
-func (s *Server) runIntelTests(ctx context.Context, projectID, moduleID, nodeID int64) (*store.TestRun, error) {
+func (s *Server) runIntelTests(ctx context.Context, projectID, moduleID, nodeID int64, force bool) (*store.TestRun, error) {
 	p, err := s.store.GetIntelProject(ctx, projectID)
 	if err != nil {
 		return nil, err
@@ -373,11 +375,14 @@ func (s *Server) runIntelTests(ctx context.Context, projectID, moduleID, nodeID 
 			return nil, fmt.Errorf("远程执行目前仅支持 go 报告（stdout 自包含）；%s 需本机运行", reportKind)
 		}
 		remoteNode = node
-	} else if err := s.envGate(ctx, projectID); err != nil {
-		// Environment gate (§3.6): reject the run before executing when required
-		// middleware/toolchains are missing, with a per-item list. Local runs are
-		// gated; routed runs rely on the node's capability labels instead.
-		return nil, err
+	} else if !force {
+		if err := s.envGate(ctx, projectID); err != nil {
+			// Environment gate (§3.6): reject the run before executing when
+			// required middleware/toolchains are missing, with a per-item list.
+			// Local runs are gated unless force bypasses; routed runs rely on the
+			// node's capability labels instead.
+			return nil, err
+		}
 	}
 
 	now := time.Now()

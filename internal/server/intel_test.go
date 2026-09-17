@@ -1078,6 +1078,17 @@ func TestIntelEnvGateBlocksRun(t *testing.T) {
 	if !strings.Contains(rec.Body.String(), "环境门禁") {
 		t.Errorf("run failure should mention 环境门禁: %s", rec.Body.String())
 	}
+
+	// Force bypasses the gate: the run proceeds (outcome depends on the local
+	// toolchain, but the error must NOT be the gate message).
+	rec = s.do(t, http.MethodPost, "/api/intel/run",
+		`{"projectId":`+jsonInt(proj.ID)+`,"force":true}`, wh)
+	if rec.Code == 200 {
+		return // force allowed a passing run
+	}
+	if strings.Contains(rec.Body.String(), "环境门禁") {
+		t.Errorf("force run should bypass the gate: %s", rec.Body.String())
+	}
 }
 
 // TestIntelFixApplyAndRollback verifies the fix workflow end-to-end: a proposed
