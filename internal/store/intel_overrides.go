@@ -9,20 +9,20 @@ import (
 // (module role, feature name, env version, ...). Pending rows form the
 // 待确认队列; confirm/apply finalizes them; superseded/rejected retire them.
 type IntelOverride struct {
-	ID           int64     `json:"id"`
-	ProjectID    int64     `json:"projectId"`
-	ModuleID     int64     `json:"moduleId"`
-	Target       string    `json:"target"`  // e.g. module | feature | env_requirement
-	RowKey       string    `json:"rowKey"`  // the auto row's natural key
-	Field        string    `json:"field"`   // e.g. role | name | version
-	AutoValueJSON string   `json:"autoValueJson"`
-	ManualValue  string    `json:"manualValue"`
-	Confidence   string    `json:"confidence"` // high | medium | low
-	Status       string    `json:"status"`     // pending | applied | superseded | rejected
-	Source       string    `json:"source"`     // table | manual | llm-suggest
-	Anchor       string    `json:"anchor"`     // file:line / commit provenance
-	CreatedAt    time.Time `json:"createdAt"`
-	UpdatedAt    time.Time `json:"updatedAt"`
+	ID            int64     `json:"id"`
+	ProjectID     int64     `json:"projectId"`
+	ModuleID      int64     `json:"moduleId"`
+	Target        string    `json:"target"` // e.g. module | feature | env_requirement
+	RowKey        string    `json:"rowKey"` // the auto row's natural key
+	Field         string    `json:"field"`  // e.g. role | name | version
+	AutoValueJSON string    `json:"autoValueJson"`
+	ManualValue   string    `json:"manualValue"`
+	Confidence    string    `json:"confidence"` // high | medium | low
+	Status        string    `json:"status"`     // pending | applied | superseded | rejected
+	Source        string    `json:"source"`     // table | manual | llm-suggest
+	Anchor        string    `json:"anchor"`     // file:line / commit provenance
+	CreatedAt     time.Time `json:"createdAt"`
+	UpdatedAt     time.Time `json:"updatedAt"`
 }
 
 // CreateIntelOverride inserts one override (usually pending) and fills its id.

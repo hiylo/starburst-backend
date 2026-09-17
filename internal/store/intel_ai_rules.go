@@ -12,9 +12,9 @@ type IntelAIRule struct {
 	ID           int64     `json:"id"`
 	Name         string    `json:"name"`
 	Prompt       string    `json:"prompt"`
-	Scope        string    `json:"scope"`        // all | affected
-	Target       string    `json:"target"`       // risk | performance | compliance
-	Severity     string    `json:"severity"`     // high | medium | low
+	Scope        string    `json:"scope"`    // all | affected
+	Target       string    `json:"target"`   // risk | performance | compliance
+	Severity     string    `json:"severity"` // high | medium | low
 	Enabled      bool      `json:"enabled"`
 	SortOrder    int       `json:"sortOrder"`
 	PolishedFrom string    `json:"polishedFrom"`

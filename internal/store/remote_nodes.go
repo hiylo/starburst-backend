@@ -9,18 +9,18 @@ import (
 // (ios-xcode / android-sdk / linux-docker) used to route test runs off the
 // local machine when the environment gate cannot be satisfied locally.
 type RemoteNode struct {
-	ID          int64      `json:"id"`
-	Name        string     `json:"name"`
-	Host        string     `json:"host"`
-	Port        int        `json:"port"`
-	User        string     `json:"user"`
-	Auth        string     `json:"-"`
-	HostKeyFP   string     `json:"hostKeyFp"`
-	Capabilities string    `json:"capabilities"`
-	Reachable   bool       `json:"reachable"`
-	LastCheckAt *time.Time `json:"lastCheckAt"`
-	Note        string     `json:"note"`
-	CreatedAt   time.Time  `json:"createdAt"`
+	ID           int64      `json:"id"`
+	Name         string     `json:"name"`
+	Host         string     `json:"host"`
+	Port         int        `json:"port"`
+	User         string     `json:"user"`
+	Auth         string     `json:"-"`
+	HostKeyFP    string     `json:"hostKeyFp"`
+	Capabilities string     `json:"capabilities"`
+	Reachable    bool       `json:"reachable"`
+	LastCheckAt  *time.Time `json:"lastCheckAt"`
+	Note         string     `json:"note"`
+	CreatedAt    time.Time  `json:"createdAt"`
 }
 
 // ListRemoteNodes returns all remote nodes, newest first.
