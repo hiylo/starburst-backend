@@ -2972,6 +2972,24 @@ async function checkIntelContract() {
   box.innerHTML = rows;
 }
 
+async function checkIntelContractsBatch() {
+  if (!intelCurrentProject) return;
+  const base = prompt("被测服务地址（如 http://localhost:8080）", "http://localhost:8080");
+  if (!base) return;
+  const box = document.getElementById("intelContractBatchResult");
+  if (box) box.textContent = "一键校验中（逐接口调用 + 契约比对）…";
+  const res = await api("/api/intel/contracts/check-batch", { method: "POST", headers: appHeaders(), body: JSON.stringify({ projectId: intelCurrentProject, baseUrl: base }) });
+  const data = await res.json();
+  if (!res.ok) { if (box) box.textContent = data.error || "校验失败"; return; }
+  if (!box) return;
+  const lines = (data.results || []).map(r => {
+    const ok = r.ok && (!r.contract || r.contract.failed === 0);
+    const c = r.contract ? `契约 ${r.contract.passed}/${(r.contract.passed || 0) + (r.contract.failed || 0)}` : "无契约";
+    return `<div class="mono" style="font-size:11px;color:${ok ? "var(--green,#16a34a)" : "var(--red,#dc2626)"}">${ok ? "✓" : "✗"} ${escapeHtml((r.method || "") + " " + (r.path || ""))} → ${r.status || "ERR"} ${escapeHtml(c)}${r.error ? " · " + escapeHtml(r.error) : ""}</div>`;
+  }).join("");
+  box.innerHTML = `<div style="margin-bottom:6px">接口 ${data.total || 0} · 可达 ${data.reachable || 0} · 契约通过 ${data.passed || 0} / 失败 ${data.failed || 0}</div>` + lines;
+}
+
 /* ---------- 分析结果 Tab：功能点 / 用例 / 审计 / 问题 / 修复 / 运行 ---------- */
 const SEV_LABELS = { critical: "严重", high: "高", medium: "中", low: "低" };
 

@@ -469,9 +469,14 @@
                 </div>
               </div>
               <div class="intel-panel hidden" id="intelPanel-endpoints">
+                <div class="row" style="justify-content:space-between;align-items:center;margin-bottom:var(--sp-sm)">
+                  <div class="muted" style="font-size:12px">接口契约清单（含 DTO 字段契约），可对被测服务做一键契约校验</div>
+                  <button class="ghost sm" onclick="checkIntelContractsBatch()">一键校验契约</button>
+                </div>
                 <div class="table-wrap">
                   <table id="intelEndpointTable"><thead><tr><th>方法</th><th>路径</th><th>网关路由</th><th>返回类型</th><th>请求体</th><th>来源</th><th>操作</th></tr></thead><tbody></tbody></table>
                 </div>
+                <div id="intelContractBatchResult" class="muted" style="font-size:12px;margin-top:var(--sp-sm)"></div>
               </div>
               <div class="intel-panel hidden" id="intelPanel-entities">
                 <div id="intelEntityList" style="display:flex;flex-direction:column;gap:var(--sp-sm)"></div>
