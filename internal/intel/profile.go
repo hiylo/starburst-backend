@@ -5,6 +5,8 @@
 package intel
 
 import (
+	"encoding/json"
+	"os"
 	"path/filepath"
 	"strings"
 )
@@ -28,6 +30,7 @@ var profiles = []*Profile{
 	{Type: "go", Role: "backend", Anchors: []string{"go.mod"}},
 	{Type: "web", Role: "web", Anchors: []string{"package.json"}},
 	{Type: "node", Role: "service", Anchors: []string{"package.json"}},
+	{Type: "bff", Role: "bff", Anchors: []string{"schema.graphqls"}},
 }
 
 // hasAnchor reports whether any file in files (relative paths) matches the
@@ -44,41 +47,78 @@ func (p *Profile) hasAnchor(files []string) bool {
 	return false
 }
 
-// DetectType infers the module type from its relative file set. The registry is
-// consulted in a fixed priority order; the returned type is empty when nothing
-// matches (unknown/static content directory).
+// DetectType infers the module type from its anchor file names alone (no file
+// content). A bare package.json maps to "node" (the generic service case);
+// callers that have a directory available should use DetectTypeInDir so a
+// vue/react manifest can refine the result to "web". The returned type is empty
+// when nothing matches (unknown/static content directory).
 func DetectType(files []string) string {
-	hasWebDep := false
-	hasGoDep := false
+	hasPkg := false
 	for _, f := range files {
-		if strings.HasPrefix(filepath.Base(f), "package.json") {
-			hasWebDep = true
-		}
-		if filepath.Base(f) == "go.mod" {
-			hasGoDep = true
+		if filepath.Base(f) == "package.json" {
+			hasPkg = true
 		}
 	}
+	// Non-package anchors win in registry priority order. go.mod sits ahead of
+	// package.json so Go repos that carry a package.json for frontend tooling
+	// are still recognized as Go.
 	for _, p := range profiles {
-		if !p.hasAnchor(files) {
+		if p.Type == "web" || p.Type == "node" {
 			continue
 		}
-		// package.json marks web (vue/react) only when the dependency set says
-		// so; otherwise it is a generic node service.
-		if p.Type == "web" || p.Type == "node" {
-			if hasGoDep {
-				continue
-			}
-			if p.Type == "web" && !hasWebDep {
-				continue
-			}
+		if p.hasAnchor(files) {
+			return p.Type
 		}
-		return p.Type
 	}
-	if hasGoDep {
-		return "go"
-	}
-	if hasWebDep {
+	if hasPkg {
 		return "node"
 	}
 	return ""
+}
+
+// DetectTypeInDir infers the module type for a directory, reading package.json
+// content to distinguish a Web (vue/react) module from a generic Node service.
+func DetectTypeInDir(dir string, anchors []string) string {
+	t := DetectType(anchorNames(anchors))
+	if t != "node" {
+		return t
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "package.json"))
+	if err != nil {
+		return "node"
+	}
+	if packageJSONIsWeb(data) {
+		return "web"
+	}
+	return "node"
+}
+
+// packageJSONIsWeb reports whether a package.json manifest declares a vue or
+// react dependency (in dependencies or devDependencies).
+func packageJSONIsWeb(data []byte) bool {
+	var manifest struct {
+		Dependencies    map[string]string `json:"dependencies"`
+		DevDependencies map[string]string `json:"devDependencies"`
+	}
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		return false
+	}
+	for name := range manifest.Dependencies {
+		if isWebFramework(name) {
+			return true
+		}
+	}
+	for name := range manifest.DevDependencies {
+		if isWebFramework(name) {
+			return true
+		}
+	}
+	return false
+}
+
+// isWebFramework reports whether a package name refers to a vue or react
+// framework (vue, @vue/*, react, react-dom, @react-*...).
+func isWebFramework(name string) bool {
+	lower := strings.ToLower(name)
+	return strings.Contains(lower, "vue") || strings.Contains(lower, "react")
 }

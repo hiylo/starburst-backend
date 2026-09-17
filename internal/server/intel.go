@@ -482,6 +482,10 @@ func (s *Server) runIntelAnalyze(ctx context.Context, projectID int64) error {
 		return err
 	}
 	mods, _ = s.store.ListIntelModules(ctx, projectID)
+	p.CommandsJSON = intel.ProjectCommandsJSON(mods)
+	if err := s.store.UpdateIntelProject(ctx, p); err != nil {
+		log.Printf("intel project commands %d: %v", projectID, err)
+	}
 	var allEndpoints []*store.IntelEndpoint
 	var allEntities []*store.IntelEntity
 	var allCases []*store.TestCase

@@ -64,6 +64,36 @@ func TestDetectModulesMixedRepo(t *testing.T) {
 	}
 }
 
+func TestDetectModulesWebNodeBff(t *testing.T) {
+	root := t.TempDir()
+	writeTree(t, root, map[string]string{
+		"web/package.json":    `{"dependencies":{"react":"18.0.0"}}`,
+		"vue/package.json":    `{"dependencies":{"vue":"3.0.0"}}`,
+		"node/package.json":   `{"dependencies":{"express":"4.18.0"}}`,
+		"bff/schema.graphqls": `type Query { ping: String }`,
+	})
+	mods, err := DetectModules(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	types := map[string]string{}
+	for _, m := range mods {
+		types[m.RelPath] = m.KindType
+	}
+	if types["web"] != "web" {
+		t.Errorf("web type = %q, want web", types["web"])
+	}
+	if types["vue"] != "web" {
+		t.Errorf("vue type = %q, want web", types["vue"])
+	}
+	if types["node"] != "node" {
+		t.Errorf("node type = %q, want node", types["node"])
+	}
+	if types["bff"] != "bff" {
+		t.Errorf("bff type = %q, want bff", types["bff"])
+	}
+}
+
 func TestScanModuleJavaContracts(t *testing.T) {
 	root := t.TempDir()
 	writeTree(t, root, map[string]string{

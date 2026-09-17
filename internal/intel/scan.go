@@ -63,15 +63,16 @@ func registerDir(dir, rel string, mods map[string]*store.IntelModule) {
 	if isContainerDir(dir) {
 		return
 	}
-	t := DetectType(anchorNames(anchors))
+	t := DetectTypeInDir(dir, anchors)
 	if t == "" {
 		return
 	}
 	mods[rel] = &store.IntelModule{
-		RelPath:   rel,
-		KindType:  t,
-		KindRole:  roleForType(t),
-		BuildTool: buildToolForNames(anchors),
+		RelPath:      rel,
+		KindType:     t,
+		KindRole:     roleForType(t),
+		BuildTool:    buildToolForNames(anchors),
+		CommandsJSON: CommandsJSONForType(t),
 	}
 }
 
@@ -119,7 +120,8 @@ func anchorsInDir(dir string) []string {
 
 // buildAnchors lists the filesystem anchors evaluated for every directory.
 var buildAnchors = []string{"pom.xml", "build.gradle", "build.gradle.kts",
-	"settings.gradle", "settings.gradle.kts", "go.mod", "package.json", "Package.swift"}
+	"settings.gradle", "settings.gradle.kts", "go.mod", "package.json", "Package.swift",
+	"schema.graphqls"}
 
 func anchorNames(paths []string) []string {
 	out := make([]string, 0, len(paths))
@@ -145,6 +147,8 @@ func buildToolForNames(anchors []string) string {
 			return "swiftpm"
 		case strings.HasSuffix(a, ".xcodeproj") || strings.HasSuffix(a, ".xcworkspace"):
 			return "xcode"
+		case a == "schema.graphqls":
+			return "graphql"
 		}
 	}
 	return ""
@@ -179,8 +183,10 @@ func roleForType(t string) string {
 		return "backend"
 	case "web":
 		return "web"
+	case "bff":
+		return "bff"
 	default:
-		return ""
+		return "unknown"
 	}
 }
 
