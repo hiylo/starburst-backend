@@ -37,9 +37,9 @@ func TestDetectTypeGo(t *testing.T) {
 func TestDetectModulesMixedRepo(t *testing.T) {
 	root := t.TempDir()
 	writeTree(t, root, map[string]string{
-		"pom.xml":                          `<project></project>`,
-		"services/order/pom.xml":           `<project></project>`,
-		"clients/android/build.gradle.kts": `plugins { id("com.android.application") }`,
+		"pom.xml":                                 `<project></project>`,
+		"services/order/pom.xml":                  `<project></project>`,
+		"clients/android/build.gradle.kts":        `plugins { id("com.android.application") }`,
 		"app/ios/MyApp.xcodeproj/project.pbxproj": ``,
 	})
 	mods, err := DetectModules(root)
@@ -216,9 +216,9 @@ public interface ShopProvider {
 
 func TestToSnake(t *testing.T) {
 	cases := map[string]string{
-		"id":           "id",
-		"nickname":     "nickname",
-		"realName":     "real_name",
+		"id":            "id",
+		"nickname":      "nickname",
+		"realName":      "real_name",
 		"userProfileId": "user_profile_id",
 	}
 	for in, want := range cases {
