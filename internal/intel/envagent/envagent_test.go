@@ -7,7 +7,7 @@ import (
 )
 
 func TestContainerRunArgs(t *testing.T) {
-	args := containerRunArgs(3, "mysql", "mysql:8", 3306,
+	args := containerRunArgs(3, "mysql", "mysql:8", 3306, 3306,
 		[]string{"MYSQL_ROOT_PASSWORD=abc"}, nil)
 	joined := strings.Join(args, " ")
 	for _, want := range []string{"run", "-d", "--name", "intel-3-mysql",
@@ -17,7 +17,15 @@ func TestContainerRunArgs(t *testing.T) {
 		}
 	}
 
-	redis := containerRunArgs(3, "redis", "redis:7", 6379,
+	// A host port differing from the container port (collision offset).
+	off := containerRunArgs(3, "redis", "redis:7", 16379, 6379,
+		[]string{"REDIS_PASSWORD=pw"}, []string{"redis-server", "--requirepass", "pw"})
+	oj := strings.Join(off, " ")
+	if !strings.Contains(oj, "-p 16379:6379") {
+		t.Errorf("redis args missing offset mapping in: %s", oj)
+	}
+
+	redis := containerRunArgs(3, "redis", "redis:7", 6379, 6379,
 		[]string{"REDIS_PASSWORD=pw"}, []string{"redis-server", "--requirepass", "pw"})
 	rj := strings.Join(redis, " ")
 	for _, want := range []string{"-p", "6379:6379", "redis:7", "redis-server", "--requirepass", "pw"} {
@@ -93,5 +101,38 @@ func TestToolchainSet(t *testing.T) {
 	}
 	if Toolchain("mysql") {
 		t.Error("mysql should not be a toolchain")
+	}
+}
+
+func TestToolchainInstallCommand(t *testing.T) {
+	cases := []struct {
+		service, version string
+		want             string
+	}{
+		{"jdk", "17", "openjdk-17-jdk"},
+		{"jdk", "1.8", "openjdk-8-jdk"},
+		{"node", "", "nodejs"},
+		{"go", "", "golang"},
+		{"gradle", "", "gradle"},
+		{"maven", "", "maven"},
+	}
+	for _, c := range cases {
+		argv := ToolchainInstallCommand(c.service, c.version)
+		if len(argv) == 0 {
+			t.Errorf("ToolchainInstallCommand(%q,%q) empty", c.service, c.version)
+			continue
+		}
+		found := false
+		for _, a := range argv {
+			if a == c.want {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("ToolchainInstallCommand(%q,%q) missing %q: %v", c.service, c.version, c.want, argv)
+		}
+	}
+	if ToolchainInstallCommand("android-sdk", "") != nil {
+		t.Error("android-sdk should have no auto-install command")
 	}
 }

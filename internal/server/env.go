@@ -180,7 +180,32 @@ func (s *Server) handleIntelEnvInstall(w http.ResponseWriter, r *http.Request) {
 
 	version := requirementVersion(ctx, s, req.ProjectID, req.Service)
 	if envagent.Toolchain(req.Service) {
-		writeErr(w, http.StatusBadRequest, "工具链请在本机手动安装（暂无自动安装）")
+		cmds := envagent.ToolchainInstallCommand(req.Service, version)
+		if len(cmds) == 0 {
+			writeErr(w, http.StatusBadRequest, "该工具链暂不支持自动安装（请手动安装）")
+			return
+		}
+		out, err := envagent.RunSystem(ctx, cmds...)
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, "安装失败: "+err.Error()+" "+truncateStr(out, 300))
+			return
+		}
+		status, provider, _, healthy, _ := envagent.Probe(ctx, req.ProjectID, req.Service, "toolchain", version)
+		svc := &store.IntelEnvService{
+			ProjectID: req.ProjectID,
+			Service:   req.Service,
+			Category:  "toolchain",
+			Version:   version,
+			Provider:  provider,
+			Status:    status,
+			Healthy:   healthy,
+			Endpoint:  strings.TrimSpace(out),
+		}
+		if err := s.store.UpsertIntelEnvServices(ctx, req.ProjectID, []*store.IntelEnvService{svc}); err != nil {
+			writeErr(w, http.StatusInternalServerError, "persist env status failed")
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"service": svc})
 		return
 	}
 	if _, ok := envagent.Middleware(req.Service); !ok {
@@ -214,6 +239,15 @@ func (s *Server) handleIntelEnvInstall(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"service": svc})
+}
+
+// truncateStr caps a string for error/log surfaces (deterministic).
+func truncateStr(s string, n int) string {
+	s = strings.TrimSpace(s)
+	if len(s) > n {
+		return s[:n] + "…"
+	}
+	return s
 }
 
 // handleIntelEnvStop stops and removes a project's middleware container,

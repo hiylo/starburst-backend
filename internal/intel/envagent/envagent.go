@@ -229,7 +229,8 @@ func ProvisionContainer(ctx context.Context, projectID int64, service, version s
 	if version != "" {
 		image = spec.Image + ":" + version
 	}
-	args := containerRunArgs(projectID, service, image, spec.Port, env, extra)
+	hostPort = findFreePort(ctx, spec.Port)
+	args := containerRunArgs(projectID, service, image, hostPort, spec.Port, env, extra)
 	out, err := RunDocker(ctx, args...)
 	if err != nil {
 		return "", 0, fmt.Errorf("docker run: %v (%s)", err, out)
@@ -239,16 +240,31 @@ func ProvisionContainer(ctx context.Context, projectID int64, service, version s
 		id = id[:i]
 	}
 	for i := 0; i < ProvisionWaitRetries; i++ {
-		if portOpen(ctx, "127.0.0.1", spec.Port) {
+		if portOpen(ctx, "127.0.0.1", hostPort) {
 			break
 		}
 		select {
 		case <-ctx.Done():
-			return id, spec.Port, ctx.Err()
+			return id, hostPort, ctx.Err()
 		case <-time.After(500 * time.Millisecond):
 		}
 	}
-	return id, spec.Port, nil
+	return id, hostPort, nil
+}
+
+// findFreePort returns the lowest host port >= base that is not currently open
+// locally, probing at most 50 candidates. Collisions with in-use middleware
+// ports therefore shift the mapping deterministically instead of failing.
+func findFreePort(ctx context.Context, base int) int {
+	if base <= 0 {
+		base = 10000
+	}
+	for p := base; p < base+50; p++ {
+		if !portOpen(ctx, "127.0.0.1", p) {
+			return p
+		}
+	}
+	return base
 }
 
 // StopContainer stops and removes the project's middleware container (reset).
@@ -259,10 +275,11 @@ func StopContainer(ctx context.Context, projectID int64, service string) error {
 }
 
 // containerRunArgs builds the argv for "docker run" provisioning one
-// middleware (pure, so it is unit-tested without docker).
-func containerRunArgs(projectID int64, service, image string, port int, env, extra []string) []string {
+// middleware (pure, so it is unit-tested without docker). hostPort is the port
+// published on the host side, containerPort the process port inside the image.
+func containerRunArgs(projectID int64, service, image string, hostPort, containerPort int, env, extra []string) []string {
 	args := []string{"run", "-d", "--name", ContainerName(projectID, service),
-		"--restart=unless-stopped", "-p", strconv.Itoa(port) + ":" + strconv.Itoa(port)}
+		"--restart=unless-stopped", "-p", strconv.Itoa(hostPort) + ":" + strconv.Itoa(containerPort)}
 	for _, e := range env {
 		args = append(args, "-e", e)
 	}
@@ -344,4 +361,42 @@ func RandomPassword(n int) string {
 	buf := make([]byte, n)
 	_, _ = rand.Read(buf)
 	return hex.EncodeToString(buf)[:n]
+}
+
+// RunSystem executes a system install command (argv direct) after optionally
+// wrapping with sudo when not running as root. Overridable for tests.
+var RunSystem = runSystemExec
+
+func runSystemExec(ctx context.Context, args ...string) (string, error) {
+	if os.Geteuid() != 0 {
+		if _, err := exec.LookPath("sudo"); err == nil {
+			args = append([]string{"sudo"}, args...)
+		}
+	}
+	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
+	out, err := cmd.CombinedOutput()
+	return string(out), err
+}
+
+// ToolchainInstallCommand returns the deterministic per-item install argv for
+// a toolchain service (apt-get based on Debian/Ubuntu hosts). An empty result
+// means the toolchain has no supported auto-install path on this platform.
+func ToolchainInstallCommand(service, version string) []string {
+	switch service {
+	case "jdk":
+		v := "17"
+		if version != "" {
+			v = strings.TrimPrefix(version, "1.")
+		}
+		return []string{"apt-get", "install", "-y", "openjdk-" + v + "-jdk"}
+	case "node":
+		return []string{"apt-get", "install", "-y", "nodejs", "npm"}
+	case "go":
+		return []string{"apt-get", "install", "-y", "golang"}
+	case "gradle":
+		return []string{"apt-get", "install", "-y", "gradle"}
+	case "maven":
+		return []string{"apt-get", "install", "-y", "maven"}
+	}
+	return nil
 }

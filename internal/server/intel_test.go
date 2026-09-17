@@ -1854,6 +1854,62 @@ public class UserEntity { private Long id; private String nickname; }`)
 	}
 }
 
+// TestIntelEnvToolchainInstall verifies the deterministic toolchain install
+// path: the handler issues the per-item apt command (stubbed) and persists the
+// resulting service row.
+func TestIntelEnvToolchainInstall(t *testing.T) {
+	s := newTestServer(t)
+	wh := loginWeb(t, s)
+
+	root := t.TempDir()
+	writeTestFile(t, filepath.Join(root, "pom.xml"), `<project>
+  <properties><java.version>17</java.version></properties>
+</project>`)
+
+	rec := s.do(t, http.MethodPost, "/api/intel/projects",
+		`{"name":"demo","source":"local","localPath":"`+filepath.ToSlash(root)+`"}`, wh)
+	var proj struct {
+		ID int64 `json:"id"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &proj); err != nil || proj.ID == 0 {
+		t.Fatalf("create project: %s", rec.Body.String())
+	}
+	rec = s.do(t, http.MethodPost, "/api/intel/analyze",
+		`{"projectId":`+jsonInt(proj.ID)+`}`, wh)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("analyze status %d: %s", rec.Code, rec.Body.String())
+	}
+
+	old := envagent.RunSystem
+	defer func() { envagent.RunSystem = old }()
+	got := ""
+	envagent.RunSystem = func(ctx context.Context, args ...string) (string, error) {
+		got = strings.Join(args, " ")
+		return "Setting up openjdk-17-jdk...", nil
+	}
+
+	rec = s.do(t, http.MethodPost, "/api/intel/env/install",
+		`{"projectId":`+jsonInt(proj.ID)+`,"service":"jdk"}`, wh)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("install status %d: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(got, "openjdk-17-jdk") {
+		t.Errorf("install command = %q, want openjdk-17-jdk", got)
+	}
+	var inst struct {
+		Service struct {
+			Service string `json:"service"`
+			Status  string `json:"status"`
+		} `json:"service"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &inst); err != nil {
+		t.Fatalf("install parse: %v", err)
+	}
+	if inst.Service.Service != "jdk" {
+		t.Errorf("service = %q, want jdk", inst.Service.Service)
+	}
+}
+
 func gitRun(t *testing.T, dir string, args ...string) {
 	t.Helper()
 	cmd := exec.Command("git", args...)
