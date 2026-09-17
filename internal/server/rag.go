@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -73,8 +75,10 @@ func (s *Server) indexIntelProject(ctx context.Context, projectID int64) (int, e
 	return len(chunks), nil
 }
 
-// buildIntelChunks renders the scanned entities and endpoints into natural-
-// language fragments carrying provenance (source file:line).
+// buildIntelChunks renders the scanned entities, endpoints and project
+// documents into natural-language fragments carrying provenance (source
+// file:line). Documents (Markdown) are included so the knowledge base answers
+// from README/DESIGN/docs as well as from code contracts.
 func (s *Server) buildIntelChunks(ctx context.Context, projectID int64) ([]*store.RagChunk, error) {
 	entities, err := s.store.ListIntelEntities(ctx, projectID, 0)
 	if err != nil {
@@ -90,7 +94,7 @@ func (s *Server) buildIntelChunks(ctx context.Context, projectID int64) ([]*stor
 	// knowledge base keeps a single copy of each distinct fragment.
 	seen := map[string]bool{}
 	add := func(c *store.RagChunk) {
-		if seen[c.Content] {
+		if c == nil || seen[c.Content] {
 			return
 		}
 		seen[c.Content] = true
@@ -180,7 +184,86 @@ func (s *Server) buildIntelChunks(ctx context.Context, projectID int64) ([]*stor
 			SourceLine: ep.SourceLine,
 		})
 	}
+	for _, c := range s.gatherDocChunks(ctx, projectID) {
+		add(c)
+	}
 	return chunks, nil
+}
+
+// gatherDocChunks walks the project for Markdown documents and turns each file
+// into one or more size-bounded chunks, so README/DESIGN/docs content is
+// retrievable by semantic search alongside the code contracts.
+func (s *Server) gatherDocChunks(ctx context.Context, projectID int64) []*store.RagChunk {
+	p, err := s.store.GetIntelProject(ctx, projectID)
+	if err != nil {
+		return nil
+	}
+	root, err := s.projectRoot(ctx, p)
+	if err != nil {
+		return nil
+	}
+	out := make([]*store.RagChunk, 0)
+	_ = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if d.IsDir() {
+			name := d.Name()
+			if name == ".git" || name == "node_modules" || name == "target" ||
+				name == ".gradle" || name == "build_artifacts" || name == "dist" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(strings.ToLower(d.Name()), ".md") {
+			return nil
+		}
+		rel, _ := filepath.Rel(root, path)
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return nil
+		}
+		if len(data) > 64*1024 {
+			data = data[:64*1024]
+		}
+		out = append(out, splitDocChunks(rel, string(data))...)
+		return nil
+	})
+	return out
+}
+
+// splitDocChunks splits a document into chunks of at most maxRunes runes on
+// line boundaries, prefixing each with the file name for provenance.
+func splitDocChunks(rel, content string) []*store.RagChunk {
+	const maxRunes = 1500
+	lines := strings.Split(content, "\n")
+	out := make([]*store.RagChunk, 0)
+	var buf strings.Builder
+	chunkStart := 1
+	flush := func() {
+		text := strings.TrimSpace(buf.String())
+		buf.Reset()
+		if text == "" {
+			return
+		}
+		out = append(out, &store.RagChunk{
+			Kind:       "doc",
+			Title:      "文档 " + rel,
+			Content:    "文件 " + rel + "\n\n" + text,
+			SourceFile: rel,
+			SourceLine: chunkStart,
+		})
+	}
+	for i, l := range lines {
+		if buf.Len() > 0 && len([]rune(buf.String()))+len([]rune(l))+1 > maxRunes {
+			flush()
+			chunkStart = i + 1
+		}
+		buf.WriteString(l)
+		buf.WriteString("\n")
+	}
+	flush()
+	return out
 }
 
 // embedChunks fills each chunk's Embedding by calling the embeddings endpoint

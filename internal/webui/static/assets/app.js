@@ -2856,13 +2856,13 @@ async function runIntelAnalyze(projectId) {
 async function runIntelIndex() {
   const id = intelCurrentProject;
   if (!id) return;
-  const btn = document.getElementById("ragIndexBtn");
-  btn.disabled = true; btn.textContent = "索引中…";
+  const btns = [document.getElementById("ragIndexBtn"), document.getElementById("ragIndexBtn2")].filter(Boolean);
+  btns.forEach(b => { b.disabled = true; b.textContent = "索引中…"; });
   const res = await api("/api/intel/index", { method: "POST", headers: appHeaders(), body: JSON.stringify({ projectId: id }) });
   const data = await res.json();
-  btn.disabled = false; btn.textContent = "重建索引";
+  btns.forEach(b => { b.disabled = false; b.textContent = "重建索引"; });
   if (!res.ok) { show(document.getElementById("ragMsg"), data.error || "索引失败"); return; }
-  show(document.getElementById("ragMsg"), "索引完成，共 " + (data.chunks || 0) + " 条", true);
+  show(document.getElementById("ragMsg"), "索引完成，共 " + (data.chunks || 0) + " 条（含契约与文档）", true);
 }
 
 /* ---------- 知识库对话（项目级多轮，左侧会话列表可收起） ---------- */
