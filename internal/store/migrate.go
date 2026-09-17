@@ -116,6 +116,7 @@ var migrations = []migration{
 	{name: "intel_ai_rules", apply: migrationIntelAIRules},
 	{name: "env_devices", apply: migrationEnvDevices},
 	{name: "remote_nodes", apply: migrationRemoteNodes},
+	{name: "intel_overrides", apply: migrationIntelOverrides},
 }
 
 // migrationIntel creates the Test Intelligence subsystem tables: flat project
@@ -1116,6 +1117,38 @@ func migrationRemoteNodes(ctx context.Context, driver string, db *sql.DB) error 
 			note TEXT NOT NULL DEFAULT '',
 			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 		)`, idColumn(driver)),
+	}
+	for _, s := range stmts {
+		if _, err := db.ExecContext(ctx, s); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// migrationIntelOverrides creates the human-correction overrides table: when
+// auto-derived values (module roles, feature names, env versions, ...) are
+// low-confidence or wrong, a human confirms a manual_value that overrides them.
+// Pending rows form the 待确认队列; confirm/apply finalizes them.
+func migrationIntelOverrides(ctx context.Context, driver string, db *sql.DB) error {
+	stmts := []string{
+		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS intel_overrides (
+			%s,
+			project_id INTEGER NOT NULL DEFAULT 0,
+			module_id INTEGER NOT NULL DEFAULT 0,
+			target TEXT NOT NULL DEFAULT '',
+			row_key TEXT NOT NULL DEFAULT '',
+			field TEXT NOT NULL DEFAULT '',
+			auto_value_json TEXT NOT NULL DEFAULT '',
+			manual_value TEXT NOT NULL DEFAULT '',
+			confidence TEXT NOT NULL DEFAULT 'medium',
+			status TEXT NOT NULL DEFAULT 'pending',
+			source TEXT NOT NULL DEFAULT 'table',
+			anchor TEXT NOT NULL DEFAULT '',
+			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+		)`, idColumn(driver)),
+		`CREATE INDEX IF NOT EXISTS idx_intel_overrides_pending ON intel_overrides(project_id, status)`,
 	}
 	for _, s := range stmts {
 		if _, err := db.ExecContext(ctx, s); err != nil {

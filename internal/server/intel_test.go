@@ -1700,6 +1700,74 @@ func TestIntelRemoteNodes(t *testing.T) {
 	}
 }
 
+// TestIntelOverridesPending verifies the 待确认队列 workflow: a batch apply
+// persists confirmed overrides; a manually created pending row shows in the
+// queue and is finalized via confirm.
+func TestIntelOverridesPending(t *testing.T) {
+	s := newTestServer(t)
+	wh := loginWeb(t, s)
+
+	rec := s.do(t, http.MethodPost, "/api/intel/overrides",
+		`{"projectId":1,"overrides":[{"target":"module","rowKey":"app","field":"role","manualValue":"app","confidence":"high"}]}`, wh)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("batch apply status %d: %s", rec.Code, rec.Body.String())
+	}
+	var applyResp struct {
+		Applied int `json:"applied"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &applyResp); err != nil {
+		t.Fatalf("apply parse: %v", err)
+	}
+	if applyResp.Applied != 1 {
+		t.Errorf("applied = %d, want 1", applyResp.Applied)
+	}
+
+	// Directly seed a pending override for the confirm path.
+	pending := &store.IntelOverride{
+		ProjectID:     1,
+		ModuleID:      0,
+		Target:        "feature",
+		RowKey:        "banner",
+		Field:         "name",
+		ManualValue:   "",
+		Confidence:    "medium",
+		Status:        "pending",
+		Source:        "llm-suggest",
+		AutoValueJSON: `{"name":"Banner"}`,
+	}
+	ctx := context.Background()
+	if err := s.store.CreateIntelOverride(ctx, pending); err != nil {
+		t.Fatalf("create pending: %v", err)
+	}
+
+	rec = s.do(t, http.MethodGet, "/api/intel/pending?projectId=1", "", wh)
+	var pendingResp struct {
+		Pending []struct {
+			ID     int64  `json:"id"`
+			Status string `json:"status"`
+		} `json:"pending"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &pendingResp); err != nil {
+		t.Fatalf("pending parse: %v", err)
+	}
+	if len(pendingResp.Pending) != 1 || pendingResp.Pending[0].ID != pending.ID {
+		t.Fatalf("pending = %+v, want 1 row", pendingResp.Pending)
+	}
+
+	rec = s.do(t, http.MethodPost, "/api/intel/pending/"+jsonInt(pending.ID)+"/confirm",
+		`{"manualValue":"App 首页 Banner"}`, wh)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("confirm status %d: %s", rec.Code, rec.Body.String())
+	}
+	rec = s.do(t, http.MethodGet, "/api/intel/pending?projectId=1", "", wh)
+	if err := json.Unmarshal(rec.Body.Bytes(), &pendingResp); err != nil {
+		t.Fatalf("pending parse: %v", err)
+	}
+	if len(pendingResp.Pending) != 0 {
+		t.Errorf("pending after confirm = %d, want 0", len(pendingResp.Pending))
+	}
+}
+
 func gitRun(t *testing.T, dir string, args ...string) {
 	t.Helper()
 	cmd := exec.Command("git", args...)

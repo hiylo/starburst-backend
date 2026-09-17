@@ -238,6 +238,10 @@ func (s *Server) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/intel/ai-rules", s.handleIntelAIRules)
 	mux.HandleFunc("/api/intel/ai-rules/", s.handleIntelAIRuleByID)
 	mux.HandleFunc("/api/intel/scan/rules", s.handleIntelRuleScan)
+	mux.HandleFunc("/api/intel/overrides", s.handleIntelOverrides)
+	mux.HandleFunc("/api/intel/overrides/suggest", s.handleIntelOverrideSuggest)
+	mux.HandleFunc("/api/intel/pending", s.handleIntelPending)
+	mux.HandleFunc("/api/intel/pending/", s.handleIntelPendingConfirm)
 	mux.HandleFunc("/", s.handleIndex)
 }
 

@@ -423,6 +423,14 @@ type Store interface {
 	UpdateRemoteNode(ctx context.Context, n *RemoteNode) error
 	// DeleteRemoteNode removes a remote node by id.
 	DeleteRemoteNode(ctx context.Context, id int64) error
+	// CreateIntelOverride inserts an override (usually pending).
+	CreateIntelOverride(ctx context.Context, o *IntelOverride) error
+	// ListIntelOverrides returns a project's overrides, optionally only pending.
+	ListIntelOverrides(ctx context.Context, projectID int64, onlyPending bool) ([]*IntelOverride, error)
+	// GetIntelOverride loads one override by id.
+	GetIntelOverride(ctx context.Context, id int64) (*IntelOverride, error)
+	// UpdateIntelOverride persists an override's manual value and status.
+	UpdateIntelOverride(ctx context.Context, o *IntelOverride) error
 }
 
 // Open opens a store for the given driver/dsn. It applies all migrations
