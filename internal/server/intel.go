@@ -736,7 +736,9 @@ func (s *Server) createIntelProject(w http.ResponseWriter, r *http.Request) {
 		defer cancel()
 		if err := s.runIntelAnalyze(ctx, p.ID); err != nil {
 			log.Printf("intel auto-analyze project %d: %v", p.ID, err)
+			return
 		}
+		go s.reindexAfterAnalyze(p.ID)
 	}()
 	writeJSON(w, http.StatusOK, p)
 }

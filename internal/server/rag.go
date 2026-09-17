@@ -44,6 +44,11 @@ func (s *Server) handleIntelIndex(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Minute)
 	defer cancel()
 
+	// 与全量/增量分析共用项目级锁，避免在分析替换实体/接口时读到半成品。
+	mu := s.intelAnalyzeMutex(req.ProjectID)
+	mu.Lock()
+	defer mu.Unlock()
+
 	n, err := s.indexIntelProject(ctx, req.ProjectID)
 	if err != nil {
 		log.Printf("intel index project %d: %v", req.ProjectID, err)
@@ -78,14 +83,18 @@ func (s *Server) indexIntelProject(ctx context.Context, projectID int64) (int, e
 }
 
 // reindexAfterAnalyze rebuilds the knowledge-base vector index as a best-effort
-// follow-up to a full or incremental analysis. It runs in the background (on its
-// own timeout) and never fails the caller: the index is a cache over the
-// just-persisted contracts, so a failure or a disabled embedding backend only
-// means RAG keeps serving the previous index until the next successful rebuild.
+// follow-up to a full or incremental analysis. It runs in the background on its
+// own timeout, serialized by the project analyze mutex so it never reads a
+// half-replaced entity/endpoint set, and never fails the caller: the index is a
+// cache over the just-persisted contracts, so a failure or a disabled embedding
+// backend only means RAG keeps serving the previous index until the next rebuild.
 func (s *Server) reindexAfterAnalyze(projectID int64) {
 	if s.embedding == nil || !s.embedding.Enabled() {
 		return
 	}
+	mu := s.intelAnalyzeMutex(projectID)
+	mu.Lock()
+	defer mu.Unlock()
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 	defer cancel()
 	if _, err := s.indexIntelProject(ctx, projectID); err != nil {
