@@ -40,6 +40,8 @@ type TestRun struct {
 	StartedAt  *time.Time `json:"startedAt"`
 	FinishedAt *time.Time `json:"finishedAt"`
 	LogPath    string     `json:"logPath"`
+	Progress   string     `json:"progress,omitempty"`
+	Output     string     `json:"output,omitempty"`
 	CreatedAt  time.Time  `json:"createdAt"`
 }
 
@@ -198,19 +200,19 @@ func (s *sqlStore) CreateIntelTestRun(ctx context.Context, run *TestRun) error {
 	if isPostgres(s.driver) {
 		return s.db.QueryRowContext(ctx, s.q(`
 			INSERT INTO test_runs (project_id, module_id, scope, kind, command, status,
-				started_at, finished_at, log_path, created_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+				started_at, finished_at, log_path, progress, output, created_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
 			RETURNING id`),
 			run.ProjectID, run.ModuleID, run.Scope, run.Kind, run.Command, run.Status,
-			run.StartedAt, run.FinishedAt, run.LogPath,
+			run.StartedAt, run.FinishedAt, run.LogPath, run.Progress, run.Output,
 		).Scan(&run.ID)
 	}
 	res, err := s.db.ExecContext(ctx, s.q(`
 		INSERT INTO test_runs (project_id, module_id, scope, kind, command, status,
-			started_at, finished_at, log_path, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`),
+			started_at, finished_at, log_path, progress, output, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`),
 		run.ProjectID, run.ModuleID, run.Scope, run.Kind, run.Command, run.Status,
-		run.StartedAt, run.FinishedAt, run.LogPath,
+		run.StartedAt, run.FinishedAt, run.LogPath, run.Progress, run.Output,
 	)
 	if err != nil {
 		return err
@@ -227,7 +229,7 @@ func (s *sqlStore) CreateIntelTestRun(ctx context.Context, run *TestRun) error {
 func (s *sqlStore) GetIntelTestRun(ctx context.Context, id int64) (*TestRun, error) {
 	row := s.db.QueryRowContext(ctx, s.q(`
 		SELECT id, project_id, module_id, scope, kind, command, status,
-			started_at, finished_at, log_path, created_at FROM test_runs WHERE id = ?`), id)
+			started_at, finished_at, log_path, progress, output, created_at FROM test_runs WHERE id = ?`), id)
 	run, err := scanIntelTestRun(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
@@ -235,11 +237,13 @@ func (s *sqlStore) GetIntelTestRun(ctx context.Context, id int64) (*TestRun, err
 	return run, err
 }
 
-// ListIntelTestRuns returns test runs for a project, newest first.
+// ListIntelTestRuns returns test runs for a project, newest first. The output
+// column is omitted (empty) to keep list payloads small; fetch a single run for
+// the full log.
 func (s *sqlStore) ListIntelTestRuns(ctx context.Context, projectID int64) ([]*TestRun, error) {
 	rows, err := s.db.QueryContext(ctx, s.q(`
 		SELECT id, project_id, module_id, scope, kind, command, status,
-			started_at, finished_at, log_path, created_at
+			started_at, finished_at, log_path, progress, '', created_at
 		FROM test_runs WHERE project_id = ? ORDER BY created_at DESC`), projectID)
 	if err != nil {
 		return nil, err
@@ -256,11 +260,13 @@ func (s *sqlStore) ListIntelTestRuns(ctx context.Context, projectID int64) ([]*T
 	return out, rows.Err()
 }
 
-// UpdateIntelTestRun persists mutable run fields.
+// UpdateIntelTestRun persists mutable run fields. An empty progress/output keeps
+// the existing stored values; pass values to overwrite them.
 func (s *sqlStore) UpdateIntelTestRun(ctx context.Context, run *TestRun) error {
 	_, err := s.db.ExecContext(ctx, s.q(`
-		UPDATE test_runs SET status = ?, started_at = ?, finished_at = ?, log_path = ? WHERE id = ?`),
-		run.Status, run.StartedAt, run.FinishedAt, run.LogPath, run.ID)
+		UPDATE test_runs SET status = ?, started_at = ?, finished_at = ?, log_path = ?,
+			progress = COALESCE(?, progress), output = COALESCE(?, output) WHERE id = ?`),
+		run.Status, run.StartedAt, run.FinishedAt, run.LogPath, run.Progress, run.Output, run.ID)
 	return err
 }
 
@@ -387,14 +393,47 @@ func (s *sqlStore) UpdateIntelIssue(ctx context.Context, issue *IntelIssue) erro
 	return err
 }
 
-// ReplaceIntelFeatures deletes a project's feature points and re-inserts the
-// given set, preserving any human-assigned sort order is the caller's concern
-// (re-scan re-clusters but order is re-applied by the caller).
+// ReplaceIntelFeatures syncs a project's feature points by natural key
+// (source+anchor+name), mirroring ReplaceIntelModules: existing rows keep their
+// stable id and cached summary, newly detected rows are inserted, and rows no
+// longer present are removed. Stable ids keep human overrides
+// (intel_overrides.row_key = feature id), intel_issues.feature_id and
+// intel_feature_chats.feature_id valid across analyses, so "人工优先、重扫不
+// 覆盖" holds at the id level too. Rows passed in with a non-zero id (e.g. the
+// manual rows re-sourced by persistFeatures) are updated in place by id.
 func (s *sqlStore) ReplaceIntelFeatures(ctx context.Context, projectID int64, feats []*IntelFeature) error {
-	if _, err := s.db.ExecContext(ctx, s.q(`DELETE FROM intel_features WHERE project_id = ?`), projectID); err != nil {
+	existing, err := s.ListIntelFeatures(ctx, projectID)
+	if err != nil {
 		return err
 	}
+	byID := make(map[int64]*IntelFeature, len(existing))
+	byKey := make(map[string]*IntelFeature, len(existing))
+	for _, e := range existing {
+		byID[e.ID] = e
+		byKey[featureUpsertKey(e)] = e
+	}
+	matched := make(map[int64]bool, len(existing))
 	for _, f := range feats {
+		var prev *IntelFeature
+		if f.ID > 0 {
+			prev = byID[f.ID]
+		}
+		if prev == nil {
+			prev = byKey[featureUpsertKey(f)]
+		}
+		if prev != nil {
+			f.ID = prev.ID
+			f.Summary = prev.Summary
+			matched[prev.ID] = true
+			if _, err := s.db.ExecContext(ctx, s.q(`
+				UPDATE intel_features SET name = ?, ends_json = ?, sort_order = ?,
+					source = ?, anchor = ?, status = ?, updated_at = CURRENT_TIMESTAMP
+				WHERE id = ?`),
+				f.Name, f.EndsJSON, f.SortOrder, f.Source, f.Anchor, f.Status, f.ID); err != nil {
+				return err
+			}
+			continue
+		}
 		if _, err := s.db.ExecContext(ctx, s.q(`
 			INSERT INTO intel_features (project_id, name, summary, ends_json, sort_order,
 				source, anchor, status, created_at, updated_at)
@@ -404,7 +443,21 @@ func (s *sqlStore) ReplaceIntelFeatures(ctx context.Context, projectID int64, fe
 			return err
 		}
 	}
+	for id := range byID {
+		if !matched[id] {
+			if _, err := s.db.ExecContext(ctx, s.q(`DELETE FROM intel_features WHERE id = ?`), id); err != nil {
+				return err
+			}
+		}
+	}
 	return nil
+}
+
+// featureUpsertKey is the natural key used to keep a feature row's id stable
+// across analyses: source+anchor+name. Manual rows (source=manual) are grouped
+// apart from auto rows, and rows that carry a real id are matched by id first.
+func featureUpsertKey(f *IntelFeature) string {
+	return f.Source + "\x00" + f.Anchor + "\x00" + f.Name
 }
 
 // CreateIntelFeature inserts a (usually human-created) feature point and fills
@@ -488,7 +541,7 @@ func scanIntelTestRun(row rowScanner) (*TestRun, error) {
 	run := &TestRun{}
 	var started, finished *time.Time
 	err := row.Scan(&run.ID, &run.ProjectID, &run.ModuleID, &run.Scope, &run.Kind, &run.Command,
-		&run.Status, &started, &finished, &run.LogPath, &run.CreatedAt)
+		&run.Status, &started, &finished, &run.LogPath, &run.Progress, &run.Output, &run.CreatedAt)
 	if err != nil {
 		return nil, err
 	}

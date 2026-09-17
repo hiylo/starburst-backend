@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"strconv"
+	"strings"
 )
 
 // migrate applies schema migrations to the database.
@@ -122,6 +123,7 @@ var migrations = []migration{
 	{name: "project_modules_summary", apply: migrationProjectModulesSummary},
 	{name: "projects_description", apply: migrationProjectsDescription},
 	{name: "intel_project_sources", apply: migrationIntelProjectSources},
+	{name: "test_runs_progress", apply: migrationTestRunsProgress},
 }
 
 // migrationIntel creates the Test Intelligence subsystem tables: flat project
@@ -1208,6 +1210,26 @@ func migrationProjectModulesSummary(ctx context.Context, driver string, db *sql.
 func migrationProjectsDescription(ctx context.Context, driver string, db *sql.DB) error {
 	_, err := db.ExecContext(ctx, `ALTER TABLE projects ADD COLUMN description TEXT NOT NULL DEFAULT ''`)
 	return err
+}
+
+// migrationTestRunsProgress adds the live progress text and bounded output log
+// to test runs. The executor updates both while a run is executing so the web
+// UI can show streaming progress and the final (truncated) output.
+func migrationTestRunsProgress(ctx context.Context, driver string, db *sql.DB) error {
+	stmts := []string{
+		`ALTER TABLE test_runs ADD COLUMN progress TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE test_runs ADD COLUMN output TEXT NOT NULL DEFAULT ''`,
+	}
+	for _, st := range stmts {
+		if _, err := db.ExecContext(ctx, st); err != nil {
+			// 列已存在（幂等）时忽略，容忍并发迁移重入。
+			if strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+				continue
+			}
+			return err
+		}
+	}
+	return nil
 }
 
 // migrationIntelProjectSources adds the per-end associated source repos of an
