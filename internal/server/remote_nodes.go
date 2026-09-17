@@ -48,6 +48,7 @@ func (s *Server) handleIntelNodes(w http.ResponseWriter, r *http.Request) {
 			User         string `json:"user"`
 			Auth         string `json:"auth"`
 			Capabilities string `json:"capabilities"`
+			WorkDir      string `json:"workDir"`
 			Note         string `json:"note"`
 		}
 		if err := readJSONLimited(w, r, &req); err != nil {
@@ -69,6 +70,7 @@ func (s *Server) handleIntelNodes(w http.ResponseWriter, r *http.Request) {
 			User:         req.User,
 			Auth:         req.Auth,
 			Capabilities: strings.TrimSpace(req.Capabilities),
+			WorkDir:      strings.TrimSpace(req.WorkDir),
 			Note:         req.Note,
 			Reachable:    checkNodeReachable(ctx, req.Host, req.Port),
 			LastCheckAt:  &now,

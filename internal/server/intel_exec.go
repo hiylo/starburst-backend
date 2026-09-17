@@ -397,8 +397,12 @@ func (s *Server) runIntelTests(ctx context.Context, projectID, moduleID, nodeID 
 	var execErr error
 	if remoteNode != nil {
 		command := strings.Join(cmdArgs, " ")
+		wd := remoteNode.WorkDir
+		if wd == "" {
+			wd = "~"
+		}
 		if !strings.HasPrefix(strings.TrimSpace(command), "cd ") {
-			command = "cd ~ && " + command
+			command = "cd " + wd + " && " + command
 		}
 		sshArgs := envagent.SSHCommandArgs(remoteNode.Host, remoteNode.User, remoteNode.Port, command)
 		var out string

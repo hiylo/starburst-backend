@@ -19,6 +19,7 @@ type RemoteNode struct {
 	Capabilities string     `json:"capabilities"`
 	Reachable    bool       `json:"reachable"`
 	LastCheckAt  *time.Time `json:"lastCheckAt"`
+	WorkDir      string     `json:"workDir"`
 	Note         string     `json:"note"`
 	CreatedAt    time.Time  `json:"createdAt"`
 }
@@ -27,7 +28,7 @@ type RemoteNode struct {
 func (s *sqlStore) ListRemoteNodes(ctx context.Context) ([]*RemoteNode, error) {
 	rows, err := s.db.QueryContext(ctx, s.q(`
 		SELECT id, name, host, port, user, auth, host_key_fp, capabilities,
-			reachable, last_check_at, note, created_at FROM remote_nodes
+			reachable, last_check_at, work_dir, note, created_at FROM remote_nodes
 		ORDER BY id DESC`))
 	if err != nil {
 		return nil, err
@@ -37,7 +38,7 @@ func (s *sqlStore) ListRemoteNodes(ctx context.Context) ([]*RemoteNode, error) {
 	for rows.Next() {
 		n := &RemoteNode{}
 		if err := rows.Scan(&n.ID, &n.Name, &n.Host, &n.Port, &n.User, &n.Auth,
-			&n.HostKeyFP, &n.Capabilities, &n.Reachable, &n.LastCheckAt, &n.Note, &n.CreatedAt); err != nil {
+			&n.HostKeyFP, &n.Capabilities, &n.Reachable, &n.LastCheckAt, &n.WorkDir, &n.Note, &n.CreatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, n)
@@ -49,10 +50,10 @@ func (s *sqlStore) ListRemoteNodes(ctx context.Context) ([]*RemoteNode, error) {
 func (s *sqlStore) GetRemoteNode(ctx context.Context, id int64) (*RemoteNode, error) {
 	row := s.db.QueryRowContext(ctx, s.q(`
 		SELECT id, name, host, port, user, auth, host_key_fp, capabilities,
-			reachable, last_check_at, note, created_at FROM remote_nodes WHERE id = ?`), id)
+			reachable, last_check_at, work_dir, note, created_at FROM remote_nodes WHERE id = ?`), id)
 	n := &RemoteNode{}
 	if err := row.Scan(&n.ID, &n.Name, &n.Host, &n.Port, &n.User, &n.Auth,
-		&n.HostKeyFP, &n.Capabilities, &n.Reachable, &n.LastCheckAt, &n.Note, &n.CreatedAt); err != nil {
+		&n.HostKeyFP, &n.Capabilities, &n.Reachable, &n.LastCheckAt, &n.WorkDir, &n.Note, &n.CreatedAt); err != nil {
 		return nil, err
 	}
 	return n, nil
@@ -63,19 +64,19 @@ func (s *sqlStore) CreateRemoteNode(ctx context.Context, n *RemoteNode) error {
 	if isPostgres(s.driver) {
 		return s.db.QueryRowContext(ctx, s.q(`
 			INSERT INTO remote_nodes (name, host, port, user, auth, host_key_fp, capabilities,
-				reachable, last_check_at, note, created_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+				reachable, last_check_at, work_dir, note, created_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
 			RETURNING id`),
 			n.Name, n.Host, n.Port, n.User, n.Auth, n.HostKeyFP, n.Capabilities,
-			n.Reachable, n.LastCheckAt, n.Note,
+			n.Reachable, n.LastCheckAt, n.WorkDir, n.Note,
 		).Scan(&n.ID)
 	}
 	res, err := s.db.ExecContext(ctx, s.q(`
 		INSERT INTO remote_nodes (name, host, port, user, auth, host_key_fp, capabilities,
-			reachable, last_check_at, note, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`),
+			reachable, last_check_at, work_dir, note, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`),
 		n.Name, n.Host, n.Port, n.User, n.Auth, n.HostKeyFP, n.Capabilities,
-		n.Reachable, n.LastCheckAt, n.Note)
+		n.Reachable, n.LastCheckAt, n.WorkDir, n.Note)
 	if err != nil {
 		return err
 	}
@@ -91,10 +92,10 @@ func (s *sqlStore) CreateRemoteNode(ctx context.Context, n *RemoteNode) error {
 func (s *sqlStore) UpdateRemoteNode(ctx context.Context, n *RemoteNode) error {
 	_, err := s.db.ExecContext(ctx, s.q(`
 		UPDATE remote_nodes SET name = ?, host = ?, port = ?, user = ?, auth = ?,
-			host_key_fp = ?, capabilities = ?, reachable = ?, last_check_at = ?, note = ?
+			host_key_fp = ?, capabilities = ?, reachable = ?, last_check_at = ?, work_dir = ?, note = ?
 		WHERE id = ?`),
 		n.Name, n.Host, n.Port, n.User, n.Auth, n.HostKeyFP, n.Capabilities,
-		n.Reachable, n.LastCheckAt, n.Note, n.ID)
+		n.Reachable, n.LastCheckAt, n.WorkDir, n.Note, n.ID)
 	return err
 }
 

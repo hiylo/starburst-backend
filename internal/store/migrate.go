@@ -118,6 +118,7 @@ var migrations = []migration{
 	{name: "remote_nodes", apply: migrationRemoteNodes},
 	{name: "intel_overrides", apply: migrationIntelOverrides},
 	{name: "intel_feature_chats", apply: migrationIntelFeatureChats},
+	{name: "remote_nodes_work_dir", apply: migrationRemoteNodesWorkDir},
 }
 
 // migrationIntel creates the Test Intelligence subsystem tables: flat project
@@ -1182,4 +1183,12 @@ func migrationIntelFeatureChats(ctx context.Context, driver string, db *sql.DB) 
 		}
 	}
 	return nil
+}
+
+// migrationRemoteNodesWorkDir adds the remote node working directory (where the
+// repository lives on the node), so routed runs cd there before executing
+// instead of defaulting to the node's home.
+func migrationRemoteNodesWorkDir(ctx context.Context, driver string, db *sql.DB) error {
+	_, err := db.ExecContext(ctx, `ALTER TABLE remote_nodes ADD COLUMN work_dir TEXT NOT NULL DEFAULT ''`)
+	return err
 }

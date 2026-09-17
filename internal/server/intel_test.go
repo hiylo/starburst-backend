@@ -2066,7 +2066,7 @@ func TestIntelRunRemoteNode(t *testing.T) {
 		t.Fatalf("analyze status %d: %s", rec.Code, rec.Body.String())
 	}
 	rec = s.do(t, http.MethodPost, "/api/intel/nodes",
-		`{"name":"go-runner","host":"127.0.0.1","port":`+jsonInt(int64(port))+`,"capabilities":"linux-docker"}`, wh)
+		`{"name":"go-runner","host":"127.0.0.1","port":`+jsonInt(int64(port))+`,"capabilities":"linux-docker","workDir":"/srv/repos/echo"}`, wh)
 	var node struct {
 		Node struct {
 			ID int64 `json:"id"`
@@ -2101,6 +2101,9 @@ func TestIntelRunRemoteNode(t *testing.T) {
 	}
 	if !strings.Contains(joined, "go test") {
 		t.Errorf("ssh args missing test command: %v", sshArgs)
+	}
+	if !strings.Contains(joined, "cd /srv/repos/echo &&") {
+		t.Errorf("ssh args missing workDir cd: %v", sshArgs)
 	}
 }
 
