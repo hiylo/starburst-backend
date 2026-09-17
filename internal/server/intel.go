@@ -950,6 +950,7 @@ func (s *Server) runIntelAnalyze(ctx context.Context, projectID int64) error {
 	// 关联源码（多端多仓库）：每个关联源仓库作为额外的模块扫描根，模块 rel_path
 	// 以 "@<端>/" 前缀标识归属，保证与主仓库模块的唯一性。
 	sources, _ := s.store.ListIntelProjectSources(ctx, projectID)
+	allRoots := []string{root}
 	var mods []*store.IntelModule
 	mainMods, err := intel.DetectModules(root)
 	if err != nil {
@@ -962,6 +963,7 @@ func (s *Server) runIntelAnalyze(ctx context.Context, projectID int64) error {
 			log.Printf("intel project %d source %d root: %v", projectID, src.ID, err)
 			continue
 		}
+		allRoots = append(allRoots, srcRoot)
 		srcMods, err := intel.DetectModules(srcRoot)
 		if err != nil {
 			continue
@@ -980,29 +982,38 @@ func (s *Server) runIntelAnalyze(ctx context.Context, projectID int64) error {
 	if err := s.store.UpdateIntelProject(ctx, p); err != nil {
 		log.Printf("intel project commands %d: %v", projectID, err)
 	}
-	var allEndpoints []*store.IntelEndpoint
-	var allEntities []*store.IntelEntity
-	var allCases []*store.TestCase
+	// 每个模块的工作目录与其归属仓库根目录（绑定/来源路径按各自仓库相对）。
+	scans := make([]intelModuleScan, 0, len(mods))
 	for _, m := range mods {
 		scanRoot, rel := root, m.RelPath
 		if srcRoot, srcRel, ok := s.sourceModuleRoot(ctx, p, sources, m.RelPath); ok {
 			scanRoot, rel = srcRoot, srcRel
 		}
-		sum, err := intel.ScanModule(scanRoot, rel)
+		dir := scanRoot
+		if rel != "." {
+			dir = filepath.Join(scanRoot, rel)
+		}
+		scans = append(scans, intelModuleScan{m: m, dir: dir, root: scanRoot, rel: rel})
+	}
+	var allEndpoints []*store.IntelEndpoint
+	var allEntities []*store.IntelEntity
+	var allCases []*store.TestCase
+	for _, sc := range scans {
+		sum, err := intel.ScanModule(sc.root, sc.rel)
 		if err != nil {
 			continue
 		}
 		for i := range sum.Entities {
-			sum.Entities[i].ModuleID = m.ID
+			sum.Entities[i].ModuleID = sc.m.ID
 		}
 		for i := range sum.Endpoints {
-			sum.Endpoints[i].ModuleID = m.ID
+			sum.Endpoints[i].ModuleID = sc.m.ID
 		}
 		allEntities = append(allEntities, sum.Entities...)
 		allEndpoints = append(allEndpoints, sum.Endpoints...)
-		assets, err := testassets.Discover(scanRoot, rel)
+		assets, err := testassets.Discover(sc.root, sc.rel)
 		if err == nil {
-			allCases = append(allCases, buildTestCases(m, assets)...)
+			allCases = append(allCases, buildTestCases(sc.m, assets)...)
 		}
 	}
 	if err := s.store.ReplaceIntelEntities(ctx, projectID, allEntities); err != nil {
@@ -1017,26 +1028,26 @@ func (s *Server) runIntelAnalyze(ctx context.Context, projectID int64) error {
 	if err := s.persistFeatures(ctx, projectID, allEndpoints); err != nil {
 		return err
 	}
-	if err := s.persistAndroidBindings(ctx, projectID, root, mods); err != nil {
+	if err := s.persistAndroidBindings(ctx, projectID, scans); err != nil {
 		log.Printf("intel android bindings project %d: %v", projectID, err)
 	}
-	if err := s.persistWebBindings(ctx, projectID, root, mods); err != nil {
+	if err := s.persistWebBindings(ctx, projectID, scans); err != nil {
 		log.Printf("intel web bindings project %d: %v", projectID, err)
 	}
-	if err := s.persistIosBindings(ctx, projectID, root, mods); err != nil {
+	if err := s.persistIosBindings(ctx, projectID, scans); err != nil {
 		log.Printf("intel ios bindings project %d: %v", projectID, err)
 	}
-	if err := s.persistGatewayRoutes(ctx, projectID, root); err != nil {
+	if err := s.persistGatewayRoutes(ctx, projectID, allRoots); err != nil {
 		log.Printf("intel gateway routes project %d: %v", projectID, err)
 	}
-	s.enrichIntelWithLLM(ctx, projectID, root)
-	s.persistOverview(ctx, projectID, p, root)
-	s.persistEnvRequirements(ctx, projectID, root)
+	s.enrichIntelWithLLM(ctx, projectID, allRoots)
+	s.persistOverview(ctx, projectID, p, allRoots)
+	s.persistEnvRequirements(ctx, projectID, allRoots)
 	sha, err := snapshotSHA(root)
 	if err != nil {
 		sha = ""
 	}
-	if err := s.runIntelComplianceScan(ctx, projectID, root); err != nil {
+	if err := s.runIntelComplianceScan(ctx, projectID, allRoots); err != nil {
 		log.Printf("intel compliance scan project %d: %v", projectID, err)
 	}
 	if err := s.runIntelSecurityScan(ctx, projectID, allEntities); err != nil {
@@ -1170,38 +1181,49 @@ func (s *Server) persistFeatures(ctx context.Context, projectID int64, endpoints
 	return s.store.ReplaceIntelFeatures(ctx, projectID, storeFeats)
 }
 
-// persistGatewayRoutes discovers gateway route configuration under root and
-// persists it so the endpoint view can map internal paths to public exposure.
-func (s *Server) persistGatewayRoutes(ctx context.Context, projectID int64, root string) error {
-	routes, err := gateway.Discover(root)
-	if err != nil {
-		return err
+// intelModuleScan couples one analyzed module with its working directory and
+// owning repo root, so per-end (多端多仓库) modules resolve bindings/sources
+// against their own repository rather than the project's primary root.
+type intelModuleScan struct {
+	m    *store.IntelModule
+	dir  string // module working directory (repo root + rel path)
+	root string // owning repo root
+	rel  string // module rel path within root (no "@end/" prefix)
+}
+
+// persistGatewayRoutes discovers gateway route configuration under every scan
+// root and replaces the project's route list once (multi-repo aware).
+func (s *Server) persistGatewayRoutes(ctx context.Context, projectID int64, roots []string) error {
+	routes := make([]*store.IntelGatewayRoute, 0)
+	for _, root := range roots {
+		found, err := gateway.Discover(root)
+		if err != nil {
+			continue
+		}
+		for _, r := range found {
+			paths, _ := json.Marshal(r.Paths)
+			routes = append(routes, &store.IntelGatewayRoute{
+				Service:    r.Service,
+				PathsJSON:  string(paths),
+				URI:        r.URI,
+				Source:     r.Source,
+				SourceLine: r.SourceLine,
+			})
+		}
 	}
-	storeRoutes := make([]*store.IntelGatewayRoute, 0, len(routes))
-	for _, r := range routes {
-		paths, _ := json.Marshal(r.Paths)
-		storeRoutes = append(storeRoutes, &store.IntelGatewayRoute{
-			Service:    r.Service,
-			PathsJSON:  string(paths),
-			URI:        r.URI,
-			Source:     r.Source,
-			SourceLine: r.SourceLine,
-		})
-	}
-	return s.store.ReplaceIntelGatewayRoutes(ctx, projectID, storeRoutes)
+	return s.store.ReplaceIntelGatewayRoutes(ctx, projectID, routes)
 }
 
 // persistAndroidBindings extracts Android DataBinding "page -> field path"
 // bindings for every android module and persists them as the client's
 // must-display field list (used later for CLIENT_MISSING_FIELD attribution).
-func (s *Server) persistAndroidBindings(ctx context.Context, projectID int64, root string, mods []*store.IntelModule) error {
+func (s *Server) persistAndroidBindings(ctx context.Context, projectID int64, scans []intelModuleScan) error {
 	bindings := make([]*store.IntelAndroidBinding, 0)
-	for _, m := range mods {
-		if m.KindType != "android" {
+	for _, sc := range scans {
+		if sc.m.KindType != "android" {
 			continue
 		}
-		dir := filepath.Join(root, m.RelPath)
-		resDir := filepath.Join(dir, "src", "main", "res")
+		resDir := filepath.Join(sc.dir, "src", "main", "res")
 		if fi, err := os.Stat(resDir); err != nil || !fi.IsDir() {
 			continue
 		}
@@ -1210,9 +1232,9 @@ func (s *Server) persistAndroidBindings(ctx context.Context, projectID int64, ro
 			continue
 		}
 		for _, b := range bs {
-			src, line := splitAndroidSource(root, resDir, b.Source)
+			src, line := splitAndroidSource(sc.root, resDir, b.Source)
 			bindings = append(bindings, &store.IntelAndroidBinding{
-				ModuleID:   m.ID,
+				ModuleID:   sc.m.ID,
 				Page:       b.Page,
 				FieldPath:  b.FieldPath,
 				Widget:     b.Widget,
@@ -1226,14 +1248,13 @@ func (s *Server) persistAndroidBindings(ctx context.Context, projectID int64, ro
 
 // persistWebBindings extracts Vue template "page -> field path" bindings for
 // every web module and persists them as the client's must-display field list.
-func (s *Server) persistWebBindings(ctx context.Context, projectID int64, root string, mods []*store.IntelModule) error {
+func (s *Server) persistWebBindings(ctx context.Context, projectID int64, scans []intelModuleScan) error {
 	bindings := make([]*store.IntelWebBinding, 0)
-	for _, m := range mods {
-		if m.KindType != "web" {
+	for _, sc := range scans {
+		if sc.m.KindType != "web" {
 			continue
 		}
-		dir := filepath.Join(root, m.RelPath)
-		srcDir := filepath.Join(dir, "src")
+		srcDir := filepath.Join(sc.dir, "src")
 		if fi, err := os.Stat(srcDir); err != nil || !fi.IsDir() {
 			continue
 		}
@@ -1242,9 +1263,9 @@ func (s *Server) persistWebBindings(ctx context.Context, projectID int64, root s
 			continue
 		}
 		for _, b := range bs {
-			src, line := splitAndroidSource(root, srcDir, b.Source)
+			src, line := splitAndroidSource(sc.root, srcDir, b.Source)
 			bindings = append(bindings, &store.IntelWebBinding{
-				ModuleID:   m.ID,
+				ModuleID:   sc.m.ID,
 				Page:       b.Page,
 				FieldPath:  b.FieldPath,
 				Slot:       b.Slot,
@@ -1258,24 +1279,23 @@ func (s *Server) persistWebBindings(ctx context.Context, projectID int64, root s
 
 // persistIosBindings extracts SwiftUI view "page -> field path" bindings for
 // every iOS module and persists them as the client's must-display field list.
-func (s *Server) persistIosBindings(ctx context.Context, projectID int64, root string, mods []*store.IntelModule) error {
+func (s *Server) persistIosBindings(ctx context.Context, projectID int64, scans []intelModuleScan) error {
 	bindings := make([]*store.IntelIosBinding, 0)
-	for _, m := range mods {
-		if m.KindType != "ios" {
+	for _, sc := range scans {
+		if sc.m.KindType != "ios" {
 			continue
 		}
-		dir := filepath.Join(root, m.RelPath)
-		if fi, err := os.Stat(dir); err != nil || !fi.IsDir() {
+		if fi, err := os.Stat(sc.dir); err != nil || !fi.IsDir() {
 			continue
 		}
-		bs, err := ios.ExtractBindings(dir)
+		bs, err := ios.ExtractBindings(sc.dir)
 		if err != nil {
 			continue
 		}
 		for _, b := range bs {
-			src, line := splitAndroidSource(root, dir, b.Source)
+			src, line := splitAndroidSource(sc.root, sc.dir, b.Source)
 			bindings = append(bindings, &store.IntelIosBinding{
-				ModuleID:   m.ID,
+				ModuleID:   sc.m.ID,
 				Page:       b.Page,
 				FieldPath:  b.FieldPath,
 				Slot:       b.Slot,
@@ -1307,10 +1327,11 @@ func splitAndroidSource(root, resDir, src string) (string, int) {
 }
 
 // enrichIntelWithLLM runs the optional LLM document-analysis pass: it feeds the
-// project's Markdown docs plus the extracted endpoint contracts to the
-// orchestration LLM and stores per-endpoint business summaries and (clearly
-// marked) suggested gateway routes. It is a no-op unless the LLM is configured.
-func (s *Server) enrichIntelWithLLM(ctx context.Context, projectID int64, root string) {
+// project's Markdown docs (across every scan root) plus the extracted endpoint
+// contracts to the orchestration LLM and stores per-endpoint business summaries
+// and (clearly marked) suggested gateway routes. It is a no-op unless the LLM
+// is configured.
+func (s *Server) enrichIntelWithLLM(ctx context.Context, projectID int64, roots []string) {
 	if s.llm == nil || !s.llm.Enabled() {
 		return
 	}
@@ -1318,7 +1339,19 @@ func (s *Server) enrichIntelWithLLM(ctx context.Context, projectID int64, root s
 	if err != nil || len(eps) == 0 {
 		return
 	}
-	docs := enrich.Docs(root, 30000)
+	var sb strings.Builder
+	for _, root := range roots {
+		if sb.Len() >= 45000 {
+			break
+		}
+		doc := enrich.Docs(root, 45000-sb.Len())
+		if doc == "" {
+			continue
+		}
+		sb.WriteString(doc)
+		sb.WriteString("\n\n")
+	}
+	docs := strings.TrimSpace(sb.String())
 	if docs == "" {
 		return
 	}
@@ -1420,11 +1453,11 @@ func (s *Server) recordImpact(ctx context.Context, projectID int64, p *store.Int
 }
 
 // persistOverview aggregates the project's dependency list, environment
-// requirements and CycloneDX SBOM, then stores them as a single overview
-// snapshot for the detail view.
-func (s *Server) persistOverview(ctx context.Context, projectID int64, p *store.IntelProject, root string) {
-	all := collectDependencies(root)
-	reqs, _ := envdetect.Detect(root, "")
+// requirements and CycloneDX SBOM across every scan root, then stores them as a
+// single overview snapshot for the detail view.
+func (s *Server) persistOverview(ctx context.Context, projectID int64, p *store.IntelProject, roots []string) {
+	all := collectDependencies(roots)
+	reqs := detectRequirements(roots)
 	depsJSON, _ := json.Marshal(all)
 	envJSON, _ := json.Marshal(reqs)
 	sbomJSON, err := sbom.Generate(p.Name, all)
@@ -1441,52 +1474,79 @@ func (s *Server) persistOverview(ctx context.Context, projectID int64, p *store.
 	}
 }
 
-// collectDependencies walks the repository for dependency manifests and returns
-// a deduplicated dependency list across ecosystems.
-func collectDependencies(root string) []deps.Dependency {
+// detectRequirements runs env detection across every scan root and merges the
+// per-repo requirement lists (deduplicated by service+category).
+func detectRequirements(roots []string) []envdetect.Requirement {
 	seen := make(map[string]bool)
-	out := make([]deps.Dependency, 0)
-	_ = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+	out := make([]envdetect.Requirement, 0)
+	for _, root := range roots {
+		found, err := envdetect.Detect(root, "")
 		if err != nil {
-			return nil
+			continue
 		}
-		if d.IsDir() {
-			name := d.Name()
-			if name == ".git" || name == "node_modules" || name == "target" ||
-				name == ".gradle" || name == "build_artifacts" || name == "dist" {
-				return filepath.SkipDir
+		for _, r := range found {
+			key := r.Service
+			if key == "" {
+				key = r.Category
 			}
-			return nil
-		}
-		var parsed []deps.Dependency
-		switch d.Name() {
-		case "pom.xml":
-			if data, err := os.ReadFile(path); err == nil {
-				parsed, _ = deps.ParsePom(data)
-			}
-		case "go.mod":
-			if data, err := os.ReadFile(path); err == nil {
-				parsed, _ = deps.ParseGoMod(data)
-			}
-		case "package.json":
-			if data, err := os.ReadFile(path); err == nil {
-				parsed, _ = deps.ParsePackageJSON(data)
-			}
-		case "build.gradle", "build.gradle.kts":
-			if data, err := os.ReadFile(path); err == nil {
-				parsed, _ = deps.ParseGradle(data)
-			}
-		}
-		for _, dep := range parsed {
-			key := dep.Ecosystem + "|" + dep.Group + "|" + dep.Name + "|" + dep.Version
-			if seen[key] {
+			if key == "" || seen[key] {
 				continue
 			}
 			seen[key] = true
-			out = append(out, dep)
+			out = append(out, r)
 		}
-		return nil
-	})
+	}
+	return out
+}
+
+// collectDependencies walks every repository root for dependency manifests and
+// returns a deduplicated dependency list across ecosystems.
+func collectDependencies(roots []string) []deps.Dependency {
+	seen := make(map[string]bool)
+	out := make([]deps.Dependency, 0)
+	for _, root := range roots {
+		_ = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+			if err != nil {
+				return nil
+			}
+			if d.IsDir() {
+				name := d.Name()
+				if name == ".git" || name == "node_modules" || name == "target" ||
+					name == ".gradle" || name == "build_artifacts" || name == "dist" {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+			var parsed []deps.Dependency
+			switch d.Name() {
+			case "pom.xml":
+				if data, err := os.ReadFile(path); err == nil {
+					parsed, _ = deps.ParsePom(data)
+				}
+			case "go.mod":
+				if data, err := os.ReadFile(path); err == nil {
+					parsed, _ = deps.ParseGoMod(data)
+				}
+			case "package.json":
+				if data, err := os.ReadFile(path); err == nil {
+					parsed, _ = deps.ParsePackageJSON(data)
+				}
+			case "build.gradle", "build.gradle.kts":
+				if data, err := os.ReadFile(path); err == nil {
+					parsed, _ = deps.ParseGradle(data)
+				}
+			}
+			for _, dep := range parsed {
+				key := dep.Ecosystem + "|" + dep.Group + "|" + dep.Name + "|" + dep.Version
+				if seen[key] {
+					continue
+				}
+				seen[key] = true
+				out = append(out, dep)
+			}
+			return nil
+		})
+	}
 	return out
 }
 

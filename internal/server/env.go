@@ -12,19 +12,14 @@ import (
 	"time"
 
 	"github.com/hiylo/starburst-backend/internal/intel/envagent"
-	"github.com/hiylo/starburst-backend/internal/intel/envdetect"
 	"github.com/hiylo/starburst-backend/internal/intel/schemainit"
 	"github.com/hiylo/starburst-backend/internal/store"
 )
 
 // persistEnvRequirements runs static requirement detection over the project and
 // persists the per-item declared environment dependencies.
-func (s *Server) persistEnvRequirements(ctx context.Context, projectID int64, root string) {
-	reqs, err := envdetect.Detect(root, "")
-	if err != nil {
-		log.Printf("intel env detect project %d: %v", projectID, err)
-		return
-	}
+func (s *Server) persistEnvRequirements(ctx context.Context, projectID int64, roots []string) {
+	reqs := detectRequirements(roots)
 	storeReqs := make([]*store.IntelEnvRequirement, 0, len(reqs))
 	for _, r := range reqs {
 		storeReqs = append(storeReqs, &store.IntelEnvRequirement{
@@ -86,7 +81,7 @@ func (s *Server) ensureEnv(ctx context.Context, projectID int64) ([]*store.Intel
 	if err != nil {
 		return nil, nil, err
 	}
-	s.persistEnvRequirements(ctx, projectID, root)
+	s.persistEnvRequirements(ctx, projectID, []string{root})
 
 	reqs, _ := s.store.ListIntelEnvRequirements(ctx, projectID)
 	services, err := s.probeEnvServices(ctx, projectID, root, reqs)

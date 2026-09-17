@@ -406,34 +406,33 @@ func splitLocation(loc string) (string, int) {
 	return loc[:idx], line
 }
 
-// runIntelComplianceScan runs the deterministic compliance rules over the
-// project working tree and persists findings (detector=rule). It is invoked
-// after a successful analyze so the audit view reflects the current code.
-func (s *Server) runIntelComplianceScan(ctx context.Context, projectID int64, root string) error {
-	findings, err := compliance.ScanDir(root)
-	if err != nil {
-		return err
-	}
-	if len(findings) == 0 {
-		return nil
-	}
-	for _, f := range findings {
-		loc := f.File
-		if f.Line > 0 {
-			loc = fmt.Sprintf("%s:%d", f.File, f.Line)
+// runIntelComplianceScan runs the deterministic compliance rules over every
+// scan root (main + associated repos) and persists findings (detector=rule). It
+// is invoked after a successful analyze so the audit view reflects the code.
+func (s *Server) runIntelComplianceScan(ctx context.Context, projectID int64, roots []string) error {
+	for _, root := range roots {
+		findings, err := compliance.ScanDir(root)
+		if err != nil {
+			continue
 		}
-		finding := &store.IntelFinding{
-			ProjectID:   projectID,
-			Detector:    "rule",
-			Severity:    f.Severity,
-			Category:    "compliance",
-			CveOrRuleID: f.RuleID,
-			Location:    loc,
-			Summary:     f.Message,
-			Status:      "open",
-		}
-		if _, err := s.store.CreateIntelFindingIfAbsent(ctx, finding); err != nil {
-			log.Printf("intel compliance finding: %v", err)
+		for _, f := range findings {
+			loc := f.File
+			if f.Line > 0 {
+				loc = fmt.Sprintf("%s:%d", f.File, f.Line)
+			}
+			finding := &store.IntelFinding{
+				ProjectID:   projectID,
+				Detector:    "rule",
+				Severity:    f.Severity,
+				Category:    "compliance",
+				CveOrRuleID: f.RuleID,
+				Location:    loc,
+				Summary:     f.Message,
+				Status:      "open",
+			}
+			if _, err := s.store.CreateIntelFindingIfAbsent(ctx, finding); err != nil {
+				log.Printf("intel compliance finding: %v", err)
+			}
 		}
 	}
 	return nil
