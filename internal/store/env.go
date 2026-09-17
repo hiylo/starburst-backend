@@ -37,7 +37,7 @@ type IntelEnvService struct {
 	ContainerName string     `json:"containerName"`
 	ContainerID   string     `json:"containerId"`
 	Username      string     `json:"username"`
-	Password      string     `json:"password"`
+	Password      string     `json:"-"`
 	HealthCheckAt *time.Time `json:"healthCheckAt"`
 	CreatedAt     time.Time  `json:"createdAt"`
 	UpdatedAt     time.Time  `json:"updatedAt"`

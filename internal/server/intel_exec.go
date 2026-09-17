@@ -407,6 +407,18 @@ func (s *Server) runIntelTests(ctx context.Context, projectID, moduleID, nodeID 
 		if wd == "" {
 			wd = "~"
 		}
+		// ssh runs the remote command through the login shell, so any token with
+		// shell metacharacters would be interpreted on the node. Reject such
+		// commands deterministically (argv is safe locally; this guards the
+		// remote interpretation layer).
+		for _, tok := range cmdArgs {
+			if hasShellMeta(tok) {
+				return nil, fmt.Errorf("远程命令含 shell 元字符，已拒绝执行（参数：%q）", tok)
+			}
+		}
+		if hasShellMeta(wd) {
+			return nil, fmt.Errorf("远程工作目录含 shell 元字符：%q", wd)
+		}
 		if !strings.HasPrefix(strings.TrimSpace(command), "cd ") {
 			command = "cd " + wd + " && " + command
 		}
@@ -632,6 +644,13 @@ func isFlakyResult(failuresJSON string) bool {
 	}
 	v, ok := m["flaky"].(bool)
 	return ok && v
+}
+
+// hasShellMeta reports whether a token contains characters that a POSIX shell
+// would interpret (metacharacters, quotes, expansions). Used to keep remote
+// command arguments from being shell-evaluated on the node.
+func hasShellMeta(s string) bool {
+	return strings.ContainsAny(s, ";&|<>`$()*?[]{}\\!\"'#~")
 }
 
 // runCommand runs an executable with a bounded timeout and returns stdout.

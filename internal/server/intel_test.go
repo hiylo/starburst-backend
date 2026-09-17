@@ -2461,6 +2461,22 @@ func TestIntelOverrideEnqueue(t *testing.T) {
 	}
 }
 
+// TestHasShellMeta covers the remote-command injection guard.
+func TestHasShellMeta(t *testing.T) {
+	safe := []string{"go", "test", "./...", "mvn", "test", "npm", "test", "pkg/foo", "-run", "TestX", "a-b_c"}
+	for _, s := range safe {
+		if hasShellMeta(s) {
+			t.Errorf("hasShellMeta(%q) = true, want false", s)
+		}
+	}
+	unsafe := []string{"test; rm -rf /", "a|b", "a>b", "a$(id)", "a`id`", "a&b", "a'", "a\"b", "$PATH", "a\\b"}
+	for _, s := range unsafe {
+		if !hasShellMeta(s) {
+			t.Errorf("hasShellMeta(%q) = false, want true", s)
+		}
+	}
+}
+
 func gitRun(t *testing.T, dir string, args ...string) {
 	t.Helper()
 	cmd := exec.Command("git", args...)
