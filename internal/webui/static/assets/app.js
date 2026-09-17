@@ -3007,6 +3007,7 @@ async function loadIntelAiRules() {
         <div class="muted" style="font-size:10px;margin-top:2px">${escapeHtml(r.target || "-")} · ${escapeHtml(r.severity || "-")} · ${r.enabled ? "启用" : "停用"}</div>
       </div>
       <div class="row" style="gap:4px">
+        <button class="ghost sm" onclick="polishAIRule(${r.id})">润色</button>
         <button class="ghost sm" onclick="toggleAIRule(${r.id}, ${r.enabled})">${r.enabled ? "停用" : "启用"}</button>
         <button class="ghost sm" onclick="deleteAIRule(${r.id})">删除</button>
       </div>
@@ -3031,6 +3032,21 @@ async function createAIRule() {
 
 async function toggleAIRule(id, enabled) {
   await api("/api/intel/ai-rules/" + id, { method: "PUT", headers: appHeaders(), body: JSON.stringify({ enabled: !enabled }) });
+  loadIntelAiRules();
+}
+
+async function polishAIRule(id) {
+  const msg = document.getElementById("aiRuleMsg");
+  if (msg) msg.textContent = "LLM 润色中…";
+  const res = await api("/api/intel/ai-rules/" + id + "/polish", { method: "PUT", headers: appHeaders(), body: "{}" });
+  const data = await res.json();
+  if (!res.ok) { if (msg) msg.textContent = data.error || "润色失败"; return; }
+  const polished = data.polished || "";
+  const ok = confirm("润色草稿：\n\n" + polished + "\n\n保存为规则提示词？");
+  if (!ok) return;
+  const sres = await api("/api/intel/ai-rules/" + id, { method: "PUT", headers: appHeaders(), body: JSON.stringify({ prompt: polished }) });
+  if (!sres.ok) { if (msg) msg.textContent = (await sres.json()).error || "保存失败"; return; }
+  if (msg) msg.textContent = "已保存润色提示词";
   loadIntelAiRules();
 }
 
