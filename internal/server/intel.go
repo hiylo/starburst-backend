@@ -798,6 +798,7 @@ func (s *Server) updateIntelProject(w http.ResponseWriter, r *http.Request, id i
 	prevLocal := p.LocalPath
 	prevGit := p.GitURL
 	prevRef := p.GitRef
+	prevDesc := p.Description
 	if req.Name != "" {
 		p.Name = req.Name
 	}
@@ -877,6 +878,11 @@ func (s *Server) updateIntelProject(w http.ResponseWriter, r *http.Request, id i
 		prevGit != p.GitURL || prevRef != p.GitRef
 	if sourceChanged {
 		go s.autoAnalyzeIntel(id, true)
+	}
+	// 描述变更时刷新知识库 overview chunk，让可检索画像与新描述一致（问答侧靠
+	// 实时注入始终正确；若来源也变更，增量分析已包含索引重建，无需重复触发）。
+	if p.Description != prevDesc && !sourceChanged {
+		go s.reindexAfterAnalyze(id)
 	}
 	writeJSON(w, http.StatusOK, p)
 }
