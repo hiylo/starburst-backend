@@ -3180,8 +3180,9 @@ async function addIntelNode() {
   const port = parseInt(prompt("端口", "22"), 10) || 22;
   const user = prompt("SSH 用户", "root");
   const caps = prompt("能力标签（逗号分隔，如 linux-docker,android-sdk）", "");
+  const workDir = prompt("节点上仓库工作目录（如 /srv/repos/echo，可留空用 ~）", "");
   const auth = prompt("口令或密钥路径（仅入库本环境，不对外回显）", "");
-  const res = await api("/api/intel/nodes", { method: "POST", headers: appHeaders(), body: JSON.stringify({ name, host, port, user, capabilities: caps, auth }) });
+  const res = await api("/api/intel/nodes", { method: "POST", headers: appHeaders(), body: JSON.stringify({ name, host, port, user, capabilities: caps, workDir, auth }) });
   const data = await res.json();
   if (!res.ok) { alert(data.error || "新增失败"); return; }
   loadIntelEnv(intelCurrentProject);
