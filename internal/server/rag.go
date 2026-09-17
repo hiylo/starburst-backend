@@ -72,7 +72,25 @@ func (s *Server) indexIntelProject(ctx context.Context, projectID int64) (int, e
 	if err := s.store.ReplaceProjectChunks(ctx, projectID, chunks); err != nil {
 		return 0, err
 	}
+	// Drop cached retrievals so identical questions re-run against the new index.
+	ragRetrievalCache.invalidateProject(projectID)
 	return len(chunks), nil
+}
+
+// reindexAfterAnalyze rebuilds the knowledge-base vector index as a best-effort
+// follow-up to a full or incremental analysis. It runs in the background (on its
+// own timeout) and never fails the caller: the index is a cache over the
+// just-persisted contracts, so a failure or a disabled embedding backend only
+// means RAG keeps serving the previous index until the next successful rebuild.
+func (s *Server) reindexAfterAnalyze(projectID int64) {
+	if s.embedding == nil || !s.embedding.Enabled() {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+	defer cancel()
+	if _, err := s.indexIntelProject(ctx, projectID); err != nil {
+		log.Printf("intel reindex project %d after analyze: %v", projectID, err)
+	}
 }
 
 // buildIntelChunks renders the scanned entities, endpoints and project
@@ -283,7 +301,59 @@ func (s *Server) buildIntelChunks(ctx context.Context, projectID int64) ([]*stor
 			})
 		}
 	}
+	// A single project-level overview chunk carries the free-text description and
+	// the module/service inventory, so semantic search can also recall the
+	// project's shape instead of only per-endpoint/per-table fragments.
+	if overview := s.buildOverviewChunk(ctx, projectID); overview != nil {
+		add(overview)
+	}
 	return chunks, nil
+}
+
+// buildOverviewChunk renders the project's free-text description together with
+// its module/service inventory into one knowledge fragment, giving overview
+// questions ("这个项目是什么/有哪些模块") a searchable target beyond the
+// per-entity/per-endpoint chunks.
+func (s *Server) buildOverviewChunk(ctx context.Context, projectID int64) *store.RagChunk {
+	p, err := s.store.GetIntelProject(ctx, projectID)
+	if err != nil {
+		return nil
+	}
+	mods, _ := s.store.ListIntelModules(ctx, projectID)
+	var sb strings.Builder
+	sb.WriteString("项目 ")
+	sb.WriteString(p.Name)
+	sb.WriteString(" 概览")
+	if d := strings.TrimSpace(p.Description); d != "" {
+		sb.WriteString("：\n")
+		sb.WriteString(d)
+	}
+	if len(mods) > 0 {
+		sb.WriteString("\n\n模块/服务清单：")
+		for _, m := range mods {
+			sb.WriteString("\n- ")
+			sb.WriteString(m.RelPath)
+			if m.KindRole != "" {
+				sb.WriteString("（")
+				sb.WriteString(m.KindRole)
+				sb.WriteString("）")
+			}
+			if sum := strings.TrimSpace(m.Summary); sum != "" {
+				sb.WriteString("：")
+				sb.WriteString(sum)
+			}
+		}
+	}
+	content := strings.TrimSpace(sb.String())
+	if content == "" {
+		return nil
+	}
+	return &store.RagChunk{
+		Kind:       "overview",
+		Title:      "项目概览 " + p.Name,
+		Content:    content,
+		SourceFile: "项目画像",
+	}
 }
 
 // gatherDocChunks walks the project for Markdown documents and turns each file
@@ -424,7 +494,7 @@ func (s *Server) handleIntelAsk(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if req.Limit <= 0 {
-		req.Limit = 5
+		req.Limit = 10
 	}
 
 	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Minute)
@@ -448,6 +518,23 @@ func (s *Server) askIntelProject(ctx context.Context, projectID int64, question 
 	chat, history, err := s.resolveChat(ctx, projectID, chatID, question)
 	if err != nil {
 		return nil, err
+	}
+
+	// The free-text project profile (projects.description) is always injected as
+	// an "overview" fact, so broad questions about the whole project (rather than
+	// a specific endpoint/table) have grounding beyond the vector top-K.
+	overviewText := ""
+	var overviewSource map[string]any
+	if proj, err := s.store.GetIntelProject(ctx, projectID); err == nil {
+		if d := strings.TrimSpace(proj.Description); d != "" {
+			overviewText = "项目画像：\n" + d
+			overviewSource = map[string]any{
+				"title":      "项目画像",
+				"kind":       "overview",
+				"content":    d,
+				"sourceFile": "项目画像",
+			}
+		}
 	}
 
 	key := retrievalCacheKey(projectID, question)
@@ -492,16 +579,26 @@ func (s *Server) askIntelProject(ctx context.Context, projectID int64, question 
 			contextBuf.WriteString("\n\n")
 		}
 		contextJSON = contextBuf.String()
-		ragRetrievalCache.put(key, retrievalHit{context: contextJSON, sources: sources})
+		ragRetrievalCache.put(key, retrievalHit{projectID: projectID, context: contextJSON, sources: sources})
 	}
 
 	answer := ""
-	if s.llm != nil && s.llm.Enabled() && chunkCount > 0 {
-		answer = s.generateChatAnswer(ctx, history, contextJSON, question)
+	if s.llm != nil && s.llm.Enabled() && (chunkCount > 0 || overviewText != "") {
+		contextText := contextJSON
+		if overviewText != "" {
+			contextText = overviewText + "\n\n" + contextJSON
+		}
+		answer = s.generateChatAnswer(ctx, history, contextText, question)
+	}
+
+	// The project profile is a first-class citation when it grounds the answer.
+	displaySources := sources
+	if overviewSource != nil {
+		displaySources = append([]map[string]any{overviewSource}, sources...)
 	}
 
 	// Persist the turn so subsequent questions carry full context.
-	sourcesJSON, _ := json.Marshal(sources)
+	sourcesJSON, _ := json.Marshal(displaySources)
 	_ = s.store.AddIntelChatMessage(ctx, &store.IntelChatMessage{ChatID: chat.ID, Role: "user", Content: question})
 	if answer != "" {
 		_ = s.store.AddIntelChatMessage(ctx, &store.IntelChatMessage{ChatID: chat.ID, Role: "assistant", Content: answer, SourcesJSON: string(sourcesJSON)})
@@ -511,8 +608,8 @@ func (s *Server) askIntelProject(ctx context.Context, projectID int64, question 
 		"chatId":   chat.ID,
 		"question": question,
 		"answer":   answer,
-		"sources":  sources,
-		"count":    len(sources),
+		"sources":  displaySources,
+		"count":    len(displaySources),
 	}, nil
 }
 

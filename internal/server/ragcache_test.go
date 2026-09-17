@@ -37,3 +37,21 @@ func TestRetrievalCacheKeyStable(t *testing.T) {
 		t.Errorf("key length = %d, want 64", len(a))
 	}
 }
+
+func TestRetrievalCacheInvalidateProject(t *testing.T) {
+	c := newRetrievalCache(10)
+	c.put("k1", retrievalHit{projectID: 1, context: "p1-a"})
+	c.put("k2", retrievalHit{projectID: 2, context: "p2-a"})
+	c.put("k3", retrievalHit{projectID: 1, context: "p1-b"})
+
+	c.invalidateProject(1)
+	if _, ok := c.get("k1"); ok {
+		t.Error("k1 (project 1) should be invalidated")
+	}
+	if _, ok := c.get("k3"); ok {
+		t.Error("k3 (project 1) should be invalidated")
+	}
+	if _, ok := c.get("k2"); !ok {
+		t.Error("k2 (project 2) should survive")
+	}
+}

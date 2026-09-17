@@ -20,8 +20,9 @@ type retrievalCache struct {
 
 // retrievalHit is one cached retrieval result.
 type retrievalHit struct {
-	context string
-	sources []map[string]any
+	projectID int64
+	context   string
+	sources   []map[string]any
 }
 
 func newRetrievalCache(max int) *retrievalCache {
@@ -58,6 +59,26 @@ func (c *retrievalCache) put(key string, h retrievalHit) {
 		c.order = c.order[1:]
 		delete(c.m, oldest)
 	}
+}
+
+// invalidateProject drops every cached retrieval for a project. It is called
+// after the project's knowledge-base index is rebuilt, so an identical question
+// re-runs retrieval against the fresh chunks instead of a stale cache.
+func (c *retrievalCache) invalidateProject(projectID int64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for k, h := range c.m {
+		if h.projectID == projectID {
+			delete(c.m, k)
+		}
+	}
+	out := c.order[:0]
+	for _, k := range c.order {
+		if _, ok := c.m[k]; ok {
+			out = append(out, k)
+		}
+	}
+	c.order = out
 }
 
 // ragRetrievalCache is the process-wide retrieval cache (bounded, LRU-ish).
