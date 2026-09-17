@@ -450,42 +450,54 @@ func (s *Server) askIntelProject(ctx context.Context, projectID int64, question 
 		return nil, err
 	}
 
-	qvec, err := s.embedding.Embed(ctx, question)
-	if err != nil {
-		return nil, fmt.Errorf("embed question: %w", err)
-	}
-	if len(qvec) != store.EmbedDim {
-		return nil, fmt.Errorf("embedding dimension %d does not match column dimension %d (model mismatch?)", len(qvec), store.EmbedDim)
-	}
-	chunks, err := s.store.SearchRagChunks(ctx, projectID, 0, qvec, limit)
-	if err != nil {
-		return nil, err
-	}
+	key := retrievalCacheKey(projectID, question)
+	contextJSON := ""
+	sources := []map[string]any{}
+	chunkCount := 0
+	if hit, ok := ragRetrievalCache.get(key); ok {
+		contextJSON = hit.context
+		sources = hit.sources
+		chunkCount = len(hit.sources)
+	} else {
+		qvec, err := s.embedding.Embed(ctx, question)
+		if err != nil {
+			return nil, fmt.Errorf("embed question: %w", err)
+		}
+		if len(qvec) != store.EmbedDim {
+			return nil, fmt.Errorf("embedding dimension %d does not match column dimension %d (model mismatch?)", len(qvec), store.EmbedDim)
+		}
+		chunks, err := s.store.SearchRagChunks(ctx, projectID, 0, qvec, limit)
+		if err != nil {
+			return nil, err
+		}
+		chunkCount = len(chunks)
 
-	sources := make([]map[string]any, 0, len(chunks))
-	var contextBuf strings.Builder
-	for _, c := range chunks {
-		sources = append(sources, map[string]any{
-			"title":      c.Title,
-			"kind":       c.Kind,
-			"content":    c.Content,
-			"sourceFile": c.SourceFile,
-			"sourceLine": c.SourceLine,
-			"similarity": c.Similarity,
-		})
-		contextBuf.WriteString("【")
-		contextBuf.WriteString(c.Title)
-		contextBuf.WriteString("】(来源 ")
-		contextBuf.WriteString(c.SourceFile)
-		fmt.Fprintf(&contextBuf, ":%d", c.SourceLine)
-		contextBuf.WriteString(")\n")
-		contextBuf.WriteString(c.Content)
-		contextBuf.WriteString("\n\n")
+		var contextBuf strings.Builder
+		for _, c := range chunks {
+			sources = append(sources, map[string]any{
+				"title":      c.Title,
+				"kind":       c.Kind,
+				"content":    c.Content,
+				"sourceFile": c.SourceFile,
+				"sourceLine": c.SourceLine,
+				"similarity": c.Similarity,
+			})
+			contextBuf.WriteString("【")
+			contextBuf.WriteString(c.Title)
+			contextBuf.WriteString("】(来源 ")
+			contextBuf.WriteString(c.SourceFile)
+			fmt.Fprintf(&contextBuf, ":%d", c.SourceLine)
+			contextBuf.WriteString(")\n")
+			contextBuf.WriteString(c.Content)
+			contextBuf.WriteString("\n\n")
+		}
+		contextJSON = contextBuf.String()
+		ragRetrievalCache.put(key, retrievalHit{context: contextJSON, sources: sources})
 	}
 
 	answer := ""
-	if s.llm != nil && s.llm.Enabled() && len(chunks) > 0 {
-		answer = s.generateChatAnswer(ctx, history, contextBuf.String(), question)
+	if s.llm != nil && s.llm.Enabled() && chunkCount > 0 {
+		answer = s.generateChatAnswer(ctx, history, contextJSON, question)
 	}
 
 	// Persist the turn so subsequent questions carry full context.
