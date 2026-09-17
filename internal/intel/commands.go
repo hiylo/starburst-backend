@@ -29,17 +29,6 @@ func DefaultCommands(kindType string) []string {
 	}
 }
 
-// CommandsJSONForType renders the default command whitelist for a kind type as
-// a JSON array string (empty array when the type has no default commands).
-func CommandsJSONForType(kindType string) string {
-	cmds := DefaultCommands(kindType)
-	if cmds == nil {
-		cmds = []string{}
-	}
-	b, _ := json.Marshal(cmds)
-	return string(b)
-}
-
 // ProjectCommandsJSON aggregates the default command whitelist across a
 // project's detected modules into a deduplicated JSON array, preserving module
 // order.

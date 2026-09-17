@@ -2716,6 +2716,7 @@ let intelCurrentProject = 0;
 let intelMgrProject = null;
 let intelEndpointsCache = [];
 let intelSummaryCommands = [];
+let intelSummaryDescription = "";
 const INTEL_TYPE_LABELS = { java: "Java", android: "Android", ios: "iOS", go: "Go", web: "Web", node: "Node" };
 
 function toggleIntelSource() {
@@ -2794,6 +2795,7 @@ async function createIntelProject() {
     localPath: src === "local" ? document.getElementById("intelPath").value.trim() : "",
     gitUrl: src === "git" ? document.getElementById("intelPath").value.trim() : "",
     gitRef: src === "git" ? document.getElementById("intelGitRef").value.trim() : "",
+    description: document.getElementById("intelDescription") ? document.getElementById("intelDescription").value.trim() : "",
   };
   if (src === "local" && !body.localPath) { show(document.getElementById("intelMsg"), "请填写本地路径"); return; }
   if (src === "git" && !body.gitUrl) { show(document.getElementById("intelMsg"), "请填写 Git URL"); return; }
@@ -2805,6 +2807,7 @@ async function createIntelProject() {
   document.getElementById("intelName").value = "";
   document.getElementById("intelPath").value = "";
   document.getElementById("intelGitRef").value = "";
+  if (document.getElementById("intelDescription")) document.getElementById("intelDescription").value = "";
   loadIntelProjects();
 }
 
@@ -2879,6 +2882,7 @@ function openIntelProjectManage() {
   document.getElementById("intelMgrSource").value = p.source === "git" ? "git" : "local";
   document.getElementById("intelMgrPath").value = p.source === "git" ? (p.gitUrl || "") : (p.localPath || "");
   document.getElementById("intelMgrGitRef").value = p.gitRef || "";
+  document.getElementById("intelMgrDescription").value = p.description || "";
   toggleIntelMgrSource();
   document.getElementById("intelMgrMsg").textContent = "";
   document.getElementById("intelProjectManage").classList.remove("hidden");
@@ -2892,6 +2896,46 @@ function openIntelProjectManage() {
       dl.innerHTML = [...new Set(dirs)].map(x => `<option value="${escapeHtml(x)}"></option>`).join("");
     })
     .catch(() => {});
+  // 加载已关联源码（多端多仓库）列表。
+  api(`/api/intel/projects/${intelCurrentProject}/sources`, { headers: appHeaders() })
+    .then(r => r.json())
+    .then(d => {
+      const box = document.getElementById("intelSrcRows");
+      if (!box) return;
+      box.innerHTML = "";
+      for (const src of (d.sources || [])) addIntelSourceRow(src);
+      if (!(d.sources || []).length) addIntelSourceRow();
+    })
+    .catch(() => {});
+}
+
+// 新增一行关联源码（端 + 来源 + 目录/URL + 分支），src 为已存在项时回填。
+function addIntelSourceRow(src) {
+  const box = document.getElementById("intelSrcRows");
+  if (!box) return;
+  const row = document.createElement("div");
+  row.className = "intel-src-row";
+  row.style.cssText = "display:flex;gap:8px;align-items:center;flex-wrap:wrap";
+  const s = src || {};
+  const source = s.source === "git" ? "git" : "local";
+  row.innerHTML = `
+    <input type="text" class="s-end" placeholder="端（如 android / ios / web）" style="flex:0.9" value="${escapeHtml(s.endName || "")}">
+    <select class="s-source" onchange="toggleIntelSrcRow(this)">
+      <option value="local"${source === "local" ? " selected" : ""}>本地</option>
+      <option value="git"${source === "git" ? " selected" : ""}>Git</option>
+    </select>
+    <input type="text" class="s-path" placeholder="/path/to/repo 或 git 仓库 URL" style="flex:2" value="${escapeHtml(source === "git" ? (s.gitUrl || "") : (s.localPath || ""))}" list="intelMgrDirs">
+    <input type="text" class="s-ref" placeholder="分支（可选）" style="flex:0.9" value="${escapeHtml(s.gitRef || "")}">
+    <button class="tertiary sm" onclick="this.closest('.intel-src-row').remove()">删除</button>`;
+  toggleIntelSrcRow(row.querySelector(".s-source"));
+  box.appendChild(row);
+}
+
+function toggleIntelSrcRow(sel) {
+  const row = sel.closest(".intel-src-row");
+  if (!row) return;
+  const ref = row.querySelector(".s-ref");
+  if (ref) ref.classList.toggle("hidden", sel.value !== "git");
 }
 
 function closeIntelProjectManage() {
@@ -2913,6 +2957,7 @@ async function saveIntelProjectManage() {
     localPath: src === "local" ? document.getElementById("intelMgrPath").value.trim() : "",
     gitUrl: src === "git" ? document.getElementById("intelMgrPath").value.trim() : "",
     gitRef: src === "git" ? document.getElementById("intelMgrGitRef").value.trim() : "",
+    description: document.getElementById("intelMgrDescription") ? document.getElementById("intelMgrDescription").value.trim() : "",
   };
   if (src === "local" && !body.localPath) { show(document.getElementById("intelMgrMsg"), "请填写源码目录路径"); return; }
   if (src === "git" && !body.gitUrl) { show(document.getElementById("intelMgrMsg"), "请填写 Git 仓库 URL"); return; }
@@ -2921,6 +2966,20 @@ async function saveIntelProjectManage() {
   const res = await api("/api/intel/projects/" + intelCurrentProject, { method: "PUT", headers: appHeaders(), body: JSON.stringify(body) });
   const data = await res.json();
   if (!res.ok) { show(document.getElementById("intelMgrMsg"), data.error || "保存失败"); return; }
+  // 保存关联源码（多端多仓库）：收集每一行，整表替换。
+  const rows = [...document.querySelectorAll("#intelSrcRows .intel-src-row")].map(row => {
+    const rsrc = row.querySelector(".s-source").value;
+    return {
+      endName: row.querySelector(".s-end").value.trim(),
+      source: rsrc,
+      localPath: rsrc === "local" ? row.querySelector(".s-path").value.trim() : "",
+      gitUrl: rsrc === "git" ? row.querySelector(".s-path").value.trim() : "",
+      gitRef: rsrc === "git" ? row.querySelector(".s-ref").value.trim() : "",
+    };
+  });
+  const srcRes = await api(`/api/intel/projects/${intelCurrentProject}/sources`, { method: "PUT", headers: appHeaders(), body: JSON.stringify({ sources: rows }) });
+  const srcData = await srcRes.json();
+  if (!srcRes.ok) { show(document.getElementById("intelMgrMsg"), srcData.error || "关联源码保存失败"); return; }
   closeIntelProjectManage();
   loadIntelDetail(intelCurrentProject);
   loadIntelProjects();
@@ -2936,6 +2995,17 @@ function editIntelProjectCommands() {
   if (input === null) return;
   const list = input.split("\n").map(s => s.trim()).filter(s => s);
   api("/api/intel/projects/" + pid, { method: "PUT", headers: appHeaders(), body: JSON.stringify({ commandsJson: JSON.stringify(list) }) })
+    .then(r => r.json())
+    .then(d => { if (d.error) alert(d.error); else if (intelCurrentProject) loadIntelDetail(intelCurrentProject); });
+}
+
+// 编辑项目描述：展示在项目概览页，便于快速了解项目用途与范围。
+function editIntelProjectDescription() {
+  const pid = intelCurrentProject;
+  if (!pid) return;
+  const input = prompt("项目描述（展示在项目概览，用于快速了解项目用途与范围）", intelSummaryDescription || "");
+  if (input === null) return;
+  api("/api/intel/projects/" + pid, { method: "PUT", headers: appHeaders(), body: JSON.stringify({ description: input.trim() }) })
     .then(r => r.json())
     .then(d => { if (d.error) alert(d.error); else if (intelCurrentProject) loadIntelDetail(intelCurrentProject); });
 }
@@ -3006,6 +3076,7 @@ async function loadIntelSummary(id) {
   const loc = p.source === "git" ? p.gitUrl : p.localPath;
   intelSummaryCommands = [];
   try { intelSummaryCommands = JSON.parse(p.commandsJson || "[]"); } catch (_) {}
+  intelSummaryDescription = p.description || "";
 
   // 并行拉取各维度统计
   const [epRes, entRes, featRes, caseRes, findRes, issueRes, fixRes, runRes, ovRes, pendRes] = await Promise.all([
@@ -3048,8 +3119,12 @@ async function loadIntelSummary(id) {
     <div class="card" style="margin:0">
       <div class="row" style="justify-content:space-between">
         <strong style="font-size:13px">项目画像</strong>
-        <span class="intel-status ${p.analyzedAt ? "analyzed" : "pending"}">${p.analyzedAt ? "已分析" : "待分析"}</span>
+        <div class="row" style="gap:6px">
+          <span class="intel-status ${p.analyzedAt ? "analyzed" : "pending"}">${p.analyzedAt ? "已分析" : "待分析"}</span>
+          <button class="ghost sm" onclick="editIntelProjectDescription()">编辑描述</button>
+        </div>
       </div>
+      ${p.description ? `<div style="margin-top:8px;padding:10px 12px;background:var(--surface-2);border:1px solid var(--hairline);border-radius:var(--r-sm);font-size:12.5px;line-height:1.6;white-space:pre-wrap">${escapeHtml(p.description)}</div>` : `<div class="muted" style="font-size:12px;margin-top:8px">（暂无项目描述，点击「编辑描述」补充）</div>`}
       <div class="muted" style="font-size:12px;margin-top:8px;display:flex;flex-direction:column;gap:4px">
         <div>来源：${escapeHtml(p.source || "-")} · 路径：<span class="mono">${escapeHtml(loc || "-")}</span></div>
         <div>Git 分支：<span class="mono">${escapeHtml(p.gitRef || "默认")}</span> · 最近分析：${p.analyzedAt ? new Date(p.analyzedAt).toLocaleString() : "未分析"}</div>
@@ -3134,13 +3209,25 @@ async function loadIntelContracts(id) {
       <td class="clip">${escapeHtml(ep.responseType || "-")}</td>
       <td class="clip muted" title="${escapeHtml(ep.requestJson || "")}">${escapeHtml(ep.requestJson || "-")}</td>
       <td class="mono muted clip" title="${escapeHtml(ep.sourceFile)}">${escapeHtml(shortProv(ep.sourceFile, ep.sourceLine))}</td>
-      <td><button class="ghost sm" onclick="openIntelMock(${idx})">模拟</button></td>
+      <td><button class="ghost sm" onclick="openIntelMock(${idx})">模拟</button> <button class="ghost sm" onclick="editEndpointSummary(${ep.id}, '${escapeHtml(ep.summary || "")}')">修正</button></td>
     </tr>`);
   });
   if (!eps.length) etb.insertAdjacentHTML("beforeend", `<tr><td colspan="7" class="muted" style="text-align:center;padding:16px">暂无接口契约（分析后自动提取）</td></tr>`);
 
   // 实体按表分组：每张表一个卡片，列出全部字段（字段名/类型/主键/可空）
   renderIntelEntities(ents);
+}
+
+// 修正接口摘要：人工/LLM 修正写入覆写层，重新分析不被覆盖。
+async function editEndpointSummary(endpointId, summary) {
+  const next = prompt("修正该接口的业务描述（存入覆写层，重新分析不覆盖）", summary || "");
+  if (next === null) return;
+  const text = next.trim();
+  if (!text || text === summary) return;
+  const res = await api("/api/intel/endpoints/" + endpointId + "/overrides", { method: "PUT", headers: appHeaders(), body: JSON.stringify({ summary: text }) });
+  const data = await res.json();
+  if (!res.ok) { alert(data.error || "保存失败"); return; }
+  if (intelCurrentProject) loadIntelContracts(intelCurrentProject);
 }
 
 // renderIntelEntities 按表分组渲染实体：一张表 = 一张卡片，展示列契约。

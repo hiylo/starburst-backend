@@ -68,11 +68,10 @@ func registerDir(dir, rel string, mods map[string]*store.IntelModule) {
 		return
 	}
 	mods[rel] = &store.IntelModule{
-		RelPath:      rel,
-		KindType:     t,
-		KindRole:     roleForType(t),
-		BuildTool:    buildToolForNames(anchors),
-		CommandsJSON: CommandsJSONForType(t),
+		RelPath:   rel,
+		KindType:  t,
+		KindRole:  roleForType(t),
+		BuildTool: buildToolForNames(anchors),
 	}
 }
 

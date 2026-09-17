@@ -60,6 +60,11 @@ func (s *Server) handleIntelProjectByID(w http.ResponseWriter, r *http.Request) 
 	if !ok {
 		return
 	}
+	// 关联源码目录/仓库子资源：/api/intel/projects/{id}/sources
+	if strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/intel/projects/"+strconv.FormatInt(id, 10)), "/") == "sources" {
+		s.handleIntelProjectSources(w, r, id)
+		return
+	}
 	switch r.Method {
 	case http.MethodGet:
 		s.getIntelProject(w, r, id)
@@ -133,7 +138,87 @@ func (s *Server) handleIntelEndpoints(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.enrichGatewayRoutes(ctx, projectID, eps)
+	s.applyEndpointOverrides(ctx, projectID, eps)
 	writeJSON(w, http.StatusOK, map[string]any{"endpoints": eps})
+}
+
+// handleIntelEndpointOverrides saves a human/LLM correction for one endpoint
+// (field=summary) into the overrides layer, keyed by its natural key
+// "METHOD path" so it survives re-analysis (only auto values are rebuilt).
+func (s *Server) handleIntelEndpointOverrides(w http.ResponseWriter, r *http.Request) {
+	if !s.requireWeb(r) {
+		if _, ok := s.requireToken(r); !ok {
+			writeErr(w, http.StatusUnauthorized, "web session or APP token required")
+			return
+		}
+	}
+	if r.Method != http.MethodPut {
+		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	id, ok := s.intelIDFromPath(r, "/api/intel/endpoints/")
+	if !ok {
+		return
+	}
+	var req struct {
+		Summary string `json:"summary"`
+	}
+	if err := readJSONLimited(w, r, &req); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	summary := strings.TrimSpace(req.Summary)
+	if summary == "" {
+		writeErr(w, http.StatusBadRequest, "summary is required")
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+	ep, err := s.store.GetIntelEndpoint(ctx, id)
+	if err != nil {
+		writeErr(w, http.StatusNotFound, "endpoint not found")
+		return
+	}
+	if err := s.store.UpsertIntelOverride(ctx, &store.IntelOverride{
+		ProjectID:   ep.ProjectID,
+		Target:      "endpoint",
+		RowKey:      ep.Method + " " + ep.Path,
+		Field:       "summary",
+		ManualValue: summary,
+		Confidence:  "high",
+		Status:      "applied",
+		Source:      "manual",
+	}); err != nil {
+		writeErr(w, http.StatusInternalServerError, "save correction failed")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "key": ep.Method + " " + ep.Path})
+}
+
+// applyEndpointOverrides merges human-confirmed endpoint corrections (target=
+// endpoint, row_key="METHOD path", field=summary) into the endpoint list at read
+// time, so manual/LLM fixes survive re-analysis (only auto values are rebuilt).
+func (s *Server) applyEndpointOverrides(ctx context.Context, projectID int64, eps []*store.IntelEndpoint) {
+	overrides, err := s.store.ListIntelOverrides(ctx, projectID, false)
+	if err != nil {
+		return
+	}
+	byKey := make(map[string]string)
+	for _, o := range overrides {
+		if o.Status != "applied" || o.Target != "endpoint" || o.Field != "summary" || o.ManualValue == "" {
+			continue
+		}
+		byKey[o.RowKey] = o.ManualValue
+	}
+	for _, ep := range eps {
+		if ep == nil {
+			continue
+		}
+		key := ep.Method + " " + ep.Path
+		if v, ok := byKey[key]; ok {
+			ep.Summary = v
+		}
+	}
 }
 
 // enrichGatewayRoutes attaches the matched public gateway path patterns to each
@@ -761,6 +846,92 @@ func (s *Server) updateIntelProject(w http.ResponseWriter, r *http.Request, id i
 	writeJSON(w, http.StatusOK, p)
 }
 
+// handleIntelProjectSources manages the project's associated source repos
+// (多端多仓库): GET lists them, PUT replaces the whole list.
+func (s *Server) handleIntelProjectSources(w http.ResponseWriter, r *http.Request, projectID int64) {
+	switch r.Method {
+	case http.MethodGet:
+		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+		defer cancel()
+		sources, err := s.store.ListIntelProjectSources(ctx, projectID)
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, "load project sources failed")
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"sources": sources})
+	case http.MethodPut:
+		var req struct {
+			Sources []*struct {
+				EndName   string `json:"endName"`
+				Source    string `json:"source"`
+				LocalPath string `json:"localPath"`
+				GitURL    string `json:"gitUrl"`
+				GitRef    string `json:"gitRef"`
+			} `json:"sources"`
+		}
+		if err := readJSONLimited(w, r, &req); err != nil {
+			writeErr(w, http.StatusBadRequest, "invalid request body")
+			return
+		}
+		sources := make([]*store.IntelProjectSource, 0, len(req.Sources))
+		seen := make(map[string]bool)
+		for _, item := range req.Sources {
+			if item == nil {
+				continue
+			}
+			src := &store.IntelProjectSource{
+				EndName:   strings.TrimSpace(item.EndName),
+				Source:    strings.TrimSpace(item.Source),
+				LocalPath: strings.TrimSpace(item.LocalPath),
+				GitURL:    strings.TrimSpace(item.GitURL),
+				GitRef:    strings.TrimSpace(item.GitRef),
+			}
+			if src.Source == "" {
+				src.Source = "local"
+			}
+			switch src.Source {
+			case "local":
+				if src.LocalPath == "" {
+					writeErr(w, http.StatusBadRequest, "local 关联源码必须填写目录路径")
+					return
+				}
+				if fi, err := os.Stat(src.LocalPath); err != nil || !fi.IsDir() {
+					writeErr(w, http.StatusBadRequest, "关联源码目录不存在或不是目录: "+src.LocalPath)
+					return
+				}
+				src.GitURL = ""
+				src.GitRef = ""
+			case "git":
+				if src.GitURL == "" {
+					writeErr(w, http.StatusBadRequest, "git 关联源码必须填写仓库 URL")
+					return
+				}
+				src.LocalPath = ""
+			default:
+				writeErr(w, http.StatusBadRequest, "source 只能是 local 或 git")
+				return
+			}
+			if src.EndName != "" {
+				if seen[src.EndName] {
+					writeErr(w, http.StatusBadRequest, "端名不能重复: "+src.EndName)
+					return
+				}
+				seen[src.EndName] = true
+			}
+			sources = append(sources, src)
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+		defer cancel()
+		if err := s.store.ReplaceIntelProjectSources(ctx, projectID, sources); err != nil {
+			writeErr(w, http.StatusInternalServerError, "save project sources failed")
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "sources": sources})
+	default:
+		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
+	}
+}
+
 // runIntelAnalyze resolves the project's working directory, detects modules,
 // scans contracts per module and persists everything. It records snapshot sha
 // (HEAD for git, directory-mtime-hash for local non-git).
@@ -776,9 +947,30 @@ func (s *Server) runIntelAnalyze(ctx context.Context, projectID int64) error {
 	if fi, err := os.Stat(root); err != nil || !fi.IsDir() {
 		return errNotDir(root)
 	}
-	mods, err := intel.DetectModules(root)
+	// 关联源码（多端多仓库）：每个关联源仓库作为额外的模块扫描根，模块 rel_path
+	// 以 "@<端>/" 前缀标识归属，保证与主仓库模块的唯一性。
+	sources, _ := s.store.ListIntelProjectSources(ctx, projectID)
+	var mods []*store.IntelModule
+	mainMods, err := intel.DetectModules(root)
 	if err != nil {
 		return err
+	}
+	mods = append(mods, mainMods...)
+	for _, src := range sources {
+		srcRoot, err := s.resolveIntelSourceRoot(ctx, p, src)
+		if err != nil {
+			log.Printf("intel project %d source %d root: %v", projectID, src.ID, err)
+			continue
+		}
+		srcMods, err := intel.DetectModules(srcRoot)
+		if err != nil {
+			continue
+		}
+		prefix := intelSourcePrefix(src)
+		for _, m := range srcMods {
+			m.RelPath = prefix + m.RelPath
+		}
+		mods = append(mods, srcMods...)
 	}
 	if err := s.store.ReplaceIntelModules(ctx, projectID, mods); err != nil {
 		return err
@@ -792,7 +984,11 @@ func (s *Server) runIntelAnalyze(ctx context.Context, projectID int64) error {
 	var allEntities []*store.IntelEntity
 	var allCases []*store.TestCase
 	for _, m := range mods {
-		sum, err := intel.ScanModule(root, m.RelPath)
+		scanRoot, rel := root, m.RelPath
+		if srcRoot, srcRel, ok := s.sourceModuleRoot(ctx, p, sources, m.RelPath); ok {
+			scanRoot, rel = srcRoot, srcRel
+		}
+		sum, err := intel.ScanModule(scanRoot, rel)
 		if err != nil {
 			continue
 		}
@@ -804,7 +1000,7 @@ func (s *Server) runIntelAnalyze(ctx context.Context, projectID int64) error {
 		}
 		allEntities = append(allEntities, sum.Entities...)
 		allEndpoints = append(allEndpoints, sum.Endpoints...)
-		assets, err := testassets.Discover(root, m.RelPath)
+		assets, err := testassets.Discover(scanRoot, rel)
 		if err == nil {
 			allCases = append(allCases, buildTestCases(m, assets)...)
 		}
@@ -1311,6 +1507,71 @@ func (s *Server) projectRoot(ctx context.Context, p *store.IntelProject) (string
 		return "", err
 	}
 	return target, nil
+}
+
+// intelSourcePrefix builds the unique rel-path token prefix for modules that
+// belong to an associated source repo, e.g. "@android/". The end name is
+// sanitized; a numeric id fallback keeps it unique when the end name is blank.
+func intelSourcePrefix(src *store.IntelProjectSource) string {
+	token := strings.TrimSpace(src.EndName)
+	if token == "" {
+		token = strconv.FormatInt(src.ID, 10)
+	}
+	var b strings.Builder
+	for _, r := range token {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_':
+			b.WriteRune(r)
+		default:
+			b.WriteRune('-')
+		}
+	}
+	return "@" + b.String() + "/"
+}
+
+// resolveIntelSourceRoot resolves the working directory of an associated source
+// repo: the local path when source=local, or a per-source git clone under the
+// repos_dir cache (distinct from the main project clone).
+func (s *Server) resolveIntelSourceRoot(ctx context.Context, p *store.IntelProject, src *store.IntelProjectSource) (string, error) {
+	if src.Source == "local" && src.LocalPath != "" {
+		return src.LocalPath, nil
+	}
+	reposDir, err := s.store.GetSetting(ctx, "intel.repos_dir")
+	if err != nil || reposDir == "" {
+		return "", errSettingMissing("intel.repos_dir not configured for git project sources")
+	}
+	target := filepath.Join(reposDir, safeName(p.Name)+"-src-"+strconv.FormatInt(src.ID, 10))
+	clone := &store.IntelProject{Name: p.Name, GitURL: src.GitURL, GitRef: src.GitRef}
+	if err := s.ensureGitClone(ctx, clone, target); err != nil {
+		return "", err
+	}
+	return target, nil
+}
+
+// sourceModuleRoot resolves the working directory for a module whose rel_path
+// may belong to an associated source repo ("@end/..."). ok is false when the
+// module lives in the project's primary root.
+func (s *Server) sourceModuleRoot(ctx context.Context, p *store.IntelProject, sources []*store.IntelProjectSource, relPath string) (string, string, bool) {
+	if !strings.HasPrefix(relPath, "@") {
+		return "", "", false
+	}
+	slash := strings.IndexByte(relPath, '/')
+	if slash <= 0 {
+		return "", "", false
+	}
+	token := relPath[1:slash]
+	for _, src := range sources {
+		prefixToken := strings.TrimSuffix(strings.TrimPrefix(intelSourcePrefix(src), "@"), "/")
+		if token != prefixToken {
+			continue
+		}
+		root, err := s.resolveIntelSourceRoot(ctx, p, src)
+		if err != nil {
+			return "", "", false
+		}
+		return root, relPath[slash+1:], true
+	}
+	return "", "", false
 }
 
 // ensureGitClone clones a git project into target on first use, and refreshes

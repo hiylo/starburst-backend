@@ -256,6 +256,10 @@ type Store interface {
 	ListIntelModules(ctx context.Context, projectID int64) ([]*IntelModule, error)
 	// GetIntelModule loads a single module by id.
 	GetIntelModule(ctx context.Context, id int64) (*IntelModule, error)
+	// ListIntelProjectSources returns the project's associated source repos.
+	ListIntelProjectSources(ctx context.Context, projectID int64) ([]*IntelProjectSource, error)
+	// ReplaceIntelProjectSources replaces the project's associated source list.
+	ReplaceIntelProjectSources(ctx context.Context, projectID int64, sources []*IntelProjectSource) error
 	// UpdateIntelModuleSummary persists the LLM-generated module business summary.
 	UpdateIntelModuleSummary(ctx context.Context, id int64, summary string) error
 	// ReplaceIntelEntities replaces the project's entity↔table↔column mappings.

@@ -190,6 +190,7 @@ func (s *sqlStore) DeleteIntelProject(ctx context.Context, id int64) error {
 		`DELETE FROM intel_chunks WHERE project_id = ?`,
 		`DELETE FROM intel_endpoints WHERE project_id = ?`,
 		`DELETE FROM intel_entities WHERE project_id = ?`,
+		`DELETE FROM project_sources WHERE project_id = ?`,
 		`DELETE FROM project_modules WHERE project_id = ?`,
 		`DELETE FROM projects WHERE id = ?`,
 	}

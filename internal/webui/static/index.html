@@ -404,6 +404,9 @@
             <input type="text" id="intelGitRef" placeholder="分支/tag（可选）" style="flex:1" class="hidden">
             <button onclick="createIntelProject()">添加项目</button>
           </div>
+          <div style="margin-top:var(--sp-sm)">
+            <textarea id="intelDescription" placeholder="项目描述（可选，展示在项目概览页）" style="width:100%;min-height:56px;resize:vertical"></textarea>
+          </div>
           <div id="intelMsg" class="msg"></div>
         </div>
 
@@ -431,12 +434,44 @@
                   <h2><span class="dot"></span><span id="intelDetailName" class="mono" style="font-size:16px"></span></h2>
                 </div>
                 <div class="row">
+                  <button class="ghost" onclick="openIntelProjectManage()">项目管理</button>
                   <button onclick="runIntelAnalyze()">执行分析</button>
                   <button class="ghost" onclick="runIntelTests()">运行测试</button>
                   <span id="intelAnalyzeStatus" class="muted" style="font-size:12px"></span>
                 </div>
               </div>
               <div class="row muted" style="font-size:12px" id="intelDetailMeta"></div>
+
+              <!-- 项目管理：编辑项目信息 + 设置关联源码目录 / 仓库 -->
+              <div class="card hidden" id="intelProjectManage" style="margin-top:var(--sp-sm)">
+                <div class="row" style="justify-content:space-between;align-items:center;margin-bottom:var(--sp-sm)">
+                  <strong style="font-size:13px">项目管理 · 关联源码目录 / 仓库</strong>
+                  <button class="ghost sm" onclick="closeIntelProjectManage()">收起</button>
+                </div>
+                <div class="row">
+                  <input type="text" id="intelMgrName" placeholder="项目名" style="flex:1.2">
+                  <select id="intelMgrSource" onchange="toggleIntelMgrSource()">
+                    <option value="local">本地路径</option>
+                    <option value="git">Git 仓库</option>
+                  </select>
+                  <input type="text" id="intelMgrPath" placeholder="/path/to/repo" style="flex:2.5" list="intelMgrDirs">
+                  <input type="text" id="intelMgrGitRef" placeholder="分支/tag（可选）" style="flex:1" class="hidden">
+                </div>
+                <datalist id="intelMgrDirs"></datalist>
+
+                <div class="row" style="justify-content:space-between;align-items:center;margin:16px 0 6px">
+                  <div class="muted" style="font-size:12px">关联源码目录 / 仓库（多端多仓库：每个端可有独立源码仓库）</div>
+                  <button class="ghost sm" onclick="addIntelSourceRow()">+ 添加关联源码</button>
+                </div>
+                <div id="intelSrcRows" style="display:flex;flex-direction:column;gap:8px"></div>
+
+                <textarea id="intelMgrDescription" placeholder="项目描述（可选，展示在项目概览页）" style="width:100%;min-height:56px;resize:vertical;margin-top:var(--sp-sm)"></textarea>
+                <div class="row" style="margin-top:var(--sp-sm)">
+                  <button onclick="saveIntelProjectManage()">保存</button>
+                  <button class="ghost" onclick="closeIntelProjectManage()">取消</button>
+                  <span id="intelMgrMsg" class="msg"></span>
+                </div>
+              </div>
 
               <!-- 概览统计 -->
               <div class="stat-grid" style="margin-top:var(--sp-md)">
@@ -447,7 +482,8 @@
               </div>
 
               <div class="intel-tabs">
-                <button class="intel-tab active" data-tab="modules">子模块</button>
+                <button class="intel-tab active" data-tab="summary">项目概览</button>
+                <button class="intel-tab" data-tab="modules">子模块</button>
                 <button class="intel-tab" data-tab="endpoints">接口契约</button>
                 <button class="intel-tab" data-tab="entities">实体 / 表 / 列</button>
                 <button class="intel-tab" data-tab="bindings">客户端绑定</button>
@@ -463,9 +499,12 @@
                 <button class="intel-tab" data-tab="pending">待确认</button>
               </div>
 
-              <div class="intel-panel" id="intelPanel-modules">
+              <div class="intel-panel" id="intelPanel-summary">
+                <div id="intelSummaryList"></div>
+              </div>
+              <div class="intel-panel hidden" id="intelPanel-modules">
                 <div class="table-wrap">
-                  <table id="intelModuleTable"><thead><tr><th>路径</th><th>类型</th><th>角色</th><th>构建工具</th><th>命令白名单</th><th>操作</th></tr></thead><tbody></tbody></table>
+                  <table id="intelModuleTable"><thead><tr><th>路径</th><th>类型</th><th>角色</th><th>构建工具</th><th>操作</th></tr></thead><tbody></tbody></table>
                 </div>
                 <div id="intelModuleDetail" style="margin-top:var(--sp-sm)"></div>
               </div>

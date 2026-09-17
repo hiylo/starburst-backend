@@ -200,6 +200,7 @@ func (s *Server) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/intel/chats", s.handleIntelChats)
 	mux.HandleFunc("/api/intel/chats/", s.handleIntelChatByID)
 	mux.HandleFunc("/api/intel/endpoints", s.handleIntelEndpoints)
+	mux.HandleFunc("/api/intel/endpoints/", s.handleIntelEndpointOverrides)
 	mux.HandleFunc("/api/intel/entities", s.handleIntelEntities)
 	mux.HandleFunc("/api/intel/modules", s.handleIntelModules)
 	mux.HandleFunc("/api/intel/gateway-routes", s.handleIntelGatewayRoutes)

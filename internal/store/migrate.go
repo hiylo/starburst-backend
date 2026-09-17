@@ -120,6 +120,8 @@ var migrations = []migration{
 	{name: "intel_feature_chats", apply: migrationIntelFeatureChats},
 	{name: "remote_nodes_work_dir", apply: migrationRemoteNodesWorkDir},
 	{name: "project_modules_summary", apply: migrationProjectModulesSummary},
+	{name: "projects_description", apply: migrationProjectsDescription},
+	{name: "intel_project_sources", apply: migrationIntelProjectSources},
 }
 
 // migrationIntel creates the Test Intelligence subsystem tables: flat project
@@ -1198,5 +1200,29 @@ func migrationRemoteNodesWorkDir(ctx context.Context, driver string, db *sql.DB)
 // column (lazy: first detail view generates it, then it is cached here).
 func migrationProjectModulesSummary(ctx context.Context, driver string, db *sql.DB) error {
 	_, err := db.ExecContext(ctx, `ALTER TABLE project_modules ADD COLUMN summary TEXT NOT NULL DEFAULT ''`)
+	return err
+}
+
+// migrationProjectsDescription adds the free-text project description column
+// (shown on the project overview page; empty by default).
+func migrationProjectsDescription(ctx context.Context, driver string, db *sql.DB) error {
+	_, err := db.ExecContext(ctx, `ALTER TABLE projects ADD COLUMN description TEXT NOT NULL DEFAULT ''`)
+	return err
+}
+
+// migrationIntelProjectSources adds the per-end associated source repos of an
+// intel project (多端多仓库): each row is one 端's repo (local path or git URL),
+// while the project's own local_path/git_url remains the primary root.
+func migrationIntelProjectSources(ctx context.Context, driver string, db *sql.DB) error {
+	_, err := db.ExecContext(ctx, fmt.Sprintf(`CREATE TABLE IF NOT EXISTS project_sources (
+		%s,
+		project_id INTEGER NOT NULL DEFAULT 0,
+		end_name TEXT NOT NULL DEFAULT '',
+		source TEXT NOT NULL DEFAULT 'local',
+		local_path TEXT NOT NULL DEFAULT '',
+		git_url TEXT NOT NULL DEFAULT '',
+		git_ref TEXT NOT NULL DEFAULT '',
+		created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+	)`, idColumn(driver)))
 	return err
 }

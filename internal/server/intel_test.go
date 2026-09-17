@@ -1331,6 +1331,181 @@ func TestIntelProjectSourceAssociationUpdate(t *testing.T) {
 	}
 }
 
+// TestIntelProjectSourcesCRUD verifies the associated source repos (多端多仓库)
+// list/replace API: add/mix git+local, duplicate end names rejected, empty list
+// clears the project's sources.
+func TestIntelProjectSourcesCRUD(t *testing.T) {
+	s := newTestServer(t)
+	wh := loginWeb(t, s)
+
+	root := t.TempDir()
+	writeTestFile(t, filepath.Join(root, "pom.xml"), `<project></project>`)
+	rec := s.do(t, http.MethodPost, "/api/intel/projects",
+		`{"name":"demo","source":"local","localPath":"`+filepath.ToSlash(root)+`"}`, wh)
+	var proj struct {
+		ID int64 `json:"id"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &proj); err != nil || proj.ID == 0 {
+		t.Fatalf("create project: %s", rec.Body.String())
+	}
+
+	// 关联两个源：本地 android + git bff。
+	androidRoot := t.TempDir()
+	writeTestFile(t, filepath.Join(androidRoot, "pom.xml"), `<project></project>`)
+	rec = s.do(t, http.MethodPut, "/api/intel/projects/"+jsonInt(proj.ID)+"/sources",
+		`{"sources":[{"endName":"android","source":"local","localPath":"`+filepath.ToSlash(androidRoot)+`"},
+		              {"endName":"bff","source":"git","gitUrl":"https://gitlab.example.com/group/bff.git","gitRef":"main"}]}`, wh)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("put sources status %d: %s", rec.Code, rec.Body.String())
+	}
+
+	rec = s.do(t, http.MethodGet, "/api/intel/projects/"+jsonInt(proj.ID)+"/sources", "", wh)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("get sources status %d", rec.Code)
+	}
+	var listResp struct {
+		Sources []struct {
+			EndName   string `json:"endName"`
+			Source    string `json:"source"`
+			LocalPath string `json:"localPath"`
+			GitURL    string `json:"gitUrl"`
+			GitRef    string `json:"gitRef"`
+		} `json:"sources"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &listResp); err != nil {
+		t.Fatalf("sources parse: %v", err)
+	}
+	if len(listResp.Sources) != 2 {
+		t.Fatalf("expected 2 sources, got %+v", listResp.Sources)
+	}
+	if listResp.Sources[0].EndName != "android" || listResp.Sources[0].Source != "local" ||
+		listResp.Sources[0].LocalPath != filepath.ToSlash(androidRoot) {
+		t.Errorf("android source mismatch: %+v", listResp.Sources[0])
+	}
+	if listResp.Sources[1].EndName != "bff" || listResp.Sources[1].Source != "git" ||
+		listResp.Sources[1].GitURL != "https://gitlab.example.com/group/bff.git" || listResp.Sources[1].GitRef != "main" {
+		t.Errorf("bff source mismatch: %+v", listResp.Sources[1])
+	}
+
+	// 空列表清空。
+	rec = s.do(t, http.MethodPut, "/api/intel/projects/"+jsonInt(proj.ID)+"/sources",
+		`{"sources":[]}`, wh)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("clear sources status %d: %s", rec.Code, rec.Body.String())
+	}
+	rec = s.do(t, http.MethodGet, "/api/intel/projects/"+jsonInt(proj.ID)+"/sources", "", wh)
+	var cleared struct {
+		Sources []any `json:"sources"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &cleared); err != nil {
+		t.Fatalf("cleared parse: %v", err)
+	}
+	if len(cleared.Sources) != 0 {
+		t.Errorf("sources not cleared: %+v", cleared.Sources)
+	}
+
+	// 重复端名拒绝。
+	rec = s.do(t, http.MethodPut, "/api/intel/projects/"+jsonInt(proj.ID)+"/sources",
+		`{"sources":[{"endName":"ios","source":"local","localPath":"`+filepath.ToSlash(androidRoot)+`"},
+		              {"endName":"ios","source":"git","gitUrl":"https://x/y.git"}]}`, wh)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("duplicate end name should 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestIntelAnalyzeMultiSource verifies analysis covers associated source repos:
+// modules from a second repo are detected under a "@<端>/" prefix and their
+// endpoint contracts are aggregated alongside the primary repo's.
+func TestIntelAnalyzeMultiSource(t *testing.T) {
+	s := newTestServer(t)
+	wh := loginWeb(t, s)
+
+	mainRoot := t.TempDir()
+	writeTestFile(t, filepath.Join(mainRoot, "pom.xml"), `<project></project>`)
+	writeTestFile(t, filepath.Join(mainRoot, "src/main/java/demo/UserController.java"), `package demo;
+import org.springframework.web.bind.annotation.*;
+@RestController
+@RequestMapping("/api/users")
+public class UserController {
+    @GetMapping("/list")
+    public java.util.List<demo.UserEntity> list() { return null; }
+}`)
+
+	bffRoot := t.TempDir()
+	writeTestFile(t, filepath.Join(bffRoot, "pom.xml"), `<project></project>`)
+	writeTestFile(t, filepath.Join(bffRoot, "src/main/java/bff/OrderController.java"), `package bff;
+import org.springframework.web.bind.annotation.*;
+@RestController
+@RequestMapping("/api/bff/orders")
+public class OrderController {
+    @GetMapping("/list")
+    public java.util.List<Object> list() { return null; }
+}`)
+
+	rec := s.do(t, http.MethodPost, "/api/intel/projects",
+		`{"name":"multi","source":"local","localPath":"`+filepath.ToSlash(mainRoot)+`"}`, wh)
+	var proj struct {
+		ID int64 `json:"id"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &proj); err != nil || proj.ID == 0 {
+		t.Fatalf("create project: %s", rec.Body.String())
+	}
+	rec = s.do(t, http.MethodPut, "/api/intel/projects/"+jsonInt(proj.ID)+"/sources",
+		`{"sources":[{"endName":"bff","source":"local","localPath":"`+filepath.ToSlash(bffRoot)+`"}]}`, wh)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("put sources status %d: %s", rec.Code, rec.Body.String())
+	}
+	rec = s.do(t, http.MethodPost, "/api/intel/analyze",
+		`{"projectId":`+jsonInt(proj.ID)+`}`, wh)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("analyze status %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// 模块列表应包含 "@bff/" 前缀模块（来自关联仓库）。
+	rec = s.do(t, http.MethodGet, "/api/intel/projects/"+jsonInt(proj.ID), "", wh)
+	var detail struct {
+		Modules []struct {
+			RelPath string `json:"relPath"`
+		} `json:"modules"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &detail); err != nil {
+		t.Fatalf("detail parse: %v", err)
+	}
+	prefixed := false
+	for _, m := range detail.Modules {
+		if strings.HasPrefix(m.RelPath, "@bff/") {
+			prefixed = true
+		}
+	}
+	if !prefixed {
+		t.Fatalf("no @bff prefixed module found: %+v", detail.Modules)
+	}
+
+	// 关联仓库的端点在契约列表里（与主仓库契约一同聚合）。
+	rec = s.do(t, http.MethodGet, "/api/intel/endpoints?projectId="+jsonInt(proj.ID), "", wh)
+	var epResp struct {
+		Endpoints []struct {
+			Path string `json:"path"`
+		} `json:"endpoints"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &epResp); err != nil {
+		t.Fatalf("endpoints parse: %v", err)
+	}
+	foundUsers, foundOrders := false, false
+	for _, e := range epResp.Endpoints {
+		if strings.Contains(e.Path, "/api/users") {
+			foundUsers = true
+		}
+		if strings.Contains(e.Path, "/api/bff/orders") {
+			foundOrders = true
+		}
+	}
+	if !foundUsers || !foundOrders {
+		t.Errorf("expected both primary and associated endpoints, got %+v (users=%v orders=%v)",
+			epResp.Endpoints, foundUsers, foundOrders)
+	}
+}
+
 // TestIntelEnvExternalConfig verifies an externally provided middleware
 // endpoint: it is probed once, persisted with provider=external, and survives
 // subsequent re-probes (the gate treats it as ready when reachable).
@@ -2776,5 +2951,98 @@ func TestIntelModuleManualOverridesSurviveReanalyze(t *testing.T) {
 	}
 	if md.Module.KindRole != "app" || md.Module.Summary != "人工修正的模块说明" {
 		t.Errorf("overrides lost after re-analyze: %+v", md.Module)
+	}
+}
+
+// TestIntelEndpointSummaryOverrideSurvivesReanalyze verifies a manual endpoint
+// summary correction is keyed by "METHOD path" and survives re-analysis.
+func TestIntelEndpointSummaryOverrideSurvivesReanalyze(t *testing.T) {
+	s := newTestServer(t)
+	wh := loginWeb(t, s)
+
+	root := t.TempDir()
+	writeTestFile(t, filepath.Join(root, "pom.xml"), `<project></project>`)
+	writeTestFile(t, filepath.Join(root, "src/main/java/demo/UserController.java"), `package demo;
+import org.springframework.web.bind.annotation.*;
+@RestController
+@RequestMapping("/api/users")
+public class UserController {
+    @GetMapping("/list")
+    public java.util.List<demo.UserEntity> list() { return null; }
+}`)
+
+	rec := s.do(t, http.MethodPost, "/api/intel/projects",
+		`{"name":"demo","source":"local","localPath":"`+filepath.ToSlash(root)+`"}`, wh)
+	var proj struct {
+		ID int64 `json:"id"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &proj); err != nil || proj.ID == 0 {
+		t.Fatalf("create project: %s", rec.Body.String())
+	}
+	rec = s.do(t, http.MethodPost, "/api/intel/analyze",
+		`{"projectId":`+jsonInt(proj.ID)+`}`, wh)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("analyze status %d: %s", rec.Code, rec.Body.String())
+	}
+
+	listEndpoints := func() ([]struct {
+		ID      int64  `json:"id"`
+		Method  string `json:"method"`
+		Path    string `json:"path"`
+		Summary string `json:"summary"`
+	}, *httptest.ResponseRecorder) {
+		rec := s.do(t, http.MethodGet, "/api/intel/endpoints?projectId="+jsonInt(proj.ID), "", wh)
+		var resp struct {
+			Endpoints []struct {
+				ID      int64  `json:"id"`
+				Method  string `json:"method"`
+				Path    string `json:"path"`
+				Summary string `json:"summary"`
+			} `json:"endpoints"`
+		}
+		_ = json.Unmarshal(rec.Body.Bytes(), &resp)
+		return resp.Endpoints, rec
+	}
+
+	eps, rec := listEndpoints()
+	if len(eps) == 0 {
+		t.Fatalf("no endpoints: %s", rec.Body.String())
+	}
+	target := eps[0]
+
+	// Human edit the summary.
+	rec = s.do(t, http.MethodPut, "/api/intel/endpoints/"+jsonInt(target.ID)+"/overrides",
+		`{"summary":"人工修正的接口说明"}`, wh)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("overrides status %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// Verify it is applied at read time.
+	eps, _ = listEndpoints()
+	if len(eps) == 0 || eps[0].Summary != "人工修正的接口说明" {
+		t.Fatalf("override not applied: %+v", eps)
+	}
+
+	// Re-analyze: auto summary is rebuilt but the manual correction must win.
+	rec = s.do(t, http.MethodPost, "/api/intel/analyze",
+		`{"projectId":`+jsonInt(proj.ID)+`}`, wh)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("re-analyze status %d", rec.Code)
+	}
+	eps, _ = listEndpoints()
+	if len(eps) == 0 {
+		t.Fatalf("endpoints lost after re-analyze")
+	}
+	found := false
+	for _, ep := range eps {
+		if ep.Method == target.Method && ep.Path == target.Path {
+			found = true
+			if ep.Summary != "人工修正的接口说明" {
+				t.Errorf("endpoint override lost after re-analyze: %+v", ep)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("endpoint %s %s not found after re-analyze", target.Method, target.Path)
 	}
 }

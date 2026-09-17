@@ -346,18 +346,28 @@ func (s *Server) runIntelTests(ctx context.Context, projectID, moduleID, nodeID 
 		return nil, fmt.Errorf("module %d not found", moduleID)
 	}
 
+	// 模块可能来自关联源码仓库（多端多仓库，"@end/" 前缀）：用该仓库的根目录，
+	// 否则用项目主源码根目录。
 	dir := filepath.Join(root, module.RelPath)
 	if module.RelPath == "." {
 		dir = root
+	}
+	sources, _ := s.store.ListIntelProjectSources(ctx, projectID)
+	if srcRoot, srcRel, ok := s.sourceModuleRoot(ctx, p, sources, module.RelPath); ok {
+		dir = filepath.Join(srcRoot, srcRel)
+		if srcRel == "." {
+			dir = srcRoot
+		}
 	}
 	cmdArgs, reportKind := testCommandFor(module.BuildTool, module.KindType)
 	if len(cmdArgs) == 0 {
 		return nil, fmt.Errorf("unsupported build tool %q for module %s", module.BuildTool, module.RelPath)
 	}
-	// Honor the human-reviewed command whitelist (commands_json) when it offers
-	// a matching test command; the whitelist is parsed into argv (no shell), so
+	// Honor the human-reviewed project-level command whitelist
+	// (projects.commands_json) when it offers a matching test command for this
+	// module's build tool; the whitelist is parsed into argv (no shell), so
 	// edited entries cannot inject shell metacharacters.
-	if wl := whitelistedTestCommand(module.CommandsJSON, module.BuildTool, module.KindType); wl != nil {
+	if wl := whitelistedTestCommand(p.CommandsJSON, module.BuildTool, module.KindType); wl != nil {
 		cmdArgs = wl
 	}
 
@@ -492,9 +502,9 @@ func testCommandFor(buildTool, kindType string) ([]string, string) {
 	return nil, ""
 }
 
-// whitelistedTestCommand picks a test command from the module's reviewed
-// command whitelist (commands_json, a JSON array of command strings). It
-// returns the matching argv (split with strings.Fields, never a shell) or nil
+// whitelistedTestCommand picks a test command from the project-level reviewed
+// command whitelist (projects.commands_json, a JSON array of command strings).
+// It returns the matching argv (split with strings.Fields, never a shell) or nil
 // to fall back to the tool default. Entries are matched by the tool's primary
 // executable plus a "test" intent so a human-reviewed whitelist actually takes
 // effect at run time.
