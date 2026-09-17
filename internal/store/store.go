@@ -254,6 +254,10 @@ type Store interface {
 	ReplaceIntelModules(ctx context.Context, projectID int64, mods []*IntelModule) error
 	// ListIntelModules returns the project's sub-modules.
 	ListIntelModules(ctx context.Context, projectID int64) ([]*IntelModule, error)
+	// GetIntelModule loads a single module by id.
+	GetIntelModule(ctx context.Context, id int64) (*IntelModule, error)
+	// UpdateIntelModuleCommands persists a module's reviewed command whitelist.
+	UpdateIntelModuleCommands(ctx context.Context, id int64, commandsJSON string) error
 	// ReplaceIntelEntities replaces the project's entity↔table↔column mappings.
 	ReplaceIntelEntities(ctx context.Context, projectID int64, ents []*IntelEntity) error
 	// ListIntelEntities returns entity mappings for a project/module.

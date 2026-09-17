@@ -215,6 +215,29 @@ func (s *sqlStore) ReplaceIntelModules(ctx context.Context, projectID int64, mod
 	return nil
 }
 
+// GetIntelModule loads a single module by id.
+func (s *sqlStore) GetIntelModule(ctx context.Context, id int64) (*IntelModule, error) {
+	row := s.db.QueryRowContext(ctx, s.q(`
+		SELECT id, project_id, rel_path, kind_type, kind_role, build_tool,
+			commands_json, last_tested_sha, analyzed_at, created_at
+		FROM project_modules WHERE id = ?`), id)
+	m := &IntelModule{}
+	var analyzed *time.Time
+	if err := row.Scan(&m.ID, &m.ProjectID, &m.RelPath, &m.KindType, &m.KindRole,
+		&m.BuildTool, &m.CommandsJSON, &m.LastTestedSHA, &analyzed, &m.CreatedAt); err != nil {
+		return nil, err
+	}
+	m.AnalyzedAt = analyzed
+	return m, nil
+}
+
+// UpdateIntelModuleCommands persists a module's reviewed command whitelist.
+func (s *sqlStore) UpdateIntelModuleCommands(ctx context.Context, id int64, commandsJSON string) error {
+	_, err := s.db.ExecContext(ctx, s.q(`
+		UPDATE project_modules SET commands_json = ? WHERE id = ?`), commandsJSON, id)
+	return err
+}
+
 // ListIntelModules returns the project's sub-modules ordered by path.
 func (s *sqlStore) ListIntelModules(ctx context.Context, projectID int64) ([]*IntelModule, error) {
 	rows, err := s.db.QueryContext(ctx, s.q(`
