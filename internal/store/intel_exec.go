@@ -345,6 +345,37 @@ func (s *sqlStore) ReplaceIntelFeatures(ctx context.Context, projectID int64, fe
 	return nil
 }
 
+// CreateIntelFeature inserts a (usually human-created) feature point and fills
+// its id. Manual features are stamped source=manual and are not overwritten by
+// the next auto rescan (persistFeatures only replaces source=auto rows).
+func (s *sqlStore) CreateIntelFeature(ctx context.Context, f *IntelFeature) error {
+	if isPostgres(s.driver) {
+		return s.db.QueryRowContext(ctx, s.q(`
+			INSERT INTO intel_features (project_id, name, summary, ends_json, sort_order,
+				source, anchor, status, created_at, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+			RETURNING id`),
+			f.ProjectID, f.Name, f.Summary, f.EndsJSON, f.SortOrder,
+			f.Source, f.Anchor, f.Status,
+		).Scan(&f.ID)
+	}
+	res, err := s.db.ExecContext(ctx, s.q(`
+		INSERT INTO intel_features (project_id, name, summary, ends_json, sort_order,
+			source, anchor, status, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`),
+		f.ProjectID, f.Name, f.Summary, f.EndsJSON, f.SortOrder,
+		f.Source, f.Anchor, f.Status)
+	if err != nil {
+		return err
+	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		return err
+	}
+	f.ID = id
+	return nil
+}
+
 // ListIntelFeatures returns feature points for a project ordered by sort order.
 func (s *sqlStore) ListIntelFeatures(ctx context.Context, projectID int64) ([]*IntelFeature, error) {
 	rows, err := s.db.QueryContext(ctx, s.q(`

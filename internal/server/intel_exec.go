@@ -46,7 +46,8 @@ func (s *Server) handleIntelTestCases(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"testCases": cases})
 }
 
-// handleIntelFeatures lists feature points for a project.
+// handleIntelFeatures lists (GET) or creates (POST) feature points for a
+// project. Manual features are stamped source=manual and survive rescans.
 func (s *Server) handleIntelFeatures(w http.ResponseWriter, r *http.Request) {
 	if !s.requireWeb(r) {
 		if _, ok := s.requireToken(r); !ok {
@@ -54,22 +55,56 @@ func (s *Server) handleIntelFeatures(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if r.Method != http.MethodGet {
-		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
-	}
-	projectID, ok := s.intelQueryProject(w, r)
-	if !ok {
-		return
-	}
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
-	feats, err := s.store.ListIntelFeatures(ctx, projectID)
-	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "load features failed")
-		return
+	switch r.Method {
+	case http.MethodGet:
+		projectID, ok := s.intelQueryProject(w, r)
+		if !ok {
+			return
+		}
+		feats, err := s.store.ListIntelFeatures(ctx, projectID)
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, "load features failed")
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"features": feats})
+	case http.MethodPost:
+		projectID, ok := s.intelQueryProject(w, r)
+		if !ok {
+			return
+		}
+		var req struct {
+			Name   string   `json:"name"`
+			Ends   []string `json:"ends"`
+			Anchor string   `json:"anchor"`
+		}
+		if err := readJSONLimited(w, r, &req); err != nil {
+			writeErr(w, http.StatusBadRequest, "invalid request body")
+			return
+		}
+		if strings.TrimSpace(req.Name) == "" {
+			writeErr(w, http.StatusBadRequest, "name is required")
+			return
+		}
+		ends, _ := json.Marshal(req.Ends)
+		feat := &store.IntelFeature{
+			ProjectID: projectID,
+			Name:      strings.TrimSpace(req.Name),
+			Summary:   "",
+			EndsJSON:  string(ends),
+			Source:    "manual",
+			Anchor:    req.Anchor,
+			Status:    "active",
+		}
+		if err := s.store.CreateIntelFeature(ctx, feat); err != nil {
+			writeErr(w, http.StatusInternalServerError, "create feature failed")
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"feature": feat})
+	default:
+		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"features": feats})
 }
 
 // handleIntelIssues lists issues for a project, optionally narrowed by status.

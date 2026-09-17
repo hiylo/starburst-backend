@@ -302,6 +302,8 @@ type Store interface {
 	ReplaceIntelFeatures(ctx context.Context, projectID int64, feats []*IntelFeature) error
 	// GetIntelFeature loads a single feature point by id.
 	GetIntelFeature(ctx context.Context, id int64) (*IntelFeature, error)
+	// CreateIntelFeature inserts a (usually human-created) feature point.
+	CreateIntelFeature(ctx context.Context, f *IntelFeature) error
 	// ListIntelFeatures returns feature points for a project.
 	ListIntelFeatures(ctx context.Context, projectID int64) ([]*IntelFeature, error)
 	// UpdateIntelFeature persists mutable feature fields.

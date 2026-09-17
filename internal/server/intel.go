@@ -711,13 +711,22 @@ func buildTestCases(m *store.IntelModule, assets []testassets.Asset) []*store.Te
 }
 
 // persistFeatures clusters the extracted endpoints into candidate feature
-// points and stores them (human rename/merge/split/order comes later).
+// points and stores them. Human-created (manual) features are preserved across
+// rescans: only auto-derived rows are replaced (人工优先，重扫不覆盖).
 func (s *Server) persistFeatures(ctx context.Context, projectID int64, endpoints []*store.IntelEndpoint) error {
+	var manual []*store.IntelFeature
+	if prev, err := s.store.ListIntelFeatures(ctx, projectID); err == nil {
+		for _, f := range prev {
+			if f.Source == "manual" {
+				manual = append(manual, f)
+			}
+		}
+	}
 	feats := feature.Cluster(endpoints)
-	if len(feats) == 0 {
+	if len(feats) == 0 && len(manual) == 0 {
 		return nil
 	}
-	storeFeats := make([]*store.IntelFeature, 0, len(feats))
+	storeFeats := make([]*store.IntelFeature, 0, len(feats)+len(manual))
 	for i, f := range feats {
 		ends, _ := json.Marshal(f.Ends)
 		storeFeats = append(storeFeats, &store.IntelFeature{
@@ -729,6 +738,7 @@ func (s *Server) persistFeatures(ctx context.Context, projectID int64, endpoints
 			Status:    "active",
 		})
 	}
+	storeFeats = append(storeFeats, manual...)
 	return s.store.ReplaceIntelFeatures(ctx, projectID, storeFeats)
 }
 
