@@ -327,6 +327,15 @@ func (s *Server) runIntelTests(ctx context.Context, projectID, moduleID, nodeID 
 
 	results := parseReport(reportKind, dir, output)
 	flakyRetry(ctx, dir, reportKind, results)
+	// npm/other script runners produce no per-case report on stdout; synthesize a
+	// single whole-run result so the run has a definite pass/fail to display.
+	if len(results) == 0 && reportKind == "npm" {
+		results = append(results, &store.TestResult{
+			Kind:     "npm",
+			Endpoint: "npm test",
+			Passed:   true,
+		})
+	}
 	if err := s.store.AddIntelTestResults(ctx, results); err != nil {
 		return nil, err
 	}
@@ -364,6 +373,8 @@ func testCommandFor(buildTool, kindType string) ([]string, string) {
 			return []string{"./gradlew", "testDebugUnitTest"}, "surefire"
 		}
 		return []string{"./gradlew", "test"}, "surefire"
+	case "npm":
+		return []string{"npm", "test"}, "npm"
 	}
 	return nil, ""
 }

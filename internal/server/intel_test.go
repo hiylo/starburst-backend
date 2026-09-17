@@ -1177,6 +1177,14 @@ func TestWhitelistedTestCommand(t *testing.T) {
 	if whitelistedTestCommand("not-json", "go", "") != nil {
 		t.Error("invalid whitelist should fall back")
 	}
+	// npm (web/BFF modules): test intent matches and the tool default exists.
+	got = whitelistedTestCommand(`["npm run build","npm test"]`, "npm", "")
+	if len(got) != 2 || got[0] != "npm" || got[1] != "test" {
+		t.Errorf("npm whitelist = %v, want [npm test]", got)
+	}
+	if argv, _ := testCommandFor("npm", "web"); len(argv) != 2 || argv[0] != "npm" {
+		t.Errorf("testCommandFor(npm) = %v, want [npm test]", argv)
+	}
 }
 
 // TestIntelModuleCommandsUpdate verifies the per-module command whitelist edit:
