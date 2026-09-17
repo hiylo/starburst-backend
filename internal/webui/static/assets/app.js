@@ -2702,7 +2702,8 @@ function renderIntelEnv(data) {
     if (ready) {
       action = `<button class="ghost sm" onclick="stopIntelEnv('${escapeHtml(svc.service)}')">停止</button>`;
     } else if (svc.category === "middleware") {
-      action = `<button class="ghost sm" onclick="installIntelEnv('${escapeHtml(svc.service)}')">安装</button>`;
+      action = `<button class="ghost sm" onclick="installIntelEnv('${escapeHtml(svc.service)}')">安装</button>
+        <button class="ghost sm" onclick="externalIntelEnv('${escapeHtml(svc.service)}')">外部配置</button>`;
     } else if (unsupported) {
       action = `<span class="muted" style="font-size:11px">需手动安装</span>`;
     }
@@ -2732,6 +2733,20 @@ async function installIntelEnv(service) {
 async function stopIntelEnv(service) {
   if (!intelCurrentProject) return;
   await api("/api/intel/env/stop", { method: "POST", headers: appHeaders(), body: JSON.stringify({ projectId: intelCurrentProject, service }) });
+  loadIntelEnv(intelCurrentProject);
+}
+
+async function externalIntelEnv(service) {
+  const addr = prompt("外部中间件地址（host:port），如 192.0.2.150:3306，用户与口令可选", "");
+  if (!addr) return;
+  const m = addr.match(/^(.*):(\d+)$/);
+  if (!m) { alert("格式应为 host:port"); return; }
+  const user = prompt("用户名（可留空）", "");
+  const pw = prompt("口令（可留空，仅落库本环境供测试连接）", "");
+  if (user === null || pw === null) return;
+  const res = await api("/api/intel/env/external", { method: "POST", headers: appHeaders(), body: JSON.stringify({ projectId: intelCurrentProject, service, host: m[1], port: parseInt(m[2], 10), username: user, password: pw }) });
+  const data = await res.json();
+  if (!res.ok) { alert(data.error || "配置失败"); return; }
   loadIntelEnv(intelCurrentProject);
 }
 

@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -253,9 +255,70 @@ func (s *Server) handleIntelEnvStop(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
+// handleIntelEnvExternal accepts a user-supplied external middleware endpoint
+// (host:port, optional credentials), probes its reachability and persists it as
+// provider=external. External services survive subsequent re-probes (they are
+// not re-probed as containers) and satisfy the environment gate when reachable.
+func (s *Server) handleIntelEnvExternal(w http.ResponseWriter, r *http.Request) {
+	if !s.requireWeb(r) {
+		if _, ok := s.requireToken(r); !ok {
+			writeErr(w, http.StatusUnauthorized, "web session or APP token required")
+			return
+		}
+	}
+	if r.Method != http.MethodPost {
+		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	var req struct {
+		ProjectID int64  `json:"projectId"`
+		Service   string `json:"service"`
+		Host      string `json:"host"`
+		Port      int    `json:"port"`
+		Username  string `json:"username"`
+		Password  string `json:"password"`
+	}
+	if err := readJSONLimited(w, r, &req); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if req.ProjectID <= 0 || req.Service == "" || req.Host == "" || req.Port <= 0 {
+		writeErr(w, http.StatusBadRequest, "projectId, service, host and port are required")
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+	reachable := envagent.ProbeExternal(ctx, req.Host, req.Port)
+	status := "missing"
+	if reachable {
+		status = "ready"
+	}
+	now := time.Now()
+	svc := &store.IntelEnvService{
+		ProjectID:     req.ProjectID,
+		Service:       req.Service,
+		Category:      "middleware",
+		Provider:      "external",
+		Status:        status,
+		Host:          req.Host,
+		Port:          req.Port,
+		Endpoint:      net.JoinHostPort(req.Host, strconv.Itoa(req.Port)),
+		Healthy:       reachable,
+		Username:      req.Username,
+		Password:      req.Password,
+		HealthCheckAt: &now,
+	}
+	if err := s.store.UpsertIntelEnvServices(ctx, req.ProjectID, []*store.IntelEnvService{svc}); err != nil {
+		writeErr(w, http.StatusInternalServerError, "persist external service failed")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"service": svc})
+}
+
 // probeEnvServices probes every requirement on the local machine and builds
-// the per-service status rows, preserving previously persisted credentials so a
-// re-probe keeps working connections valid.
+// the per-service status rows. Previously persisted credentials are preserved;
+// services configured as provider=external are kept as-is (they are user-owned
+// and only probed once at configuration time).
 func (s *Server) probeEnvServices(ctx context.Context, projectID int64, root string, reqs []*store.IntelEnvRequirement) ([]*store.IntelEnvService, error) {
 	existing := map[string]*store.IntelEnvService{}
 	if prev, err := s.store.ListIntelEnvServices(ctx, projectID); err == nil {
@@ -265,6 +328,11 @@ func (s *Server) probeEnvServices(ctx context.Context, projectID int64, root str
 	}
 	services := make([]*store.IntelEnvService, 0, len(reqs))
 	for _, req := range reqs {
+		if prev := existing[req.Service]; prev != nil && prev.Provider == "external" {
+			prev.ProjectID = projectID
+			services = append(services, prev)
+			continue
+		}
 		status, provider, containerName, healthy, err := envagent.Probe(ctx, projectID, req.Service, req.Category, req.Version)
 		if err != nil {
 			continue

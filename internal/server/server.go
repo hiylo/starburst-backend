@@ -226,6 +226,7 @@ func (s *Server) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/intel/env/status", s.handleIntelEnvStatus)
 	mux.HandleFunc("/api/intel/env/install", s.handleIntelEnvInstall)
 	mux.HandleFunc("/api/intel/env/stop", s.handleIntelEnvStop)
+	mux.HandleFunc("/api/intel/env/external", s.handleIntelEnvExternal)
 	mux.HandleFunc("/", s.handleIndex)
 }
 

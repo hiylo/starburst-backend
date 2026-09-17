@@ -221,6 +221,16 @@ func portOpen(ctx context.Context, host string, port int) bool {
 	return true
 }
 
+// ProbeExternal reports whether an externally provided endpoint (host:port) is
+// reachable from this machine. Used to accept user-supplied middleware instead
+// of provisioning a container.
+func ProbeExternal(ctx context.Context, host string, port int) bool {
+	if host == "" || port <= 0 {
+		return false
+	}
+	return portOpen(ctx, host, port)
+}
+
 // toolchainReady checks whether a toolchain binary is on PATH and responds.
 func toolchainReady(ctx context.Context, service string) bool {
 	switch service {

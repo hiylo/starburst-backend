@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -1233,6 +1234,92 @@ func TestIntelModuleCommandsUpdate(t *testing.T) {
 	}
 	if !strings.Contains(upd.Module.CommandsJSON, "mvn clean install") {
 		t.Errorf("updated commands missing entry: %s", upd.Module.CommandsJSON)
+	}
+}
+
+// TestIntelEnvExternalConfig verifies an externally provided middleware
+// endpoint: it is probed once, persisted with provider=external, and survives
+// subsequent re-probes (the gate treats it as ready when reachable).
+func TestIntelEnvExternalConfig(t *testing.T) {
+	s := newTestServer(t)
+	wh := loginWeb(t, s)
+
+	root := t.TempDir()
+	writeTestFile(t, filepath.Join(root, "pom.xml"), `<project>
+  <dependencies>
+    <dependency><groupId>com.mysql</groupId><artifactId>mysql-connector-j</artifactId><version>8.0.33</version></dependency>
+  </dependencies>
+</project>`)
+
+	rec := s.do(t, http.MethodPost, "/api/intel/projects",
+		`{"name":"demo","source":"local","localPath":"`+filepath.ToSlash(root)+`"}`, wh)
+	var proj struct {
+		ID int64 `json:"id"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &proj); err != nil || proj.ID == 0 {
+		t.Fatalf("create project: %s", rec.Body.String())
+	}
+	rec = s.do(t, http.MethodPost, "/api/intel/analyze",
+		`{"projectId":`+jsonInt(proj.ID)+`}`, wh)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("analyze status %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// A reachable endpoint to point the external config at.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	port := ln.Addr().(*net.TCPAddr).Port
+
+	rec = s.do(t, http.MethodPost, "/api/intel/env/external",
+		`{"projectId":`+jsonInt(proj.ID)+`,"service":"mysql","host":"127.0.0.1","port":`+jsonInt(int64(port))+`,"username":"root","password":"secret"}`, wh)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("external status %d: %s", rec.Code, rec.Body.String())
+	}
+	var extResp struct {
+		Service struct {
+			Service  string `json:"service"`
+			Status   string `json:"status"`
+			Provider string `json:"provider"`
+		} `json:"service"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &extResp); err != nil {
+		t.Fatalf("external parse: %v", err)
+	}
+	if extResp.Service.Status != "ready" || extResp.Service.Provider != "external" {
+		t.Errorf("external = %+v, want ready/external", extResp.Service)
+	}
+
+	// Re-probe keeps the external row (docker stub would otherwise mark missing).
+	old := envagent.RunDocker
+	defer func() { envagent.RunDocker = old }()
+	envagent.RunDocker = func(ctx context.Context, args ...string) (string, error) {
+		return "", nil
+	}
+	rec = s.do(t, http.MethodGet, "/api/intel/env/status?projectId="+jsonInt(proj.ID), "", wh)
+	var stResp struct {
+		Services []struct {
+			Service  string `json:"service"`
+			Provider string `json:"provider"`
+			Status   string `json:"status"`
+		} `json:"services"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &stResp); err != nil {
+		t.Fatalf("status parse: %v", err)
+	}
+	found := false
+	for _, svc := range stResp.Services {
+		if svc.Service == "mysql" {
+			found = true
+			if svc.Provider != "external" || svc.Status != "ready" {
+				t.Errorf("re-probe lost external config: %+v", svc)
+			}
+		}
+	}
+	if !found {
+		t.Errorf("mysql missing from status services: %+v", stResp.Services)
 	}
 }
 
