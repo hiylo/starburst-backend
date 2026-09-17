@@ -353,12 +353,35 @@ func (s *Server) handleIntelModuleCommands(w http.ResponseWriter, r *http.Reques
 			return
 		}
 	}
-	if r.Method != http.MethodPut {
-		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
-	}
 	id, ok := s.intelIDFromPath(r, "/api/intel/modules/")
 	if !ok {
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+	mod, err := s.store.GetIntelModule(ctx, id)
+	if err != nil {
+		writeErr(w, http.StatusNotFound, "module not found")
+		return
+	}
+
+	if r.Method == http.MethodGet {
+		// Module detail: basic info + per-module stats of the linked assets.
+		endpoints, _ := s.store.ListIntelEndpoints(ctx, mod.ProjectID, mod.ID)
+		entities, _ := s.store.ListIntelEntities(ctx, mod.ProjectID, mod.ID)
+		cases, _ := s.store.ListIntelTestCases(ctx, mod.ProjectID, mod.ID)
+		writeJSON(w, http.StatusOK, map[string]any{
+			"module": mod,
+			"stats": map[string]int{
+				"endpoints": len(endpoints),
+				"entities":  len(entities),
+				"cases":     len(cases),
+			},
+		})
+		return
+	}
+	if r.Method != http.MethodPut {
+		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
 	var req struct {
@@ -379,13 +402,6 @@ func (s *Server) handleIntelModuleCommands(w http.ResponseWriter, r *http.Reques
 	b, err := json.Marshal(clean)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "encode commands failed")
-		return
-	}
-	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
-	defer cancel()
-	mod, err := s.store.GetIntelModule(ctx, id)
-	if err != nil {
-		writeErr(w, http.StatusNotFound, "module not found")
 		return
 	}
 	if err := s.store.UpdateIntelModuleCommands(ctx, mod.ID, string(b)); err != nil {

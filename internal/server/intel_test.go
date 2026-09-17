@@ -2477,6 +2477,83 @@ func TestHasShellMeta(t *testing.T) {
 	}
 }
 
+// TestIntelModuleDetail verifies the sub-module detail endpoint returns basic
+// module info plus per-module asset counts.
+func TestIntelModuleDetail(t *testing.T) {
+	s := newTestServer(t)
+	wh := loginWeb(t, s)
+
+	root := t.TempDir()
+	writeTestFile(t, filepath.Join(root, "pom.xml"), `<project></project>`)
+	writeTestFile(t, filepath.Join(root, "src/main/java/demo/UserController.java"), `package demo;
+import org.springframework.web.bind.annotation.*;
+@RestController
+@RequestMapping("/api/users")
+public class UserController { @GetMapping("/list") public demo.UserEntity list() { return null; } }`)
+	writeTestFile(t, filepath.Join(root, "src/main/java/demo/UserEntity.java"), `package demo;
+import javax.persistence.*;
+@Entity
+@Table(name = "sys_user")
+public class UserEntity {
+    @Id
+    private Long id;
+    @Column(name = "nickname")
+    private String nickname;
+}`)
+
+	rec := s.do(t, http.MethodPost, "/api/intel/projects",
+		`{"name":"demo","source":"local","localPath":"`+filepath.ToSlash(root)+`"}`, wh)
+	var proj struct {
+		ID int64 `json:"id"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &proj); err != nil || proj.ID == 0 {
+		t.Fatalf("create project: %s", rec.Body.String())
+	}
+	rec = s.do(t, http.MethodPost, "/api/intel/analyze",
+		`{"projectId":`+jsonInt(proj.ID)+`}`, wh)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("analyze status %d: %s", rec.Code, rec.Body.String())
+	}
+	rec = s.do(t, http.MethodGet, "/api/intel/projects/"+jsonInt(proj.ID), "", wh)
+	var detail struct {
+		Modules []struct {
+			ID       int64  `json:"id"`
+			RelPath  string `json:"relPath"`
+			KindType string `json:"kindType"`
+		} `json:"modules"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &detail); err != nil || len(detail.Modules) != 1 {
+		t.Fatalf("detail modules: %s", rec.Body.String())
+	}
+	mod := detail.Modules[0]
+
+	rec = s.do(t, http.MethodGet, "/api/intel/modules/"+jsonInt(mod.ID), "", wh)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("module detail status %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Module struct {
+			RelPath   string `json:"relPath"`
+			KindType  string `json:"kindType"`
+			BuildTool string `json:"buildTool"`
+		} `json:"module"`
+		Stats struct {
+			Endpoints int `json:"endpoints"`
+			Entities  int `json:"entities"`
+			Cases     int `json:"cases"`
+		} `json:"stats"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("module detail parse: %v", err)
+	}
+	if resp.Module.RelPath != "." || resp.Module.KindType != "java" || resp.Module.BuildTool != "maven" {
+		t.Errorf("module basic info = %+v", resp.Module)
+	}
+	if resp.Stats.Endpoints != 1 || resp.Stats.Entities != 2 {
+		t.Errorf("module stats = %+v, want endpoints=1 entities=2 (列数)", resp.Stats)
+	}
+}
+
 func gitRun(t *testing.T, dir string, args ...string) {
 	t.Helper()
 	cmd := exec.Command("git", args...)

@@ -2738,7 +2738,10 @@ async function loadIntelDetail(id) {
       <td>${escapeHtml(m.kindRole || "-")}</td>
       <td>${escapeHtml(m.buildTool || "-")}</td>
       <td class="muted clip" title="${escapeHtml(m.commandsJson || "")}" style="font-size:11px">${escapeHtml((m.commandsJson || "[]").slice(0, 40))}</td>
-      <td><button class="ghost sm" onclick="editIntelModuleCommands(${m.id}, '${escapeHtml(m.commandsJson || "[]")}')">命令</button></td>
+      <td class="row" style="gap:4px">
+        <button class="ghost sm" onclick="showIntelModuleDetail(${m.id})">详情</button>
+        <button class="ghost sm" onclick="editIntelModuleCommands(${m.id}, '${escapeHtml(m.commandsJson || "[]")}')">命令</button>
+      </td>
     </tr>`);
   }
   if (!(data.modules || []).length) mtb.insertAdjacentHTML("beforeend", `<tr><td colspan="6" class="muted" style="text-align:center;padding:16px">暂无子模块（分析后自动识别）</td></tr>`);
@@ -2756,6 +2759,34 @@ function editIntelModuleCommands(moduleId, commandsJson) {
   api("/api/intel/modules/" + moduleId + "/commands", { method: "PUT", headers: appHeaders(), body: JSON.stringify({ commands: list }) })
     .then(r => r.json())
     .then(d => { if (d.error) alert(d.error); else if (intelCurrentProject) loadIntelDetail(intelCurrentProject); });
+}
+
+async function showIntelModuleDetail(moduleId) {
+  const box = document.getElementById("intelModuleDetail");
+  if (!box) return;
+  box.innerHTML = `<div class="muted" style="padding:8px">加载中…</div>`;
+  const res = await api("/api/intel/modules/" + moduleId, { headers: appHeaders() });
+  const data = await res.json();
+  if (!res.ok) { box.innerHTML = `<div class="muted" style="padding:8px">${escapeHtml(data.error || "加载失败")}</div>`; return; }
+  const m = data.module || {};
+  const s = data.stats || {};
+  const typeLabel = INTEL_TYPE_LABELS[m.kindType] || m.kindType || "-";
+  let cmds = [];
+  try { cmds = JSON.parse(m.commandsJson || "[]"); } catch (_) {}
+  box.innerHTML = `<div class="card" style="margin:0">
+    <div class="row" style="justify-content:space-between">
+      <strong style="font-size:14px">${escapeHtml(m.relPath || ".")}</strong>
+      <span class="intel-status analyzed">${escapeHtml(typeLabel)}</span>
+    </div>
+    <div class="stat-grid" style="margin-top:10px">
+      <div class="stat"><div class="k">接口契约</div><div class="v">${s.endpoints || 0}</div></div>
+      <div class="stat"><div class="k">实体 / 列</div><div class="v">${s.entities || 0}</div></div>
+      <div class="stat"><div class="k">测试用例</div><div class="v">${s.cases || 0}</div></div>
+      <div class="stat"><div class="k">构建工具</div><div class="v" style="font-size:13px">${escapeHtml(m.buildTool || "-")}</div></div>
+    </div>
+    <div class="muted" style="font-size:12px;margin-top:8px">角色 ${escapeHtml(m.kindRole || "-")} · 最近测试 SHA <span class="mono">${escapeHtml((m.lastTestedSha || "").slice(0, 8) || "-")}</span> · 分析时间 ${m.analyzedAt ? new Date(m.analyzedAt).toLocaleString() : "-"}</div>
+    <div class="muted" style="font-size:12px;margin-top:4px">命令白名单：<span class="mono">${cmds.length ? escapeHtml(cmds.join("；")) : "-"}</span></div>
+  </div>`;
 }
 
 async function loadIntelContracts(id) {
