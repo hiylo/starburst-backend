@@ -3414,15 +3414,20 @@ async function loadIntelCases(id) {
   const tb = document.querySelector("#intelCaseTable tbody");
   tb.innerHTML = "";
   for (const c of cases) {
+    const ls = c.lastStatus;
+    const statusHtml = ls ? `<span class="intel-status ${ls === "passed" ? "analyzed" : ""}">${escapeHtml(ls)}</span>` : `<span class="muted" style="font-size:11px">-</span>`;
+    const flaky = c.flakyCount > 0;
     tb.insertAdjacentHTML("beforeend", `<tr>
       <td class="mono clip">${escapeHtml(c.module || "-")}</td>
       <td><span class="badge">${escapeHtml(c.kind || "-")}</span></td>
       <td>${escapeHtml(c.framework || "-")}</td>
       <td class="mono clip">${escapeHtml(c.class || "")}${c.method ? "." + escapeHtml(c.method) : ""}</td>
       <td class="mono muted clip" title="${escapeHtml(c.path || "")}">${escapeHtml(shortProv(c.path, 0))}</td>
+      <td>${statusHtml}</td>
+      <td>${flaky ? `<span class="intel-status" style="color:var(--red,#dc2626)">${c.flakyCount} 次</span>` : `<span class="muted" style="font-size:11px">-</span>`}</td>
     </tr>`);
   }
-  if (!cases.length) tb.insertAdjacentHTML("beforeend", `<tr><td colspan="5" class="muted" style="text-align:center;padding:16px">暂无测试用例（分析后自动发现）</td></tr>`);
+  if (!cases.length) tb.insertAdjacentHTML("beforeend", `<tr><td colspan="7" class="muted" style="text-align:center;padding:16px">暂无测试用例（分析后自动发现）</td></tr>`);
 }
 
 async function loadIntelFindings(id) {
