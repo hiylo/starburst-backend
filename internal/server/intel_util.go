@@ -3,6 +3,7 @@ package server
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -19,6 +20,23 @@ func runGit(root string, args ...string) (string, error) {
 		return "", err
 	}
 	return string(out), nil
+}
+
+// intelResolveRepoPath joins repoRel under root and rejects any result that
+// escapes root (e.g. a "../" traversal or an absolute path), so suggestions and
+// backups sourced from the DB/LLM can never read or write outside the project
+// working tree.
+func intelResolveRepoPath(root, repoRel string) (string, error) {
+	clean := filepath.Clean(filepath.FromSlash(repoRel))
+	if filepath.IsAbs(clean) {
+		return "", fmt.Errorf("非法路径（绝对路径）: %s", repoRel)
+	}
+	abs := filepath.Join(root, clean)
+	rel, err := filepath.Rel(root, abs)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("非法路径（越出工作目录）: %s", repoRel)
+	}
+	return abs, nil
 }
 
 // simpleTreeHash hashes a deterministic projection of the directory tree

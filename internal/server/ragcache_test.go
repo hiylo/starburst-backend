@@ -24,14 +24,18 @@ func TestRetrievalCache(t *testing.T) {
 }
 
 func TestRetrievalCacheKeyStable(t *testing.T) {
-	a := retrievalCacheKey(7, "为什么接口会空")
-	b := retrievalCacheKey(7, "为什么接口会空")
+	a := retrievalCacheKey(7, "为什么接口会空", 10)
+	b := retrievalCacheKey(7, "为什么接口会空", 10)
 	if a != b {
 		t.Errorf("key not stable for identical input: %s vs %s", a, b)
 	}
-	c := retrievalCacheKey(8, "为什么接口会空")
+	c := retrievalCacheKey(8, "为什么接口会空", 10)
 	if a == c {
 		t.Error("key should differ across projects")
+	}
+	d := retrievalCacheKey(7, "为什么接口会空", 20)
+	if a == d {
+		t.Error("key should differ across limits so a top-10 hit is not served to top-20")
 	}
 	if len(a) != 64 {
 		t.Errorf("key length = %d, want 64", len(a))

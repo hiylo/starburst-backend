@@ -1920,29 +1920,30 @@ func (s *Server) sourceModuleRoot(ctx context.Context, p *store.IntelProject, so
 	return "", "", false
 }
 
-// ensureGitClone clones a git project into target on first use, and refreshes
-// an existing clone to the requested ref. It shells out to git with explicit
-// argv (no shell) so a user-supplied URL cannot inject commands.
+// ensureGitClone clones a git project into target on first use, re-clones when
+// the cached clone's origin no longer matches the requested URL, and refreshes
+// an existing clone to the requested ref (branch switching included). It shells
+// out to git with explicit argv (no shell) so a user-supplied URL cannot inject
+// commands, and uses `--` to terminate option parsing on the URL positional arg.
 func (s *Server) ensureGitClone(ctx context.Context, p *store.IntelProject, target string) error {
 	if _, err := os.Stat(filepath.Join(target, ".git")); err != nil {
-		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		return s.cloneGitRepo(ctx, p, target)
+	}
+	// 已存在 clone：校验 origin 与当前 URL 一致，避免改 URL 后仍分析旧仓。
+	origin, _ := runGit(target, "config", "--get", "remote.origin.url")
+	if strings.TrimSpace(origin) != "" && strings.TrimSpace(origin) != p.GitURL {
+		log.Printf("intel project %s origin changed (%q -> %q), re-cloning", target, strings.TrimSpace(origin), p.GitURL)
+		if err := os.RemoveAll(target); err != nil {
 			return err
 		}
-		args := []string{"clone", "--depth", "1"}
-		if p.GitRef != "" {
-			args = append(args, "--branch", p.GitRef)
-		}
-		// `--` 终止选项解析：以 `-` 开头的 GitURL（如 --upload-pack=<cmd>）会被
-		// git 当作选项走私执行任意命令，必须显式声明其后是位置参数。
-		args = append(args, "--", p.GitURL, target)
-		cmd := exec.CommandContext(ctx, "git", args...)
-		if out, err := cmd.CombinedOutput(); err != nil {
-			return fmt.Errorf("git clone: %w: %s", err, strings.TrimSpace(string(out)))
-		}
-		return nil
+		return s.cloneGitRepo(ctx, p, target)
 	}
-	// Refresh: fetch the requested ref and hard-reset so re-analyze sees HEAD.
+	// Refresh: fetch the requested ref (explicitly, so switching branches works
+	// even though the clone is shallow) and hard-reset so re-analyze sees HEAD.
 	fetch := exec.CommandContext(ctx, "git", "fetch", "--depth", "1", "origin")
+	if ref := p.GitRef; ref != "" {
+		fetch.Args = append(fetch.Args, ref)
+	}
 	fetch.Dir = target
 	if out, err := fetch.CombinedOutput(); err != nil {
 		return fmt.Errorf("git fetch: %w: %s", err, strings.TrimSpace(string(out)))
@@ -1955,6 +1956,25 @@ func (s *Server) ensureGitClone(ctx context.Context, p *store.IntelProject, targ
 	reset.Dir = target
 	if out, err := reset.CombinedOutput(); err != nil {
 		return fmt.Errorf("git reset: %w: %s", err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+// cloneGitRepo performs a shallow, all-branches clone so later GitRef changes
+// can be fetched without an origin URL mismatch. The URL is passed as a
+// positional arg after `--` so an option-prefixed URL cannot be smuggled.
+func (s *Server) cloneGitRepo(ctx context.Context, p *store.IntelProject, target string) error {
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		return err
+	}
+	args := []string{"clone", "--depth", "1", "--no-single-branch"}
+	if p.GitRef != "" {
+		args = append(args, "--branch", p.GitRef)
+	}
+	args = append(args, "--", p.GitURL, target)
+	cmd := exec.CommandContext(ctx, "git", args...)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("git clone: %w: %s", err, strings.TrimSpace(string(out)))
 	}
 	return nil
 }

@@ -502,8 +502,12 @@ func (s *Server) handleIntelAsk(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "projectId and question are required")
 		return
 	}
+	// limit 限幅：防止超量召回拖垮 embedding 检索与 LLM 上下文。
 	if req.Limit <= 0 {
 		req.Limit = 10
+	}
+	if req.Limit > 20 {
+		req.Limit = 20
 	}
 
 	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Minute)
@@ -546,7 +550,7 @@ func (s *Server) askIntelProject(ctx context.Context, projectID int64, question 
 		}
 	}
 
-	key := retrievalCacheKey(projectID, question)
+	key := retrievalCacheKey(projectID, question, limit)
 	contextJSON := ""
 	sources := []map[string]any{}
 	chunkCount := 0

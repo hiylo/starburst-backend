@@ -628,7 +628,7 @@ func (s *Server) recordTestCaseOutcomes(ctx context.Context, projectID int64, re
 		}
 		class, method := splitEndpoint(res.Endpoint)
 		flaky := isFlakyResult(res.FailuresJSON)
-		_ = s.store.UpdateIntelTestCaseOutcome(ctx, projectID, class, method, res.Passed, 0, flaky)
+		_ = s.store.UpdateIntelTestCaseOutcome(ctx, projectID, res.ModuleID, class, method, res.Passed, 0, flaky)
 	}
 }
 

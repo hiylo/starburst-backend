@@ -170,10 +170,11 @@ func (s *sqlStore) ListIntelTestCases(ctx context.Context, projectID, moduleID i
 }
 
 // UpdateIntelTestCaseOutcome records a run outcome on the matching test case
-// (matched by method, plus class when non-empty) and bumps flaky_count when the
-// outcome is marked flaky. It updates at most the first matching row so the
-// asset list stays deterministic.
-func (s *sqlStore) UpdateIntelTestCaseOutcome(ctx context.Context, projectID int64, class, method string, passed bool, durationMs int64, flaky bool) error {
+// (matched by module+method, plus class when non-empty) and bumps flaky_count
+// when the outcome is marked flaky. It updates at most the first matching row so
+// the asset list stays deterministic. Matching by module_id prevents a
+// same-named class+method in another module from swallowing the outcome.
+func (s *sqlStore) UpdateIntelTestCaseOutcome(ctx context.Context, projectID, moduleID int64, class, method string, passed bool, durationMs int64, flaky bool) error {
 	if method == "" {
 		return nil
 	}
@@ -189,9 +190,9 @@ func (s *sqlStore) UpdateIntelTestCaseOutcome(ctx context.Context, projectID int
 		UPDATE test_cases SET last_status = ?, last_duration_ms = ?,
 			flaky_count = flaky_count + ?, last_run_at = CURRENT_TIMESTAMP
 		WHERE id = (
-			SELECT id FROM test_cases WHERE project_id = ? AND method = ? AND (? = '' OR class = ?)
+			SELECT id FROM test_cases WHERE project_id = ? AND module_id = ? AND method = ? AND (? = '' OR class = ?)
 			ORDER BY id LIMIT 1
-		)`), status, durationMs, flakyInt, projectID, method, class, class)
+		)`), status, durationMs, flakyInt, projectID, moduleID, method, class, class)
 	return err
 }
 

@@ -210,7 +210,10 @@ func (s *Server) applyIntelFix(ctx context.Context, rec *store.IntelFix) error {
 		if sg == nil || sg.File == "" {
 			continue
 		}
-		abs := filepath.Join(root, filepath.FromSlash(sg.File))
+		abs, err := intelResolveRepoPath(root, sg.File)
+		if err != nil {
+			return err
+		}
 		data, err := os.ReadFile(abs)
 		if err != nil {
 			return fmt.Errorf("读取 %s: %w", sg.File, err)
@@ -261,7 +264,10 @@ func (s *Server) rollbackIntelFix(ctx context.Context, rec *store.IntelFix) erro
 		return err
 	}
 	for file, orig := range backups {
-		abs := filepath.Join(root, filepath.FromSlash(file))
+		abs, err := intelResolveRepoPath(root, file)
+		if err != nil {
+			return err
+		}
 		if err := os.WriteFile(abs, []byte(orig), 0o644); err != nil {
 			return fmt.Errorf("回滚 %s: %w", file, err)
 		}

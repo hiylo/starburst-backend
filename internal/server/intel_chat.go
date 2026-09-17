@@ -71,7 +71,9 @@ func (s *Server) getIntelChat(w http.ResponseWriter, r *http.Request, id int64) 
 		writeErr(w, http.StatusInternalServerError, "load chat failed")
 		return
 	}
-	messages, err := s.store.ListIntelChatMessages(ctx, id, 0)
+	// 长对话全量返回会让响应体无界增长；默认只回最近 200 条，更多历史按
+	// limit/before 分页获取（resolveChat 内部同样限 20）。
+	messages, err := s.store.ListIntelChatMessages(ctx, id, 200)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "load messages failed")
 		return

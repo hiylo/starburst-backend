@@ -853,32 +853,50 @@ func TestUpdateIntelTestCaseOutcome(t *testing.T) {
 
 	if err := st.ReplaceIntelTestCases(ctx, 1, []*TestCase{
 		{ProjectID: 1, ModuleID: 1, Kind: "go", Class: "pkg", Method: "TestFoo", Path: "pkg/foo_test.go"},
+		{ProjectID: 1, ModuleID: 2, Kind: "go", Class: "pkg", Method: "TestFoo", Path: "other/pkg/foo_test.go"},
 	}); err != nil {
 		t.Fatalf("replace cases: %v", err)
 	}
 
-	// First run: passed, flaky (one re-run flipped it).
-	if err := st.UpdateIntelTestCaseOutcome(ctx, 1, "pkg", "TestFoo", true, 12, true); err != nil {
+	// First run: passed, flaky (one re-run flipped it). Only module 1's row
+	// matches, so the same-named case in module 2 must keep its default state.
+	if err := st.UpdateIntelTestCaseOutcome(ctx, 1, 1, "pkg", "TestFoo", true, 12, true); err != nil {
 		t.Fatalf("update outcome: %v", err)
 	}
 	cases, err := st.ListIntelTestCases(ctx, 1, 0)
-	if err != nil || len(cases) != 1 {
+	if err != nil || len(cases) != 2 {
 		t.Fatalf("list cases: %v len=%d", err, len(cases))
 	}
-	if cases[0].LastStatus != "passed" || cases[0].FlakyCount != 1 || cases[0].LastDurationMs != 12 {
-		t.Errorf("after flaky pass = %+v", cases[0])
+	var mod1, mod2 *TestCase
+	for i := range cases {
+		if cases[i].ModuleID == 1 {
+			mod1 = cases[i]
+		} else if cases[i].ModuleID == 2 {
+			mod2 = cases[i]
+		}
+	}
+	if mod1 == nil || mod1.LastStatus != "passed" || mod1.FlakyCount != 1 || mod1.LastDurationMs != 12 {
+		t.Errorf("after flaky pass mod1 = %+v", mod1)
+	}
+	if mod2 == nil || mod2.LastStatus != "" || mod2.FlakyCount != 0 {
+		t.Errorf("module 2 must not be touched = %+v", mod2)
 	}
 
 	// A real failure bumps status to failed but not flaky count.
-	if err := st.UpdateIntelTestCaseOutcome(ctx, 1, "pkg", "TestFoo", false, 9, false); err != nil {
+	if err := st.UpdateIntelTestCaseOutcome(ctx, 1, 1, "pkg", "TestFoo", false, 9, false); err != nil {
 		t.Fatalf("update outcome: %v", err)
 	}
 	cases, err = st.ListIntelTestCases(ctx, 1, 0)
 	if err != nil {
 		t.Fatalf("list cases: %v", err)
 	}
-	if cases[0].LastStatus != "failed" || cases[0].FlakyCount != 1 {
-		t.Errorf("after real failure = %+v", cases[0])
+	for i := range cases {
+		if cases[i].ModuleID == 1 {
+			mod1 = cases[i]
+		}
+	}
+	if mod1 == nil || mod1.LastStatus != "failed" || mod1.FlakyCount != 1 {
+		t.Errorf("after real failure = %+v", mod1)
 	}
 }
 

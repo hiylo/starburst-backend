@@ -294,7 +294,7 @@ type Store interface {
 	// AppendIntelTestCases inserts test cases without wiping the rest.
 	AppendIntelTestCases(ctx context.Context, projectID int64, cases []*TestCase) error
 	// UpdateIntelTestCaseOutcome records a run outcome on the matching test case.
-	UpdateIntelTestCaseOutcome(ctx context.Context, projectID int64, class, method string, passed bool, durationMs int64, flaky bool) error
+	UpdateIntelTestCaseOutcome(ctx context.Context, projectID, moduleID int64, class, method string, passed bool, durationMs int64, flaky bool) error
 	// CreateIntelTestRun persists a new test run and populates its id.
 	CreateIntelTestRun(ctx context.Context, run *TestRun) error
 	// GetIntelTestRun loads a single test run.

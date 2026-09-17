@@ -84,8 +84,10 @@ func (c *retrievalCache) invalidateProject(projectID int64) {
 // ragRetrievalCache is the process-wide retrieval cache (bounded, LRU-ish).
 var ragRetrievalCache = newRetrievalCache(128)
 
-// retrievalCacheKey hashes project + question into a stable cache key.
-func retrievalCacheKey(projectID int64, question string) string {
-	sum := sha256.Sum256([]byte(fmt.Sprintf("%d|%s", projectID, question)))
+// retrievalCacheKey hashes project + question + limit into a stable cache key.
+// Limit is part of the key so a top-10 hit is never served to a top-20 request
+// (the cached sources would be a strict subset and silently under-recall).
+func retrievalCacheKey(projectID int64, question string, limit int) string {
+	sum := sha256.Sum256([]byte(fmt.Sprintf("%d|%s|%d", projectID, question, limit)))
 	return hex.EncodeToString(sum[:])
 }
