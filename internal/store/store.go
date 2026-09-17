@@ -220,6 +220,13 @@ type Store interface {
 	// DeleteEventsOlderThan purges session events older than cutoff.
 	DeleteEventsOlderThan(ctx context.Context, cutoff time.Time) (int, error)
 
+	// ---- Device/team sync (shared config snapshots) ----
+
+	// GetSyncBundle returns the latest bundle for key, or ErrNotFound if absent.
+	GetSyncBundle(ctx context.Context, key string) (*SyncBundle, error)
+	// PutSyncBundle upserts a bundle and returns its new revision.
+	PutSyncBundle(ctx context.Context, key, payload string) (int64, error)
+
 	// ---- Session unread (new-message indicator, shared across Web/App) ----
 
 	// SetSessionsUnread upserts unread=1 for the given session ids.

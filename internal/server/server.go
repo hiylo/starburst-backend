@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/hiylo/starburst-backend/internal/alerts"
 	"github.com/hiylo/starburst-backend/internal/auth"
 	"github.com/hiylo/starburst-backend/internal/automation"
 	"github.com/hiylo/starburst-backend/internal/config"
@@ -32,6 +33,7 @@ type Server struct {
 	auth       *auth.Manager
 	openCode   *opencode.Client
 	hub        *push.Hub
+	alerts     *alerts.Monitor
 	automation *automation.Engine
 	llm        *llm.Client
 	embedding  *embed.Client
@@ -122,6 +124,9 @@ func (s *Server) StartAuditFlusher(ctx context.Context) {
 // SetAutomation wires the automation engine used by rule webhooks.
 func (s *Server) SetAutomation(eng *automation.Engine) { s.automation = eng }
 
+// SetAlerts wires the hardware threshold monitor used by /api/alerts.
+func (s *Server) SetAlerts(m *alerts.Monitor) { s.alerts = m }
+
 // SetLLM wires the optional orchestration LLM client. When nil the smart
 // orchestration endpoints report they are unavailable.
 func (s *Server) SetLLM(c *llm.Client) { s.llm = c }
@@ -170,6 +175,7 @@ func (s *Server) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/embed", s.handleEmbedConfig)
 	mux.HandleFunc("/api/audit", s.handleAudit)
 	mux.HandleFunc("/api/stats", s.handleStats)
+	mux.HandleFunc("/api/sync", s.handleSync)
 	mux.HandleFunc("/api/archives", s.handleArchives)
 	mux.HandleFunc("/api/archives/", s.handleArchiveByID)
 	// OpenCode 镜像代理：/api/opencode/<path> ↔ opencode /<path>（App 后端可用时走此通道）。
@@ -183,6 +189,8 @@ func (s *Server) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/stt/sessions", s.handleSTTCreate)
 	mux.HandleFunc("/api/stt/sessions/", s.handleSTTSession)
 	mux.HandleFunc("/api/webhook", s.handleRuleWebhook)
+	// Hardware threshold alerts (server monitoring): GET/POST /api/alerts.
+	mux.HandleFunc("/api/alerts", s.handleAlerts)
 	// Test Intelligence (intel) subsystem routes.
 	mux.HandleFunc("/api/intel/projects", s.handleIntelProjects)
 	mux.HandleFunc("/api/intel/projects/", s.handleIntelProjectByID)

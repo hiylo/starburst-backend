@@ -11,6 +11,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/hiylo/starburst-backend/internal/alerts"
 	"github.com/hiylo/starburst-backend/internal/auth"
 	"github.com/hiylo/starburst-backend/internal/automation"
 	"github.com/hiylo/starburst-backend/internal/config"
@@ -112,6 +113,12 @@ func main() {
 	srv := server.New(cfg, st, am, oc, hub)
 	srv.SetWebUI(webui.New())
 	srv.SetMaxConcurrency(cfg.MaxConcurrency)
+
+	// Hardware threshold alerts: periodically samples CPU/memory/disk and
+	// broadcasts alert.hardware push events on threshold crossings.
+	alertMon := alerts.NewMonitor(st, hub, alerts.DefaultInterval)
+	srv.SetAlerts(alertMon)
+	go alertMon.Run(ctx)
 
 	// Optional orchestration LLM: powers natural-language rule generation and
 	// (later) result summaries and failure self-healing. Configuration is

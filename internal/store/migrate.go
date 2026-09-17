@@ -109,6 +109,7 @@ var migrations = []migration{
 	{name: "intel_fix_finding", apply: migrationIntelFixFinding},
 	{name: "intel_dedup", apply: migrationIntelDedup},
 	{name: "intel_android_bindings", apply: migrationIntelAndroidBindings},
+	{name: "sync_bundle", apply: migrationSyncBundle},
 }
 
 // migrationIntel creates the Test Intelligence subsystem tables: flat project
@@ -875,6 +876,27 @@ func migrationIntelDedup(ctx context.Context, driver string, db *sql.DB) error {
 		`DELETE FROM intel_findings WHERE id NOT IN (
 			SELECT MIN(id) FROM intel_findings
 			GROUP BY project_id, detector, cve_or_rule_id, location)`,
+	}
+	for _, s := range stmts {
+		if _, err := db.ExecContext(ctx, s); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// migrationSyncBundle creates the device/team config sync table: one row per
+// sync key (a server id or "global") holding the latest JSON snapshot pushed by
+// any device. Last-write-wins via a monotonically increasing revision so the
+// app can pull the newest snapshot and detect a drift from its base revision.
+func migrationSyncBundle(ctx context.Context, driver string, db *sql.DB) error {
+	stmts := []string{
+		`CREATE TABLE IF NOT EXISTS sync_bundle (
+			key TEXT PRIMARY KEY,
+			payload TEXT NOT NULL DEFAULT '',
+			revision BIGINT NOT NULL DEFAULT 0,
+			updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+		)`,
 	}
 	for _, s := range stmts {
 		if _, err := db.ExecContext(ctx, s); err != nil {
