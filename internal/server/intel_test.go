@@ -559,6 +559,71 @@ public class ActivityDto {
 	}
 }
 
+// TestIntelAndroidBindings verifies the client field-binding pipeline: an
+// Android module's DataBinding layouts are extracted into the must-display
+// field list and exposed through /api/intel/android-bindings.
+func TestIntelAndroidBindings(t *testing.T) {
+	s := newTestServer(t)
+	wh := loginWeb(t, s)
+
+	root := t.TempDir()
+	writeTestFile(t, filepath.Join(root, "clients/android/build.gradle.kts"),
+		`plugins { id("com.android.application") }`)
+	writeTestFile(t, filepath.Join(root, "clients/android/src/main/res/layout/activity_main.xml"),
+		`<layout>
+  <LinearLayout>
+    <TextView android:text="@{viewModel.userName}" />
+    <ImageView android:src="@{viewModel.bannerList.title}" />
+  </LinearLayout>
+</layout>`)
+
+	rec := s.do(t, http.MethodPost, "/api/intel/projects",
+		`{"name":"demo","source":"local","localPath":"`+filepath.ToSlash(root)+`"}`, wh)
+	var proj struct {
+		ID int64 `json:"id"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &proj); err != nil || proj.ID == 0 {
+		t.Fatalf("create project: %s", rec.Body.String())
+	}
+	rec = s.do(t, http.MethodPost, "/api/intel/analyze",
+		`{"projectId":`+jsonInt(proj.ID)+`}`, wh)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("analyze status %d: %s", rec.Code, rec.Body.String())
+	}
+
+	rec = s.do(t, http.MethodGet, "/api/intel/android-bindings?projectId="+jsonInt(proj.ID), "", wh)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("android-bindings status %d: %s", rec.Code, rec.Body.String())
+	}
+	var bResp struct {
+		Bindings []struct {
+			Page       string `json:"page"`
+			FieldPath  string `json:"fieldPath"`
+			Widget     string `json:"widget"`
+			SourceFile string `json:"sourceFile"`
+		} `json:"bindings"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &bResp); err != nil {
+		t.Fatalf("bindings parse: %v", err)
+	}
+	if len(bResp.Bindings) != 2 {
+		t.Fatalf("bindings = %d, want 2: %+v", len(bResp.Bindings), bResp.Bindings)
+	}
+	got := map[string]string{}
+	for _, b := range bResp.Bindings {
+		got[b.FieldPath] = b.Widget
+	}
+	if got["userName"] != "TextView" {
+		t.Errorf("userName widget = %q, want TextView", got["userName"])
+	}
+	if got["bannerList.title"] != "ImageView" {
+		t.Errorf("bannerList.title widget = %q, want ImageView", got["bannerList.title"])
+	}
+	if bResp.Bindings[0].Page != "activity_main" {
+		t.Errorf("page = %q, want activity_main", bResp.Bindings[0].Page)
+	}
+}
+
 func gitRun(t *testing.T, dir string, args ...string) {
 	t.Helper()
 	cmd := exec.Command("git", args...)

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/hiylo/starburst-backend/internal/intel"
+	"github.com/hiylo/starburst-backend/internal/intel/android"
 	"github.com/hiylo/starburst-backend/internal/intel/delta"
 	"github.com/hiylo/starburst-backend/internal/intel/deps"
 	"github.com/hiylo/starburst-backend/internal/intel/enrich"
@@ -182,6 +183,33 @@ func (s *Server) handleIntelEntities(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"entities": ents})
+}
+
+// handleIntelAndroidBindings lists the project's Android client field bindings
+// (the must-display field list extracted from DataBinding layouts).
+func (s *Server) handleIntelAndroidBindings(w http.ResponseWriter, r *http.Request) {
+	if !s.requireWeb(r) {
+		if _, ok := s.requireToken(r); !ok {
+			writeErr(w, http.StatusUnauthorized, "web session or APP token required")
+			return
+		}
+	}
+	if r.Method != http.MethodGet {
+		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	projectID, ok := s.intelQueryProject(w, r)
+	if !ok {
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+	bindings, err := s.store.ListIntelAndroidBindings(ctx, projectID)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "load android bindings failed")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"bindings": bindings})
 }
 
 // handleIntelModules lists the sub-modules of a project.
@@ -519,6 +547,9 @@ func (s *Server) runIntelAnalyze(ctx context.Context, projectID int64) error {
 	if err := s.persistFeatures(ctx, projectID, allEndpoints); err != nil {
 		return err
 	}
+	if err := s.persistAndroidBindings(ctx, projectID, root, mods); err != nil {
+		log.Printf("intel android bindings project %d: %v", projectID, err)
+	}
 	if err := s.persistGatewayRoutes(ctx, projectID, root); err != nil {
 		log.Printf("intel gateway routes project %d: %v", projectID, err)
 	}
@@ -603,6 +634,58 @@ func (s *Server) persistGatewayRoutes(ctx context.Context, projectID int64, root
 		})
 	}
 	return s.store.ReplaceIntelGatewayRoutes(ctx, projectID, storeRoutes)
+}
+
+// persistAndroidBindings extracts Android DataBinding "page -> field path"
+// bindings for every android module and persists them as the client's
+// must-display field list (used later for CLIENT_MISSING_FIELD attribution).
+func (s *Server) persistAndroidBindings(ctx context.Context, projectID int64, root string, mods []*store.IntelModule) error {
+	bindings := make([]*store.IntelAndroidBinding, 0)
+	for _, m := range mods {
+		if m.KindType != "android" {
+			continue
+		}
+		dir := filepath.Join(root, m.RelPath)
+		resDir := filepath.Join(dir, "src", "main", "res")
+		if fi, err := os.Stat(resDir); err != nil || !fi.IsDir() {
+			continue
+		}
+		bs, err := android.ExtractBindings(resDir)
+		if err != nil {
+			continue
+		}
+		for _, b := range bs {
+			src, line := splitAndroidSource(root, resDir, b.Source)
+			bindings = append(bindings, &store.IntelAndroidBinding{
+				ModuleID:   m.ID,
+				Page:       b.Page,
+				FieldPath:  b.FieldPath,
+				Widget:     b.Widget,
+				SourceFile: src,
+				SourceLine: line,
+			})
+		}
+	}
+	return s.store.ReplaceIntelAndroidBindings(ctx, projectID, bindings)
+}
+
+// splitAndroidSource splits a binding's "rel/path.xml:line" source (relative to
+// resDir) into a project-root-relative file path and a line number.
+func splitAndroidSource(root, resDir, src string) (string, int) {
+	file := src
+	line := 0
+	if i := strings.LastIndexByte(src, ':'); i >= 0 {
+		if n, err := strconv.Atoi(src[i+1:]); err == nil {
+			line = n
+			file = src[:i]
+		}
+	}
+	full := filepath.Join(resDir, filepath.FromSlash(file))
+	rel, err := filepath.Rel(root, full)
+	if err != nil {
+		rel = full
+	}
+	return filepath.ToSlash(rel), line
 }
 
 // enrichIntelWithLLM runs the optional LLM document-analysis pass: it feeds the

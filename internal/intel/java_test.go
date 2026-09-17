@@ -145,10 +145,10 @@ public class ActivityDto {
 
 func TestGraphQLMappingAt(t *testing.T) {
 	cases := []struct {
-		in     string
-		verb   string
-		name   string
-		found  bool
+		in    string
+		verb  string
+		name  string
+		found bool
 	}{
 		{"@QueryMapping", "Query", "", true},
 		{"@MutationMapping(name = \"createActivity\")", "Mutation", "createActivity", true},

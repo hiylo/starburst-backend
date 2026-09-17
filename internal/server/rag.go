@@ -187,6 +187,38 @@ func (s *Server) buildIntelChunks(ctx context.Context, projectID int64) ([]*stor
 	for _, c := range s.gatherDocChunks(ctx, projectID) {
 		add(c)
 	}
+	// Android client bindings (must-display field list) become queryable facts.
+	if bindings, err := s.store.ListIntelAndroidBindings(ctx, projectID); err == nil {
+		byPage := map[string][]*store.IntelAndroidBinding{}
+		var pageOrder []string
+		for _, b := range bindings {
+			if _, ok := byPage[b.Page]; !ok {
+				pageOrder = append(pageOrder, b.Page)
+			}
+			byPage[b.Page] = append(byPage[b.Page], b)
+		}
+		for _, page := range pageOrder {
+			bs := byPage[page]
+			var sb strings.Builder
+			sb.WriteString("Android 页面 ")
+			sb.WriteString(page)
+			sb.WriteString(" 必展示字段绑定：")
+			for _, b := range bs {
+				sb.WriteString("\n- ")
+				sb.WriteString(b.Widget)
+				sb.WriteString(" 绑定 ")
+				sb.WriteString(b.FieldPath)
+			}
+			add(&store.RagChunk{
+				ModuleID:   bs[0].ModuleID,
+				Kind:       "android_binding",
+				Title:      "Android 页面 " + page,
+				Content:    sb.String(),
+				SourceFile: bs[0].SourceFile,
+				SourceLine: bs[0].SourceLine,
+			})
+		}
+	}
 	return chunks, nil
 }
 

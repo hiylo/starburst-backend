@@ -354,6 +354,10 @@ type Store interface {
 	ReplaceIntelOverview(ctx context.Context, projectID int64, ov *IntelOverview) error
 	// GetIntelOverview returns the project's latest overview snapshot.
 	GetIntelOverview(ctx context.Context, projectID int64) (*IntelOverview, error)
+	// ReplaceIntelAndroidBindings replaces the project's Android field bindings (full rescan).
+	ReplaceIntelAndroidBindings(ctx context.Context, projectID int64, bindings []*IntelAndroidBinding) error
+	// ListIntelAndroidBindings returns the project's Android field bindings.
+	ListIntelAndroidBindings(ctx context.Context, projectID int64) ([]*IntelAndroidBinding, error)
 }
 
 // Open opens a store for the given driver/dsn. It applies all migrations

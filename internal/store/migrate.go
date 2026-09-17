@@ -108,6 +108,7 @@ var migrations = []migration{
 	{name: "intel_overviews", apply: migrationIntelOverviews},
 	{name: "intel_fix_finding", apply: migrationIntelFixFinding},
 	{name: "intel_dedup", apply: migrationIntelDedup},
+	{name: "intel_android_bindings", apply: migrationIntelAndroidBindings},
 }
 
 // migrationIntel creates the Test Intelligence subsystem tables: flat project
@@ -822,6 +823,32 @@ func migrationIntelOverviews(ctx context.Context, driver string, db *sql.DB) err
 func migrationIntelFixFinding(ctx context.Context, driver string, db *sql.DB) error {
 	stmts := []string{
 		`ALTER TABLE intel_fixes ADD COLUMN finding_id INTEGER NOT NULL DEFAULT 0`,
+	}
+	for _, s := range stmts {
+		if _, err := db.ExecContext(ctx, s); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// migrationIntelAndroidBindings creates the client field-binding table:
+// Android DataBinding "page -> field path" extractions (the must-display field
+// list). Each row carries source file:line provenance.
+func migrationIntelAndroidBindings(ctx context.Context, driver string, db *sql.DB) error {
+	stmts := []string{
+		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS intel_android_bindings (
+			%s,
+			project_id INTEGER NOT NULL DEFAULT 0,
+			module_id INTEGER NOT NULL DEFAULT 0,
+			page TEXT NOT NULL DEFAULT '',
+			field_path TEXT NOT NULL DEFAULT '',
+			widget TEXT NOT NULL DEFAULT '',
+			source_file TEXT NOT NULL DEFAULT '',
+			source_line INTEGER NOT NULL DEFAULT 0,
+			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+		)`, idColumn(driver)),
+		`CREATE INDEX IF NOT EXISTS idx_intel_android_bindings_project ON intel_android_bindings(project_id, module_id)`,
 	}
 	for _, s := range stmts {
 		if _, err := db.ExecContext(ctx, s); err != nil {

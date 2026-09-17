@@ -2275,7 +2275,7 @@ document.addEventListener("DOMContentLoaded", () => {
   const tabLoaders = {
     features: loadIntelFeatures, cases: loadIntelCases, findings: loadIntelFindings,
     issues: loadIntelIssues, fixes: loadIntelFixes, runs: loadIntelRuns, impact: loadIntelImpact,
-    overview: loadIntelOverview,
+    overview: loadIntelOverview, bindings: loadIntelBindings,
   };
   document.querySelectorAll(".intel-tab").forEach(t => {
     t.addEventListener("click", () => {
@@ -2624,6 +2624,23 @@ async function checkIntelContract() {
 
 /* ---------- 分析结果 Tab：功能点 / 用例 / 审计 / 问题 / 修复 / 运行 ---------- */
 const SEV_LABELS = { critical: "严重", high: "高", medium: "中", low: "低" };
+
+async function loadIntelBindings(id) {
+  const res = await api("/api/intel/android-bindings?projectId=" + id, { headers: appHeaders() });
+  const data = await res.json();
+  const bindings = data.bindings || [];
+  const tb = document.querySelector("#intelBindingTable tbody");
+  tb.innerHTML = "";
+  for (const b of bindings) {
+    tb.insertAdjacentHTML("beforeend", `<tr>
+      <td class="mono">${escapeHtml(b.page || "-")}</td>
+      <td class="mono">${escapeHtml(b.fieldPath || "-")}</td>
+      <td><span class="badge">${escapeHtml(b.widget || "-")}</span></td>
+      <td class="mono muted clip" title="${escapeHtml(b.sourceFile || "")}">${escapeHtml(shortProv(b.sourceFile, b.sourceLine))}</td>
+    </tr>`);
+  }
+  if (!bindings.length) tb.insertAdjacentHTML("beforeend", `<tr><td colspan="4" class="muted" style="text-align:center;padding:16px">暂无客户端绑定（Android 项目分析后自动提取 DataBinding 字段）</td></tr>`);
+}
 
 async function loadIntelFeatures(id) {
   const res = await api("/api/intel/features?projectId=" + id, { headers: appHeaders() });

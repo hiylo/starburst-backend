@@ -39,8 +39,8 @@ var (
 	rePathVariable    = regexp.MustCompile(`@PathVariable(?:\(\s*(?:value\s*=\s*|name\s*=\s*)?"([^"]*)")?\s*([A-Za-z0-9_<>,\[\]\.]+)\s+([A-Za-z0-9_]+)`)
 	reRequestParam    = regexp.MustCompile(`@RequestParam(?:\(\s*(?:value\s*=\s*|name\s*=\s*)?"([^"]*)"[^)]*\))?\s*([A-Za-z0-9_<>,\[\]\.]+)\s+([A-Za-z0-9_]+)`)
 	reRequestRequired = regexp.MustCompile(`required\s*=\s*false`)
-	reGraphQLMapping   = regexp.MustCompile(`@(Query|Mutation|Subscription)Mapping(?:\s*\(\s*(?:(?:name|value)\s*=\s*)?["']?([^"')\s]+)["']?\s*\))?`)
-	reGraphQLArgument  = regexp.MustCompile(`@Argument(?:\s*\(\s*(?:name\s*=\s*)?["']?([^"'),]*)["']?\s*\))?\s*([A-Za-z0-9_<>,\[\]\.]+)\s+([A-Za-z0-9_]+)`)
+	reGraphQLMapping  = regexp.MustCompile(`@(Query|Mutation|Subscription)Mapping(?:\s*\(\s*(?:(?:name|value)\s*=\s*)?["']?([^"')\s]+)["']?\s*\))?`)
+	reGraphQLArgument = regexp.MustCompile(`@Argument(?:\s*\(\s*(?:name\s*=\s*)?["']?([^"'),]*)["']?\s*\))?\s*([A-Za-z0-9_<>,\[\]\.]+)\s+([A-Za-z0-9_]+)`)
 )
 
 // scanJavaFiles scans a set of .java files and returns the extracted entity

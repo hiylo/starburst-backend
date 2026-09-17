@@ -177,6 +177,7 @@ func (s *sqlStore) DeleteIntelProject(ctx context.Context, id int64) error {
 		`DELETE FROM intel_overviews WHERE project_id = ?`,
 		`DELETE FROM intel_impacts WHERE project_id = ?`,
 		`DELETE FROM intel_gateway_routes WHERE project_id = ?`,
+		`DELETE FROM intel_android_bindings WHERE project_id = ?`,
 		`DELETE FROM intel_chunks WHERE project_id = ?`,
 		`DELETE FROM intel_endpoints WHERE project_id = ?`,
 		`DELETE FROM intel_entities WHERE project_id = ?`,
