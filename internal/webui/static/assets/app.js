@@ -3575,10 +3575,14 @@ async function showIntelRunDetail(runId) {
   const results = data.results || [];
   const rows = results.map(rt => {
     const ok = rt.passed;
+    const flaky = ok && (rt.failuresJson || "").indexOf("flaky") !== -1;
+    const stHtml = flaky
+      ? `<span class="intel-status" style="color:var(--amber,#f59e0b)" title="${escapeHtml(rt.failuresJson || "")}">flaky</span>`
+      : `<span class="intel-status ${ok ? "analyzed" : ""}">${ok ? "通过" : "失败"}</span>`;
     const rcBtn = ok ? "" : ` <button class="ghost sm" onclick="showResultRootcause(${rt.id})">归因</button>`;
     return `<tr>
       <td class="mono" style="font-size:12px">${escapeHtml(rt.endpoint || "-")}</td>
-      <td><span class="intel-status ${ok ? "analyzed" : ""}">${ok ? "通过" : "失败"}</span></td>
+      <td>${stHtml}</td>
       <td class="mono muted" style="font-size:11px" id="rootcause-${rt.id}">${rcBtn}</td>
     </tr>`;
   }).join("");
