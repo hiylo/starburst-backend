@@ -223,6 +223,12 @@ func (s *Server) runIntelTests(ctx context.Context, projectID, moduleID int64) (
 	if len(cmdArgs) == 0 {
 		return nil, fmt.Errorf("unsupported build tool %q for module %s", module.BuildTool, module.RelPath)
 	}
+	// Honor the human-reviewed command whitelist (commands_json) when it offers
+	// a matching test command; the whitelist is parsed into argv (no shell), so
+	// edited entries cannot inject shell metacharacters.
+	if wl := whitelistedTestCommand(module.CommandsJSON, module.BuildTool, module.KindType); wl != nil {
+		cmdArgs = wl
+	}
 
 	// Environment gate (§3.6): reject the run before executing when required
 	// middleware/toolchains are missing, with a per-item list.
@@ -293,6 +299,54 @@ func testCommandFor(buildTool, kindType string) ([]string, string) {
 		return []string{"./gradlew", "test"}, "surefire"
 	}
 	return nil, ""
+}
+
+// whitelistedTestCommand picks a test command from the module's reviewed
+// command whitelist (commands_json, a JSON array of command strings). It
+// returns the matching argv (split with strings.Fields, never a shell) or nil
+// to fall back to the tool default. Entries are matched by the tool's primary
+// executable plus a "test" intent so a human-reviewed whitelist actually takes
+// effect at run time.
+func whitelistedTestCommand(commandsJSON, buildTool, kindType string) []string {
+	if commandsJSON == "" {
+		return nil
+	}
+	var wl []string
+	if err := json.Unmarshal([]byte(commandsJSON), &wl); err != nil {
+		return nil
+	}
+	for _, line := range wl {
+		argv := strings.Fields(line)
+		if len(argv) == 0 {
+			continue
+		}
+		matched := false
+		switch buildTool {
+		case "go":
+			matched = argv[0] == "go" && len(argv) >= 2 && argv[1] == "test"
+		case "maven":
+			matched = argv[0] == "mvn" && hasTestIntent(argv)
+		case "gradle":
+			matched = argv[0] == "./gradlew" && hasTestIntent(argv)
+		case "npm":
+			matched = argv[0] == "npm" && hasTestIntent(argv)
+		}
+		if matched {
+			return argv
+		}
+	}
+	return nil
+}
+
+// hasTestIntent reports whether any argument signals a test goal (mvn test,
+// gradlew test, testDebugUnitTest, npm test ...).
+func hasTestIntent(argv []string) bool {
+	for _, a := range argv[1:] {
+		if a == "test" || strings.HasPrefix(a, "test") {
+			return true
+		}
+	}
+	return false
 }
 
 // runCommand runs an executable with a bounded timeout and returns stdout.

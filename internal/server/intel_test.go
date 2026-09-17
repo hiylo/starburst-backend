@@ -1145,6 +1145,38 @@ func TestIntelFixApplyAndRollback(t *testing.T) {
 	}
 }
 
+// TestWhitelistedTestCommand verifies that a reviewed command whitelist is
+// honored at run time: matching test intent is chosen over the tool default,
+// non-matching entries fall back to default, and JSON is parsed without a shell.
+func TestWhitelistedTestCommand(t *testing.T) {
+	// Human-reviewed whitelist with an extra coverage goal -> that entry wins.
+	got := whitelistedTestCommand(`["mvn clean install","mvn test -Dcoverage"]`, "maven", "")
+	if len(got) != 3 || got[0] != "mvn" || got[1] != "test" {
+		t.Errorf("maven whitelist = %v, want [mvn test -Dcoverage]", got)
+	}
+	// go: only "go test" entries qualify.
+	got = whitelistedTestCommand(`["go vet ./...","go test ./internal/..."]`, "go", "")
+	if len(got) != 3 || got[1] != "test" || got[2] != "./internal/..." {
+		t.Errorf("go whitelist = %v, want [go test ./internal/...]", got)
+	}
+	// gradle android: testDebugUnitTest intent matches.
+	got = whitelistedTestCommand(`["./gradlew assembleDebug"]`, "gradle", "android")
+	if got != nil {
+		t.Errorf("assembleDebug should not match test intent: %v", got)
+	}
+	got = whitelistedTestCommand(`["./gradlew assembleDebug","./gradlew testDebugUnitTest"]`, "gradle", "android")
+	if len(got) != 2 || got[1] != "testDebugUnitTest" {
+		t.Errorf("gradle android whitelist = %v", got)
+	}
+	// Empty / invalid whitelist falls back to default.
+	if whitelistedTestCommand("", "go", "") != nil {
+		t.Error("empty whitelist should fall back")
+	}
+	if whitelistedTestCommand("not-json", "go", "") != nil {
+		t.Error("invalid whitelist should fall back")
+	}
+}
+
 func gitRun(t *testing.T, dir string, args ...string) {
 	t.Helper()
 	cmd := exec.Command("git", args...)
