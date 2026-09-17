@@ -256,8 +256,8 @@ type Store interface {
 	ListIntelModules(ctx context.Context, projectID int64) ([]*IntelModule, error)
 	// GetIntelModule loads a single module by id.
 	GetIntelModule(ctx context.Context, id int64) (*IntelModule, error)
-	// UpdateIntelModuleCommands persists a module's reviewed command whitelist.
-	UpdateIntelModuleCommands(ctx context.Context, id int64, commandsJSON string) error
+	// UpdateIntelModuleSummary persists the LLM-generated module business summary.
+	UpdateIntelModuleSummary(ctx context.Context, id int64, summary string) error
 	// ReplaceIntelEntities replaces the project's entity↔table↔column mappings.
 	ReplaceIntelEntities(ctx context.Context, projectID int64, ents []*IntelEntity) error
 	// ListIntelEntities returns entity mappings for a project/module.

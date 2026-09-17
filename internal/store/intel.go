@@ -37,6 +37,7 @@ type IntelModule struct {
 	KindRole      string     `json:"kindRole"`
 	BuildTool     string     `json:"buildTool"`
 	CommandsJSON  string     `json:"commandsJson"`
+	Summary       string     `json:"summary"`
 	LastTestedSHA string     `json:"lastTestedSha"`
 	AnalyzedAt    *time.Time `json:"analyzedAt"`
 	CreatedAt     time.Time  `json:"createdAt"`
@@ -207,11 +208,11 @@ func (s *sqlStore) ReplaceIntelModules(ctx context.Context, projectID int64, mod
 	}
 	for _, m := range mods {
 		if _, err := s.db.ExecContext(ctx, s.q(`
-			INSERT INTO project_modules (project_id, rel_path, kind_type, kind_role, build_tool,
-				commands_json, last_tested_sha, analyzed_at, created_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`),
+		INSERT INTO project_modules (project_id, rel_path, kind_type, kind_role, build_tool,
+			commands_json, summary, last_tested_sha, analyzed_at, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`),
 			projectID, m.RelPath, m.KindType, m.KindRole, m.BuildTool,
-			m.CommandsJSON, m.LastTestedSHA, m.AnalyzedAt); err != nil {
+			m.CommandsJSON, m.Summary, m.LastTestedSHA, m.AnalyzedAt); err != nil {
 			return err
 		}
 	}
@@ -222,12 +223,12 @@ func (s *sqlStore) ReplaceIntelModules(ctx context.Context, projectID int64, mod
 func (s *sqlStore) GetIntelModule(ctx context.Context, id int64) (*IntelModule, error) {
 	row := s.db.QueryRowContext(ctx, s.q(`
 		SELECT id, project_id, rel_path, kind_type, kind_role, build_tool,
-			commands_json, last_tested_sha, analyzed_at, created_at
+			commands_json, summary, last_tested_sha, analyzed_at, created_at
 		FROM project_modules WHERE id = ?`), id)
 	m := &IntelModule{}
 	var analyzed *time.Time
 	if err := row.Scan(&m.ID, &m.ProjectID, &m.RelPath, &m.KindType, &m.KindRole,
-		&m.BuildTool, &m.CommandsJSON, &m.LastTestedSHA, &analyzed, &m.CreatedAt); err != nil {
+		&m.BuildTool, &m.CommandsJSON, &m.Summary, &m.LastTestedSHA, &analyzed, &m.CreatedAt); err != nil {
 		return nil, err
 	}
 	m.AnalyzedAt = analyzed
@@ -241,11 +242,18 @@ func (s *sqlStore) UpdateIntelModuleCommands(ctx context.Context, id int64, comm
 	return err
 }
 
+// UpdateIntelModuleSummary persists the LLM-generated module business summary.
+func (s *sqlStore) UpdateIntelModuleSummary(ctx context.Context, id int64, summary string) error {
+	_, err := s.db.ExecContext(ctx, s.q(`
+		UPDATE project_modules SET summary = ? WHERE id = ?`), summary, id)
+	return err
+}
+
 // ListIntelModules returns the project's sub-modules ordered by path.
 func (s *sqlStore) ListIntelModules(ctx context.Context, projectID int64) ([]*IntelModule, error) {
 	rows, err := s.db.QueryContext(ctx, s.q(`
 		SELECT id, project_id, rel_path, kind_type, kind_role, build_tool,
-			commands_json, last_tested_sha, analyzed_at, created_at
+			commands_json, summary, last_tested_sha, analyzed_at, created_at
 		FROM project_modules WHERE project_id = ? ORDER BY rel_path ASC`), projectID)
 	if err != nil {
 		return nil, err
@@ -256,7 +264,7 @@ func (s *sqlStore) ListIntelModules(ctx context.Context, projectID int64) ([]*In
 		m := &IntelModule{}
 		var analyzed *time.Time
 		if err := rows.Scan(&m.ID, &m.ProjectID, &m.RelPath, &m.KindType, &m.KindRole,
-			&m.BuildTool, &m.CommandsJSON, &m.LastTestedSHA, &analyzed, &m.CreatedAt); err != nil {
+			&m.BuildTool, &m.CommandsJSON, &m.Summary, &m.LastTestedSHA, &analyzed, &m.CreatedAt); err != nil {
 			return nil, err
 		}
 		m.AnalyzedAt = analyzed

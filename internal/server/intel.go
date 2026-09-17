@@ -342,10 +342,9 @@ func (s *Server) applyFeatureOverrides(ctx context.Context, projectID int64, fea
 	}
 }
 
-// handleIntelModuleCommands updates a module's reviewed command whitelist
-// (commands_json). The body must be a JSON array of command strings; the list
-// is validated before persisting so edited entries cannot smuggle shell
-// metacharacters of their own (argv is split without a shell at run time).
+// handleIntelModuleCommands serves the per-module detail (GET). The command
+// whitelist lives at project level (projects.commands_json), edited via
+// PUT /api/intel/projects/{id}; module-level commands were removed.
 func (s *Server) handleIntelModuleCommands(w http.ResponseWriter, r *http.Request) {
 	if !s.requireWeb(r) {
 		if _, ok := s.requireToken(r); !ok {
@@ -364,52 +363,25 @@ func (s *Server) handleIntelModuleCommands(w http.ResponseWriter, r *http.Reques
 		writeErr(w, http.StatusNotFound, "module not found")
 		return
 	}
-
-	if r.Method == http.MethodGet {
-		// Module detail: basic info + per-module stats of the linked assets.
-		endpoints, _ := s.store.ListIntelEndpoints(ctx, mod.ProjectID, mod.ID)
-		entities, _ := s.store.ListIntelEntities(ctx, mod.ProjectID, mod.ID)
-		cases, _ := s.store.ListIntelTestCases(ctx, mod.ProjectID, mod.ID)
-		writeJSON(w, http.StatusOK, map[string]any{
-			"module": mod,
-			"stats": map[string]int{
-				"endpoints": len(endpoints),
-				"entities":  len(entities),
-				"cases":     len(cases),
-			},
-		})
-		return
-	}
-	if r.Method != http.MethodPut {
+	if r.Method != http.MethodGet {
 		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
-	var req struct {
-		Commands []string `json:"commands"`
+	// Module detail: basic info + per-module stats of the linked assets.
+	endpoints, _ := s.store.ListIntelEndpoints(ctx, mod.ProjectID, mod.ID)
+	entities, _ := s.store.ListIntelEntities(ctx, mod.ProjectID, mod.ID)
+	cases, _ := s.store.ListIntelTestCases(ctx, mod.ProjectID, mod.ID)
+	if mod.Summary == "" {
+		mod.Summary = s.ensureModuleSummary(ctx, mod, endpoints, entities)
 	}
-	if err := readJSONLimited(w, r, &req); err != nil {
-		writeErr(w, http.StatusBadRequest, "invalid request body")
-		return
-	}
-	clean := make([]string, 0, len(req.Commands))
-	for _, c := range req.Commands {
-		c = strings.TrimSpace(c)
-		if c == "" {
-			continue
-		}
-		clean = append(clean, c)
-	}
-	b, err := json.Marshal(clean)
-	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "encode commands failed")
-		return
-	}
-	if err := s.store.UpdateIntelModuleCommands(ctx, mod.ID, string(b)); err != nil {
-		writeErr(w, http.StatusInternalServerError, "update module commands failed")
-		return
-	}
-	mod.CommandsJSON = string(b)
-	writeJSON(w, http.StatusOK, map[string]any{"module": mod})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"module": mod,
+		"stats": map[string]int{
+			"endpoints": len(endpoints),
+			"entities":  len(entities),
+			"cases":     len(cases),
+		},
+	})
 }
 
 // handleIntelGatewayRoutes lists the gateway routes (public exposure) of a
@@ -650,7 +622,27 @@ func (s *Server) updateIntelProject(w http.ResponseWriter, r *http.Request, id i
 		p.GitRef = req.GitRef
 	}
 	if req.Commands != "" {
-		p.CommandsJSON = req.Commands
+		// 命令白名单是项目级别：必须是 JSON 字符串数组，且逐条去除首尾空白、
+		// 丢弃空串，再落库（运行期按 strings.Fields 拆分 argv、不经 shell 执行）。
+		var list []string
+		if err := json.Unmarshal([]byte(req.Commands), &list); err != nil {
+			writeErr(w, http.StatusBadRequest, "commandsJson 必须是 JSON 字符串数组")
+			return
+		}
+		clean := make([]string, 0, len(list))
+		for _, c := range list {
+			c = strings.TrimSpace(c)
+			if c == "" {
+				continue
+			}
+			clean = append(clean, c)
+		}
+		b, err := json.Marshal(clean)
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, "encode commands failed")
+			return
+		}
+		p.CommandsJSON = string(b)
 	}
 	if req.EnvName != "" {
 		p.EnvName = req.EnvName
@@ -680,6 +672,10 @@ func (s *Server) runIntelAnalyze(ctx context.Context, projectID int64) error {
 	mods, err := intel.DetectModules(root)
 	if err != nil {
 		return err
+	}
+	now := time.Now()
+	for _, m := range mods {
+		m.AnalyzedAt = &now
 	}
 	if err := s.store.ReplaceIntelModules(ctx, projectID, mods); err != nil {
 		return err
@@ -773,6 +769,64 @@ func buildTestCases(m *store.IntelModule, assets []testassets.Asset) []*store.Te
 		})
 	}
 	return cases
+}
+
+// ensureModuleSummary lazily generates (via the orchestration LLM) a concise
+// business summary for a module from its endpoint contracts and entities, and
+// caches it in project_modules.summary so repeated views hit the DB. When the
+// LLM is not configured the module detail stays purely deterministic.
+func (s *Server) ensureModuleSummary(ctx context.Context, mod *store.IntelModule, endpoints []*store.IntelEndpoint, entities []*store.IntelEntity) string {
+	if s.llm == nil || !s.llm.Enabled() {
+		return ""
+	}
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "子模块：%s（类型 %s / 角色 %s / 构建 %s）\n", mod.RelPath, mod.KindType, mod.KindRole, mod.BuildTool)
+	if len(endpoints) > 0 {
+		sb.WriteString("\n接口契约：\n")
+		for i, ep := range endpoints {
+			if i >= 20 {
+				break
+			}
+			fmt.Fprintf(&sb, "- %s %s 返回=%s%s\n", ep.Method, ep.Path, ep.ResponseType,
+				summarySuffix(ep.Summary))
+		}
+	}
+	if len(entities) > 0 {
+		sb.WriteString("\n实体 / 表：\n")
+		seen := map[string]bool{}
+		for _, e := range entities {
+			if seen[e.TableName] {
+				continue
+			}
+			seen[e.TableName] = true
+			fmt.Fprintf(&sb, "- %s\n", e.TableName)
+		}
+	}
+	var out struct {
+		Summary string `json:"summary"`
+	}
+	system := loadPrompt("module_analyze", "你是子模块分析助手，基于给定接口与实体清单总结模块职责，输出 JSON {summary}。")
+	if err := s.llm.CompleteJSON(ctx, system, sb.String(), &out); err != nil {
+		return ""
+	}
+	summary := cleanLLMText(out.Summary, 800)
+	if summary != "" {
+		_ = s.store.UpdateIntelModuleSummary(ctx, mod.ID, summary)
+		mod.Summary = summary
+	}
+	return summary
+}
+
+// summarySuffix appends a non-empty LLM summary hint for an endpoint.
+func summarySuffix(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return ""
+	}
+	if len(s) > 40 {
+		s = s[:40] + "…"
+	}
+	return "（" + s + "）"
 }
 
 // persistFeatures clusters the extracted endpoints into candidate feature

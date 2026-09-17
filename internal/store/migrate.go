@@ -119,6 +119,7 @@ var migrations = []migration{
 	{name: "intel_overrides", apply: migrationIntelOverrides},
 	{name: "intel_feature_chats", apply: migrationIntelFeatureChats},
 	{name: "remote_nodes_work_dir", apply: migrationRemoteNodesWorkDir},
+	{name: "project_modules_summary", apply: migrationProjectModulesSummary},
 }
 
 // migrationIntel creates the Test Intelligence subsystem tables: flat project
@@ -1190,5 +1191,12 @@ func migrationIntelFeatureChats(ctx context.Context, driver string, db *sql.DB) 
 // instead of defaulting to the node's home.
 func migrationRemoteNodesWorkDir(ctx context.Context, driver string, db *sql.DB) error {
 	_, err := db.ExecContext(ctx, `ALTER TABLE remote_nodes ADD COLUMN work_dir TEXT NOT NULL DEFAULT ''`)
+	return err
+}
+
+// migrationProjectModulesSummary adds the LLM-generated module business summary
+// column (lazy: first detail view generates it, then it is cached here).
+func migrationProjectModulesSummary(ctx context.Context, driver string, db *sql.DB) error {
+	_, err := db.ExecContext(ctx, `ALTER TABLE project_modules ADD COLUMN summary TEXT NOT NULL DEFAULT ''`)
 	return err
 }
