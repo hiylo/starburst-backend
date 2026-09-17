@@ -30,7 +30,7 @@ var (
 	reColumn          = regexp.MustCompile(`@Column`)
 	reColumnName      = regexp.MustCompile(`@Column\s*\(\s*name\s*=\s*"([^"]+)"`)
 	reColumnNullable  = regexp.MustCompile(`nullable\s*=\s*(true|false)`)
-	reField           = regexp.MustCompile(`^\s*(?:private|public|protected)\s+(?:@[\w.]+(?:\s*\([^)]*\))?\s+)*([A-Za-z0-9_$<>,\[\]\.]+)\s+([A-Za-z0-9_$]+)\s*(?:=|;)`)
+	reField           = regexp.MustCompile(`\s*(?:private|public|protected)\s+(?:@[\w.]+(?:\s*\([^)]*\))?\s+)*([A-Za-z0-9_$<>,\[\]\.]+)\s+([A-Za-z0-9_$]+)\s*(?:=|;)`)
 	reController      = regexp.MustCompile(`@(RestController|Controller)\b`)
 	reRequestMapping  = regexp.MustCompile(`@RequestMapping\s*\(\s*(?:value\s*=\s*)?"([^"]*)"`)
 	reMethodValue     = regexp.MustCompile(`@(?:Get|Post|Put|Delete|Patch)Mapping\s*\(\s*(?:value\s*=\s*)?(?:path\s*=\s*)?"([^"]*)"`)
@@ -713,14 +713,12 @@ func isPrimitiveOrVoid(t string) bool {
 func extractDtoFields(lines []string) []fieldSpec {
 	out := make([]fieldSpec, 0)
 	for _, l := range lines {
-		fm := reField.FindStringSubmatch(l)
-		if fm == nil {
-			continue
+		for _, m := range reField.FindAllStringSubmatch(l, -1) {
+			out = append(out, fieldSpec{
+				Name: m[2],
+				Type: javaToJSONType(m[1]),
+			})
 		}
-		out = append(out, fieldSpec{
-			Name: fm[2],
-			Type: javaToJSONType(fm[1]),
-		})
 	}
 	return out
 }

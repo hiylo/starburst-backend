@@ -2204,6 +2204,66 @@ func TestIntelResultRootcause(t *testing.T) {
 	}
 }
 
+// TestIntelContractCheckBatch verifies the one-click project contract check:
+// every endpoint is called against a live base URL and its response validated
+// against the extracted field contract.
+func TestIntelContractCheckBatch(t *testing.T) {
+	s := newTestServer(t)
+	wh := loginWeb(t, s)
+
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`[{"id":1,"nickname":"alice"}]`))
+	}))
+	defer backend.Close()
+
+	root := t.TempDir()
+	writeTestFile(t, filepath.Join(root, "pom.xml"), `<project></project>`)
+	writeTestFile(t, filepath.Join(root, "src/main/java/demo/UserController.java"), `package demo;
+import org.springframework.web.bind.annotation.*;
+@RestController
+@RequestMapping("/api/users")
+public class UserController { @GetMapping("/list") public java.util.List<demo.UserEntity> list() { return null; } }`)
+	writeTestFile(t, filepath.Join(root, "src/main/java/demo/UserEntity.java"), `package demo;
+public class UserEntity { private Long id; private String nickname; }`)
+
+	rec := s.do(t, http.MethodPost, "/api/intel/projects",
+		`{"name":"demo","source":"local","localPath":"`+filepath.ToSlash(root)+`"}`, wh)
+	var proj struct {
+		ID int64 `json:"id"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &proj); err != nil || proj.ID == 0 {
+		t.Fatalf("create project: %s", rec.Body.String())
+	}
+	rec = s.do(t, http.MethodPost, "/api/intel/analyze",
+		`{"projectId":`+jsonInt(proj.ID)+`}`, wh)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("analyze status %d: %s", rec.Code, rec.Body.String())
+	}
+
+	rec = s.do(t, http.MethodPost, "/api/intel/contracts/check-batch",
+		`{"projectId":`+jsonInt(proj.ID)+`,"baseUrl":"`+backend.URL+`"}`, wh)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("check-batch status %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Total         int `json:"total"`
+		ContractReady int `json:"contractReady"`
+		Reachable     int `json:"reachable"`
+		Passed        int `json:"passed"`
+		Failed        int `json:"failed"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("check-batch parse: %v", err)
+	}
+	if resp.Total != 1 || resp.ContractReady != 1 || resp.Reachable != 1 {
+		t.Errorf("check-batch = %+v, want total/contract/reachable all 1", resp)
+	}
+	if resp.Passed != 1 || resp.Failed != 0 {
+		t.Errorf("check-batch passed/failed = %d/%d, want 1/0", resp.Passed, resp.Failed)
+	}
+}
+
 func gitRun(t *testing.T, dir string, args ...string) {
 	t.Helper()
 	cmd := exec.Command("git", args...)

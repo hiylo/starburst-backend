@@ -221,6 +221,7 @@ func (s *Server) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/intel/fixes/generate", s.handleIntelFixGenerate)
 	mux.HandleFunc("/api/intel/fixes/", s.handleIntelFixAction)
 	mux.HandleFunc("/api/intel/contracts/check", s.handleIntelContractCheck)
+	mux.HandleFunc("/api/intel/contracts/check-batch", s.handleIntelContractCheckBatch)
 	mux.HandleFunc("/api/intel/android-bindings", s.handleIntelAndroidBindings)
 	mux.HandleFunc("/api/intel/web-bindings", s.handleIntelWebBindings)
 	mux.HandleFunc("/api/intel/ios-bindings", s.handleIntelIosBindings)

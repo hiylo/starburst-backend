@@ -67,6 +67,23 @@ func TestExtractDtoFields(t *testing.T) {
 	}
 }
 
+// TestExtractDtoFieldsInline covers single-line classes whose fields sit inline
+// after the opening brace (a regression guard for the reField anchor).
+func TestExtractDtoFieldsInline(t *testing.T) {
+	lines := []string{"public class UserEntity { private Long id; private String nickname; }"}
+	fields := extractDtoFields(lines)
+	if len(fields) != 2 {
+		t.Fatalf("inline class fields = %d, want 2: %+v", len(fields), fields)
+	}
+	got := map[string]string{}
+	for _, f := range fields {
+		got[f.Name] = f.Type
+	}
+	if got["id"] != "number" || got["nickname"] != "string" {
+		t.Errorf("inline fields = %+v, want id=number nickname=string", got)
+	}
+}
+
 func TestResolveResponseFields(t *testing.T) {
 	root := t.TempDir()
 	writeTree(t, root, map[string]string{
