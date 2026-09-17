@@ -413,6 +413,16 @@ type Store interface {
 	UpdateIntelDevice(ctx context.Context, d *IntelDevice) error
 	// DeleteIntelDevice removes a device by id.
 	DeleteIntelDevice(ctx context.Context, id int64) error
+	// ListRemoteNodes returns all remote execution nodes.
+	ListRemoteNodes(ctx context.Context) ([]*RemoteNode, error)
+	// GetRemoteNode loads one remote node by id.
+	GetRemoteNode(ctx context.Context, id int64) (*RemoteNode, error)
+	// CreateRemoteNode inserts a remote node and fills its id.
+	CreateRemoteNode(ctx context.Context, n *RemoteNode) error
+	// UpdateRemoteNode persists a remote node's mutable fields.
+	UpdateRemoteNode(ctx context.Context, n *RemoteNode) error
+	// DeleteRemoteNode removes a remote node by id.
+	DeleteRemoteNode(ctx context.Context, id int64) error
 }
 
 // Open opens a store for the given driver/dsn. It applies all migrations

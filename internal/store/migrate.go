@@ -115,6 +115,7 @@ var migrations = []migration{
 	{name: "env", apply: migrationEnv},
 	{name: "intel_ai_rules", apply: migrationIntelAIRules},
 	{name: "env_devices", apply: migrationEnvDevices},
+	{name: "remote_nodes", apply: migrationRemoteNodes},
 }
 
 // migrationIntel creates the Test Intelligence subsystem tables: flat project
@@ -1086,6 +1087,35 @@ func migrationEnvDevices(ctx context.Context, driver string, db *sql.DB) error {
 			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 		)`, idColumn(driver)),
 		`CREATE INDEX IF NOT EXISTS idx_env_devices_project ON env_devices(project_id, bound)`,
+	}
+	for _, s := range stmts {
+		if _, err := db.ExecContext(ctx, s); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// migrationRemoteNodes creates the remote test-execution node table: SSH
+// reachable machines carrying capability labels (ios-xcode / android-sdk /
+// linux-docker) so the run router can offload tests when the local machine
+// cannot satisfy an environment gate.
+func migrationRemoteNodes(ctx context.Context, driver string, db *sql.DB) error {
+	stmts := []string{
+		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS remote_nodes (
+			%s,
+			name TEXT NOT NULL DEFAULT '',
+			host TEXT NOT NULL DEFAULT '',
+			port INTEGER NOT NULL DEFAULT 22,
+			user TEXT NOT NULL DEFAULT '',
+			auth TEXT NOT NULL DEFAULT '',
+			host_key_fp TEXT NOT NULL DEFAULT '',
+			capabilities TEXT NOT NULL DEFAULT '',
+			reachable BOOLEAN NOT NULL DEFAULT FALSE,
+			last_check_at TIMESTAMP NULL,
+			note TEXT NOT NULL DEFAULT '',
+			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+		)`, idColumn(driver)),
 	}
 	for _, s := range stmts {
 		if _, err := db.ExecContext(ctx, s); err != nil {

@@ -2712,14 +2712,61 @@ async function loadIntelBindings(id) {
 async function loadIntelEnv(id) {
   const wrap = document.getElementById("intelEnvList");
   wrap.innerHTML = `<div class="muted" style="text-align:center;padding:16px">检测中…</div>`;
-  const [res, devRes] = await Promise.all([
+  const [res, devRes, nodeRes] = await Promise.all([
     api("/api/intel/env/status?projectId=" + id, { headers: appHeaders() }),
     api("/api/intel/env/devices?projectId=" + id, { headers: appHeaders() }),
+    api("/api/intel/nodes", { headers: appHeaders() }),
   ]);
   const data = await res.json();
   if (!res.ok) { wrap.innerHTML = `<div class="muted" style="text-align:center;padding:16px">${escapeHtml(data.error || "检测失败")}</div>`; return; }
   renderIntelEnv(data);
   renderIntelDevices(((await devRes.json()).devices || []), id);
+  renderIntelNodes(((await nodeRes.json()).nodes || []));
+}
+
+function renderIntelNodes(nodes) {
+  const wrap = document.getElementById("intelNodeList");
+  if (!wrap) return;
+  wrap.innerHTML = "";
+  if (!nodes.length) { wrap.innerHTML = `<div class="muted" style="font-size:12px">暂无节点（本机不满足门禁时可路由到远程节点执行）</div>`; return; }
+  for (const n of nodes) {
+    wrap.insertAdjacentHTML("beforeend", `<div class="card" style="margin:0">
+      <div class="row" style="justify-content:space-between">
+        <strong style="font-size:13px">${escapeHtml(n.name || "-")}</strong>
+        <div class="row" style="gap:6px">
+          <span class="intel-status ${n.reachable ? "analyzed" : ""}">${n.reachable ? "可达" : "不可达"}</span>
+          <button class="ghost sm" onclick="checkIntelNode(${n.id})">检查</button>
+          <button class="ghost sm" onclick="deleteIntelNode(${n.id})">删除</button>
+        </div>
+      </div>
+      <div class="muted" style="font-size:11px;margin-top:4px">${escapeHtml(n.user || "")}@${escapeHtml(n.host || "-")}:${n.port || 22} · ${escapeHtml(n.capabilities || "-")}</div>
+    </div>`);
+  }
+}
+
+async function addIntelNode() {
+  const name = prompt("节点名称（如 linux-ci）", "");
+  if (!name) return;
+  const host = prompt("主机（IP 或域名）", "");
+  if (!host) return;
+  const port = parseInt(prompt("端口", "22"), 10) || 22;
+  const user = prompt("SSH 用户", "root");
+  const caps = prompt("能力标签（逗号分隔，如 linux-docker,android-sdk）", "");
+  const auth = prompt("口令或密钥路径（仅入库本环境，不对外回显）", "");
+  const res = await api("/api/intel/nodes", { method: "POST", headers: appHeaders(), body: JSON.stringify({ name, host, port, user, capabilities: caps, auth }) });
+  const data = await res.json();
+  if (!res.ok) { alert(data.error || "新增失败"); return; }
+  loadIntelEnv(intelCurrentProject);
+}
+
+async function checkIntelNode(id) {
+  await api("/api/intel/nodes/" + id + "/check", { method: "PUT", headers: appHeaders() });
+  loadIntelEnv(intelCurrentProject);
+}
+
+async function deleteIntelNode(id) {
+  await api("/api/intel/nodes/" + id, { method: "DELETE", headers: appHeaders() });
+  loadIntelEnv(intelCurrentProject);
 }
 
 function renderIntelDevices(devices, projectId) {

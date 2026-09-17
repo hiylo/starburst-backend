@@ -233,6 +233,8 @@ func (s *Server) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/intel/env/devices", s.handleIntelDevices)
 	mux.HandleFunc("/api/intel/env/devices/connect", s.handleIntelDeviceConnect)
 	mux.HandleFunc("/api/intel/env/devices/", s.handleIntelDevicesByID)
+	mux.HandleFunc("/api/intel/nodes", s.handleIntelNodes)
+	mux.HandleFunc("/api/intel/nodes/", s.handleIntelNodeByID)
 	mux.HandleFunc("/api/intel/ai-rules", s.handleIntelAIRules)
 	mux.HandleFunc("/api/intel/ai-rules/", s.handleIntelAIRuleByID)
 	mux.HandleFunc("/api/intel/scan/rules", s.handleIntelRuleScan)

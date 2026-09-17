@@ -1623,6 +1623,83 @@ func TestIntelDevices(t *testing.T) {
 	}
 }
 
+// TestIntelRemoteNodes verifies remote execution node management: a node
+// pointing at a reachable TCP port is marked reachable, one on a closed port is
+// not, and delete removes it.
+func TestIntelRemoteNodes(t *testing.T) {
+	s := newTestServer(t)
+	wh := loginWeb(t, s)
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	port := ln.Addr().(*net.TCPAddr).Port
+
+	rec := s.do(t, http.MethodPost, "/api/intel/nodes",
+		`{"name":"linux-ci","host":"127.0.0.1","port":`+jsonInt(int64(port))+`,"capabilities":"linux-docker"}`, wh)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("create reachable node status %d: %s", rec.Code, rec.Body.String())
+	}
+	var created struct {
+		Node struct {
+			ID        int64  `json:"id"`
+			Reachable bool   `json:"reachable"`
+			Auth      string `json:"auth"`
+		} `json:"node"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &created); err != nil {
+		t.Fatalf("create parse: %v", err)
+	}
+	if !created.Node.Reachable {
+		t.Error("reachable node marked unreachable")
+	}
+	// Auth must not leak in the response.
+	if created.Node.Auth != "" {
+		t.Errorf("auth leaked in response")
+	}
+
+	rec = s.do(t, http.MethodPost, "/api/intel/nodes",
+		`{"name":"down","host":"127.0.0.1","port":1}`, wh)
+	var down struct {
+		Node struct {
+			Reachable bool `json:"reachable"`
+		} `json:"node"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &down); err != nil {
+		t.Fatalf("down parse: %v", err)
+	}
+	if down.Node.Reachable {
+		t.Error("closed port node should be unreachable")
+	}
+
+	rec = s.do(t, http.MethodGet, "/api/intel/nodes", "", wh)
+	var list struct {
+		Nodes []struct {
+			ID int64 `json:"id"`
+		} `json:"nodes"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &list); err != nil {
+		t.Fatalf("list parse: %v", err)
+	}
+	if len(list.Nodes) != 2 {
+		t.Fatalf("nodes = %d, want 2", len(list.Nodes))
+	}
+
+	rec = s.do(t, http.MethodDelete, "/api/intel/nodes/"+jsonInt(created.Node.ID), "", wh)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("delete status %d: %s", rec.Code, rec.Body.String())
+	}
+	rec = s.do(t, http.MethodGet, "/api/intel/nodes", "", wh)
+	if err := json.Unmarshal(rec.Body.Bytes(), &list); err != nil {
+		t.Fatalf("list parse: %v", err)
+	}
+	if len(list.Nodes) != 1 {
+		t.Errorf("nodes after delete = %d, want 1", len(list.Nodes))
+	}
+}
+
 func gitRun(t *testing.T, dir string, args ...string) {
 	t.Helper()
 	cmd := exec.Command("git", args...)
