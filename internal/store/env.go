@@ -106,6 +106,10 @@ func (s *sqlStore) UpsertIntelEnvServices(ctx context.Context, projectID int64, 
 
 func (s *sqlStore) upsertIntelEnvServices(ctx context.Context, projectID int64, services []*IntelEnvService) error {
 	for _, svc := range services {
+		encPassword, err := s.encryptSecret(ctx, svc.Password)
+		if err != nil {
+			return err
+		}
 		if _, err := s.db.ExecContext(ctx, s.q(`
 			INSERT INTO env_services (project_id, service, category, version, provider, status,
 				host, port, endpoint, healthy, container_name, container_id, username, password,
@@ -113,7 +117,7 @@ func (s *sqlStore) upsertIntelEnvServices(ctx context.Context, projectID int64, 
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`),
 			projectID, svc.Service, svc.Category, svc.Version, svc.Provider, svc.Status,
 			svc.Host, svc.Port, svc.Endpoint, svc.Healthy, svc.ContainerName, svc.ContainerID,
-			svc.Username, svc.Password, svc.HealthCheckAt); err != nil {
+			svc.Username, encPassword, svc.HealthCheckAt); err != nil {
 			return err
 		}
 	}
@@ -140,6 +144,11 @@ func (s *sqlStore) ListIntelEnvServices(ctx context.Context, projectID int64) ([
 			&svc.ContainerName, &svc.ContainerID, &svc.Username, &svc.Password,
 			&svc.HealthCheckAt, &svc.CreatedAt, &svc.UpdatedAt); err != nil {
 			return nil, err
+		}
+		if dec, derr := s.decryptSecret(ctx, svc.Password); derr == nil {
+			svc.Password = dec
+		} else {
+			return nil, derr
 		}
 		out = append(out, svc)
 	}

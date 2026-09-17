@@ -41,6 +41,11 @@ func (s *sqlStore) ListRemoteNodes(ctx context.Context) ([]*RemoteNode, error) {
 			&n.HostKeyFP, &n.Capabilities, &n.Reachable, &n.LastCheckAt, &n.WorkDir, &n.Note, &n.CreatedAt); err != nil {
 			return nil, err
 		}
+		if dec, derr := s.decryptSecret(ctx, n.Auth); derr == nil {
+			n.Auth = dec
+		} else {
+			return nil, derr
+		}
 		out = append(out, n)
 	}
 	return out, rows.Err()
@@ -56,18 +61,27 @@ func (s *sqlStore) GetRemoteNode(ctx context.Context, id int64) (*RemoteNode, er
 		&n.HostKeyFP, &n.Capabilities, &n.Reachable, &n.LastCheckAt, &n.WorkDir, &n.Note, &n.CreatedAt); err != nil {
 		return nil, err
 	}
+	if dec, derr := s.decryptSecret(ctx, n.Auth); derr == nil {
+		n.Auth = dec
+	} else {
+		return nil, derr
+	}
 	return n, nil
 }
 
 // CreateRemoteNode inserts a node and fills its id.
 func (s *sqlStore) CreateRemoteNode(ctx context.Context, n *RemoteNode) error {
+	encAuth, err := s.encryptSecret(ctx, n.Auth)
+	if err != nil {
+		return err
+	}
 	if isPostgres(s.driver) {
 		return s.db.QueryRowContext(ctx, s.q(`
 			INSERT INTO remote_nodes (name, host, port, user, auth, host_key_fp, capabilities,
 				reachable, last_check_at, work_dir, note, created_at)
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
 			RETURNING id`),
-			n.Name, n.Host, n.Port, n.User, n.Auth, n.HostKeyFP, n.Capabilities,
+			n.Name, n.Host, n.Port, n.User, encAuth, n.HostKeyFP, n.Capabilities,
 			n.Reachable, n.LastCheckAt, n.WorkDir, n.Note,
 		).Scan(&n.ID)
 	}
@@ -75,7 +89,7 @@ func (s *sqlStore) CreateRemoteNode(ctx context.Context, n *RemoteNode) error {
 		INSERT INTO remote_nodes (name, host, port, user, auth, host_key_fp, capabilities,
 			reachable, last_check_at, work_dir, note, created_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`),
-		n.Name, n.Host, n.Port, n.User, n.Auth, n.HostKeyFP, n.Capabilities,
+		n.Name, n.Host, n.Port, n.User, encAuth, n.HostKeyFP, n.Capabilities,
 		n.Reachable, n.LastCheckAt, n.WorkDir, n.Note)
 	if err != nil {
 		return err
@@ -90,11 +104,15 @@ func (s *sqlStore) CreateRemoteNode(ctx context.Context, n *RemoteNode) error {
 
 // UpdateRemoteNode persists a node's mutable fields (reachability, note).
 func (s *sqlStore) UpdateRemoteNode(ctx context.Context, n *RemoteNode) error {
-	_, err := s.db.ExecContext(ctx, s.q(`
+	encAuth, err := s.encryptSecret(ctx, n.Auth)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx, s.q(`
 		UPDATE remote_nodes SET name = ?, host = ?, port = ?, user = ?, auth = ?,
 			host_key_fp = ?, capabilities = ?, reachable = ?, last_check_at = ?, work_dir = ?, note = ?
 		WHERE id = ?`),
-		n.Name, n.Host, n.Port, n.User, n.Auth, n.HostKeyFP, n.Capabilities,
+		n.Name, n.Host, n.Port, n.User, encAuth, n.HostKeyFP, n.Capabilities,
 		n.Reachable, n.LastCheckAt, n.WorkDir, n.Note, n.ID)
 	return err
 }
