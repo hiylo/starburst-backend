@@ -56,6 +56,90 @@ function escapeHtml(s) {
   return String(s ?? "").replace(/[&<>"']/g, c =>
     ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
+// 轻量 Markdown 渲染：先整体转义防 XSS，再按块处理标题/代码/列表/表格/引用/分隔线，
+// 行内处理加粗/斜体/删除线/行内代码/链接/自动链接。结果均为安全 HTML。
+function mdRender(src) {
+  if (!src) return "";
+  const esc = escapeHtml;
+  const lines = String(src).replace(/\r\n/g, "\n").split("\n");
+  let html = "";
+  let i = 0;
+  const inline = (t) => {
+    let s = esc(t);
+    s = s.replace(/`([^`]+)`/g, (m, c) => `<code>${c}</code>`);
+    s = s.replace(/!\[([^\]]*)\]\(([^)\s]+)\)/g, (m, alt, url) => `<a href="${url}" target="_blank" rel="noopener noreferrer">${alt || url}</a>`);
+    s = s.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (m, txt, url) => `<a href="${url}" target="_blank" rel="noopener noreferrer">${txt}</a>`);
+    s = s.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+    s = s.replace(/\*([^*\n]+)\*/g, "<em>$1</em>");
+    s = s.replace(/__([^_]+)__/g, "<strong>$1</strong>");
+    s = s.replace(/~~([^~]+)~~/g, "<del>$1</del>");
+    s = s.replace(/(^|[\s(])((?:https?|ftp):\/\/[^\s<]+)/g, '$1<a href="$2" target="_blank" rel="noopener noreferrer">$2</a>');
+    return s;
+  };
+  const isHr = (l) => /^\s*([-*_])\s*\1\s*\1\s*$/.test(l);
+  while (i < lines.length) {
+    const line = lines[i];
+    // 围栏代码块
+    const fm = line.match(/^\s*```([\w+\-.]*)\s*$/);
+    if (fm) {
+      const lang = fm[1];
+      const buf = [];
+      i++;
+      while (i < lines.length && !/^\s*```\s*$/.test(lines[i])) buf.push(lines[i++]);
+      i++;
+      html += `<pre class="md-code${lang ? " lang-" + esc(lang) : ""}"><code>${esc(buf.join("\n"))}</code></pre>\n`;
+      continue;
+    }
+    // 标题
+    const hm = line.match(/^(#{1,6})\s+(.*)$/);
+    if (hm) {
+      const lvl = hm[1].length;
+      html += `<h${lvl}>${inline(hm[2])}</h${lvl}>\n`;
+      i++;
+      continue;
+    }
+    if (isHr(line)) { html += "<hr>\n"; i++; continue; }
+    // 引用块
+    if (/^\s*>/.test(line)) {
+      const buf = [];
+      while (i < lines.length && /^\s*>/.test(lines[i])) buf.push(lines[i++].replace(/^\s*>\s?/, ""));
+      html += `<blockquote>${mdRender(buf.join("\n"))}</blockquote>\n`;
+      continue;
+    }
+    // 表格
+    if (line.includes("|") && i + 1 < lines.length && /^\s*\|?[\s:|-]+\|[\s:|-]*$/.test(lines[i + 1])) {
+      const parseRow = (r) => r.trim().replace(/^\|/, "").replace(/\|$/, "").split("|").map(c => c.trim());
+      const header = parseRow(line);
+      i += 2;
+      const rows = [];
+      while (i < lines.length && lines[i].includes("|")) rows.push(parseRow(lines[i++]));
+      html += `<div class="md-table-wrap"><table><thead><tr>${header.map(h => `<th>${inline(h)}</th>`).join("")}</tr></thead><tbody>${rows.map(r => `<tr>${r.map(c => `<td>${inline(c)}</td>`).join("")}</tr>`).join("")}</tbody></table></div>\n`;
+      continue;
+    }
+    // 无序列表
+    if (/^\s*[-*+]\s+/.test(line)) {
+      const items = [];
+      while (i < lines.length && /^\s*[-*+]\s+/.test(lines[i])) items.push(lines[i++].replace(/^\s*[-*+]\s+/, ""));
+      html += `<ul>${items.map(it => `<li>${inline(it)}</li>`).join("")}</ul>\n`;
+      continue;
+    }
+    // 有序列表
+    if (/^\s*\d+[.)]\s+/.test(line)) {
+      const items = [];
+      while (i < lines.length && /^\s*\d+[.)]\s+/.test(lines[i])) items.push(lines[i++].replace(/^\s*\d+[.)]\s+/, ""));
+      html += `<ol>${items.map(it => `<li>${inline(it)}</li>`).join("")}</ol>\n`;
+      continue;
+    }
+    if (!line.trim()) { i++; continue; }
+    // 普通段落（多行合并，换行转 <br>）
+    const buf = [];
+    while (i < lines.length && lines[i].trim() && !/^\s*[-*+]\s+/.test(lines[i]) && !/^\s*\d+[.)]\s+/.test(lines[i]) && !/^\s*```/.test(lines[i]) && !/^\s*>/.test(lines[i]) && !/^#{1,6}\s/.test(lines[i]) && !isHr(lines[i])) {
+      buf.push(lines[i++]);
+    }
+    html += `<p>${inline(buf.join("\n")).replace(/\n/g, "<br>")}</p>\n`;
+  }
+  return html;
+}
 function fmtDate(v) { return v ? new Date(v).toLocaleString() : "-"; }
 
 async function api(path, opts) {
@@ -1237,14 +1321,22 @@ async function wbModelChange(sel) {
   loadWorkbench();
 }
 
-// 归并子会话的忙/待决问题到父会话（口径与 App 工作台一致）。
+// 归并子会话的忙/待决问题/待授权操作到父会话（口径与 App 工作台一致）。
 function buildWbItems() {
   const childBusy = {};
   const parentQ = new Set();
+  const parentPending = {};
+  const parentPerm = {};
   for (const s of wbSessions) {
     const pid = s.parentID;
     if (!pid) continue;
-    if (wbPending[s.id] && wbPending[s.id].length) parentQ.add(pid);
+    const pq = wbPending[s.id];
+    if (pq && pq.length) {
+      parentQ.add(pid);
+      (parentPending[pid] = parentPending[pid] || []).push(...pq);
+    }
+    const pps = wbPermissions[s.id];
+    if (pps && pps.length) (parentPerm[pid] = parentPerm[pid] || []).push(...pps);
     const st = wbStatuses[s.id];
     if (st && (st.type === "busy" || st.type === "retry")) childBusy[pid] = st.type;
   }
@@ -1252,12 +1344,13 @@ function buildWbItems() {
   return roots.map(s => {
     const self = wbStatuses[s.id];
     const hasQ = (wbPending[s.id] && wbPending[s.id].length) || parentQ.has(s.id);
-    const perms = wbPermissions[s.id] || [];
+    const perms = [...(wbPermissions[s.id] || []), ...(parentPerm[s.id] || [])];
+    const pending = [...(wbPending[s.id] || []), ...(parentPending[s.id] || [])];
     let st;
     if (hasQ || (perms && perms.length)) st = "question";
     else if (self && (self.type === "busy" || self.type === "retry")) st = self.type;
     else st = childBusy[s.id] || (self && self.type) || "idle";
-    return { session: s, status: st, pending: wbPending[s.id] || [], permissions: perms };
+    return { session: s, status: st, pending, permissions: perms };
   }).sort((a, b) => {
     const r = wbRank(a.status) - wbRank(b.status);
     if (r) return r;
@@ -1369,7 +1462,7 @@ function renderWbList() {
   // 内容指纹：状态/排序/关键字/选中项都没变就不重建 DOM，避免滚动条跳动；
   // 选中项必须参与比对，否则点选其他会话时高亮不会更新。
   const sig = filter + "\u0001" + kw + "\u0001" + (wbSelected || "") + "\u0001" + wbItems.map(it =>
-    it.session.id + ":" + it.status + ":" + (it.pending || []).length + ":" + (it.session.time && it.session.time.updated || 0) + ":U" + (wbNewSet.has(it.session.id) ? 1 : 0)
+    it.session.id + ":" + it.status + ":" + (it.pending || []).length + ":" + (it.permissions || []).length + ":" + (it.session.time && it.session.time.updated || 0) + ":U" + (wbNewSet.has(it.session.id) ? 1 : 0)
   ).join(",");
   if (sig === wbListSig) return;
   wbListSig = sig;
@@ -1416,7 +1509,10 @@ async function loadWorkbench() {
   wbLastListLoad = Date.now();
   try {
     const [sr, stR] = await Promise.all([
-      api("/api/opencode/experimental/session?roots=true", { headers: appHeaders() }),
+      // 拉全量会话（含子会话）：待授权操作/待决问题可能挂在子会话上，需归并到根会话展示，
+      // 且子会话目录也必须参与按目录查询，否则漏拉。不能用 /session（只返回当前目录、
+      // 且抹平目录），用 /experimental/session 不带 roots 过滤（同 ListAllSessionsDetailed）。
+      api("/api/opencode/experimental/session", { headers: appHeaders() }),
       api("/api/opencode/session/status", { headers: appHeaders() }),
     ]);
     if (!sr.ok) { toast("会话列表加载失败", "HTTP " + sr.status, "crit"); return; }
@@ -1438,17 +1534,26 @@ async function loadWorkbench() {
         if (q && q.sessionID) (wbPending[q.sessionID] = wbPending[q.sessionID] || []).push(q);
       }
     }
-    // 待授权操作同样按目录查询（App listPendingPermissions 同契约）。
+    // 待授权操作：与 App listPendingPermissions 同一契约，全局可拉全量；
+    // 再按目录补充（兼容部分上游版本目录参数才返回的旧行为），按 id 去重。
     wbPermissions = {};
+    const permGlobal = await api("/api/opencode/permission", { headers: appHeaders() })
+      .then(r => (r.ok ? r.json() : []))
+      .catch(() => []);
     const permResps = await Promise.all(dirs.map(d =>
       api("/api/opencode/permission?directory=" + encodeURIComponent(d), { headers: appHeaders() })
         .then(r => (r.ok ? r.json() : []))
         .catch(() => [])
     ));
+    const allPerms = [...(Array.isArray(permGlobal) ? permGlobal : [])];
     for (const ps of permResps) {
-      for (const p of (Array.isArray(ps) ? ps : [])) {
-        if (p && p.sessionID) (wbPermissions[p.sessionID] = wbPermissions[p.sessionID] || []).push(p);
-      }
+      if (Array.isArray(ps)) allPerms.push(...ps);
+    }
+    const permSeen = new Set();
+    for (const p of allPerms) {
+      if (!p || !p.sessionID || permSeen.has(p.id)) continue;
+      permSeen.add(p.id);
+      (wbPermissions[p.sessionID] = wbPermissions[p.sessionID] || []).push(p);
     }
     renderWbList();
     if (wbSelected) refreshWbPanel(wbSelected);
@@ -1873,7 +1978,7 @@ function renderWbPanel() {
   const visMsgs = d.recent.slice(total - visCount);
   const msgs = visMsgs.map(m => {
     const t = wbTimeFormat(m.ts);
-    return `<div class="wb-msg ${m.role}${m.clipped ? " clipped" : ""}"><div class="who">${m.role === "assistant" ? "AI" : "我"}</div>${escapeHtml(m.text)}${m.clipped ? " …（已截断）" : ""}${t ? `<div class="time">${t}</div>` : ""}</div>`;
+    return `<div class="wb-msg ${m.role}${m.clipped ? " clipped" : ""}"><div class="who">${m.role === "assistant" ? "AI" : "我"}</div>${m.role === "assistant" ? `<div class="md">${mdRender(m.text)}</div>` : `<div class="txt">${escapeHtml(m.text)}</div>`}${m.clipped ? "<div class=\"md-clip\">…（已截断）</div>" : ""}${t ? `<div class="time">${t}</div>` : ""}</div>`;
   }).join("") ||
     `<div class="wb-placeholder" style="padding:16px">暂无对话内容</div>`;
   const moreBtn = hiddenCount > 0
@@ -2016,10 +2121,23 @@ function renderWbPermissions(perms) {
     </div>`;
   }).join("");
 }
+// 定位 request（权限/待决问题）挂载的会话目录：request 可能挂在子会话上，
+// 其目录可能与父会话不同，回复时 directory 不匹配上游会 404。
+function wbOwningDir(reqId) {
+  for (const map of [wbPending, wbPermissions]) {
+    for (const sid of Object.keys(map)) {
+      if ((map[sid] || []).some(x => x.id === reqId)) {
+        const s = wbSessions.find(x => x.id === sid);
+        if (s && s.directory) return s.directory;
+      }
+    }
+  }
+  return "";
+}
 // 处理待授权操作：allowed once / always / reject。
 async function wbPermReply(reqId, reply) {
   const item = wbItems.find(x => x.session.id === wbSelected);
-  const dir = (item && item.session && item.session.directory) || "";
+  const dir = wbOwningDir(reqId) || (item && item.session && item.session.directory) || "";
   const url = `/api/opencode/permission/${encodeURIComponent(reqId)}/reply` + (dir ? "?directory=" + encodeURIComponent(dir) : "");
   const res = await api(url, { method: "POST", headers: appHeaders(), body: JSON.stringify({ reply }) });
   if (!res.ok) { toast("授权失败", "权限回复未送达 (" + res.status + ")", "crit"); return; }
@@ -2094,7 +2212,7 @@ async function wbQSubmit(reqId) {
   await postWbAnswer(reqId, answers);
 }
 async function postWbAnswer(reqId, answers) {
-  const dir = (wbPanelData && wbPanelData.session && wbPanelData.session.directory) || "";
+  const dir = wbOwningDir(reqId) || (wbPanelData && wbPanelData.session && wbPanelData.session.directory) || "";
   // 与 App 一致：question reply 的目录以 query 参数传递（x-starburst-directory 头只对 prompt_async 生效）。
   const url = `/api/opencode/question/${encodeURIComponent(reqId)}/reply` + (dir ? "?directory=" + encodeURIComponent(dir) : "");
   const res = await api(url, { method: "POST", headers: appHeaders(), body: JSON.stringify({ answers }) });
@@ -2106,7 +2224,7 @@ async function postWbAnswer(reqId, answers) {
   loadWorkbench();
 }
 async function wbRejectQ(reqId) {
-  const dir = (wbPanelData && wbPanelData.session && wbPanelData.session.directory) || "";
+  const dir = wbOwningDir(reqId) || (wbPanelData && wbPanelData.session && wbPanelData.session.directory) || "";
   const url = `/api/opencode/question/${encodeURIComponent(reqId)}/reject` + (dir ? "?directory=" + encodeURIComponent(dir) : "");
   const res = await api(url, { method: "POST", headers: appHeaders() });
   if (!res.ok) { toast("拒绝失败", "拒绝未送达 (" + res.status + ")", "crit"); return; }
@@ -2595,7 +2713,9 @@ function clearStream() {
 
 /* ---------- 智能测试（intel） ---------- */
 let intelCurrentProject = 0;
+let intelMgrProject = null;
 let intelEndpointsCache = [];
+let intelSummaryCommands = [];
 const INTEL_TYPE_LABELS = { java: "Java", android: "Android", ios: "iOS", go: "Go", web: "Web", node: "Node" };
 
 function toggleIntelSource() {
@@ -2609,7 +2729,7 @@ function toggleIntelSource() {
 // intel tab switcher（切到某 Tab 时按需加载对应分析结果）
 document.addEventListener("DOMContentLoaded", () => {
   const tabLoaders = {
-    features: loadIntelFeatures, cases: loadIntelCases, findings: loadIntelFindings,
+    summary: loadIntelSummary, features: loadIntelFeatures, cases: loadIntelCases, findings: loadIntelFindings,
     issues: loadIntelIssues, fixes: loadIntelFixes, runs: loadIntelRuns, impact: loadIntelImpact,
     overview: loadIntelOverview, bindings: loadIntelBindings, env: loadIntelEnv,
     pending: loadIntelPending,
@@ -2724,10 +2844,12 @@ async function loadIntelDetail(id) {
   const data = await res.json();
   if (!res.ok) { document.getElementById("intelDetailName").textContent = "加载失败"; return; }
   const p = data.project || {};
+  intelMgrProject = p;
   document.getElementById("intelDetailName").textContent = p.name || "";
   const loc = p.source === "git" ? p.gitUrl : p.localPath;
+  const ref = p.source === "git" ? (p.gitRef || "默认分支") : "-";
   document.getElementById("intelDetailMeta").textContent =
-    `来源：${p.source || "-"}  ·  路径：${loc || "-"}  ·  最近分析：${p.analyzedAt ? new Date(p.analyzedAt).toLocaleString() : "未分析"}`;
+    `来源：${p.source === "git" ? "Git 仓库" : "本地目录"}  ·  关联源码${p.source === "git" ? "仓库" : "目录"}：${loc || "-"}  ·  分支：${ref}  ·  最近分析：${p.analyzedAt ? new Date(p.analyzedAt).toLocaleString() : "未分析"}`;
 
   const mtb = document.querySelector("#intelModuleTable tbody");
   mtb.innerHTML = "";
@@ -2737,26 +2859,83 @@ async function loadIntelDetail(id) {
       <td><span class="badge type-badge">${escapeHtml(INTEL_TYPE_LABELS[m.kindType] || m.kindType || "-")}</span></td>
       <td>${escapeHtml(m.kindRole || "-")}</td>
       <td>${escapeHtml(m.buildTool || "-")}</td>
-      <td class="muted clip" title="${escapeHtml(m.commandsJson || "")}" style="font-size:11px">${escapeHtml((m.commandsJson || "[]").slice(0, 40))}</td>
       <td class="row" style="gap:4px">
         <button class="ghost sm" onclick="showIntelModuleDetail(${m.id})">详情</button>
-        <button class="ghost sm" onclick="editIntelModuleCommands(${m.id}, '${escapeHtml(m.commandsJson || "[]")}')">命令</button>
       </td>
     </tr>`);
   }
-  if (!(data.modules || []).length) mtb.insertAdjacentHTML("beforeend", `<tr><td colspan="6" class="muted" style="text-align:center;padding:16px">暂无子模块（分析后自动识别）</td></tr>`);
+  if (!(data.modules || []).length) mtb.insertAdjacentHTML("beforeend", `<tr><td colspan="5" class="muted" style="text-align:center;padding:16px">暂无子模块（分析后自动识别）</td></tr>`);
   document.getElementById("intelDetailStatModules").textContent = (data.modules || []).length;
   await loadIntelContracts(id);
+  await loadIntelSummary(id);
   initIntelChats();
 }
 
-function editIntelModuleCommands(moduleId, commandsJson) {
-  const existing = prompt("每行一条命令（命令白名单，运行测试时将按此执行）", (() => {
-    try { return JSON.parse(commandsJson).join("\n"); } catch (_) { return commandsJson.replace(/"/g, "").slice(1, -1); }
-  })());
-  if (existing === null) return;
-  const list = existing.split("\n").map(s => s.trim()).filter(s => s);
-  api("/api/intel/modules/" + moduleId + "/commands", { method: "PUT", headers: appHeaders(), body: JSON.stringify({ commands: list }) })
+// 项目管理：编辑项目信息并设置关联源码目录 / 仓库。
+// 打开前异步加载已知工作台项目目录，供输入框下拉快捷选择。
+function openIntelProjectManage() {
+  const p = intelMgrProject || {};
+  document.getElementById("intelMgrName").value = p.name || "";
+  document.getElementById("intelMgrSource").value = p.source === "git" ? "git" : "local";
+  document.getElementById("intelMgrPath").value = p.source === "git" ? (p.gitUrl || "") : (p.localPath || "");
+  document.getElementById("intelMgrGitRef").value = p.gitRef || "";
+  toggleIntelMgrSource();
+  document.getElementById("intelMgrMsg").textContent = "";
+  document.getElementById("intelProjectManage").classList.remove("hidden");
+  // 已知目录建议（来自工作台项目 / 会话目录），仅作输入提示。
+  api("/api/projects", { headers: appHeaders() })
+    .then(r => r.json())
+    .then(d => {
+      const dl = document.getElementById("intelMgrDirs");
+      if (!dl) return;
+      const dirs = (d.projects || []).map(x => x.directory).filter(Boolean);
+      dl.innerHTML = [...new Set(dirs)].map(x => `<option value="${escapeHtml(x)}"></option>`).join("");
+    })
+    .catch(() => {});
+}
+
+function closeIntelProjectManage() {
+  document.getElementById("intelProjectManage").classList.add("hidden");
+  document.getElementById("intelMgrMsg").textContent = "";
+}
+
+function toggleIntelMgrSource() {
+  const src = document.getElementById("intelMgrSource").value;
+  const refInput = document.getElementById("intelMgrGitRef");
+  refInput.classList.toggle("hidden", src !== "git");
+}
+
+async function saveIntelProjectManage() {
+  const src = document.getElementById("intelMgrSource").value;
+  const body = {
+    name: document.getElementById("intelMgrName").value.trim(),
+    source: src,
+    localPath: src === "local" ? document.getElementById("intelMgrPath").value.trim() : "",
+    gitUrl: src === "git" ? document.getElementById("intelMgrPath").value.trim() : "",
+    gitRef: src === "git" ? document.getElementById("intelMgrGitRef").value.trim() : "",
+  };
+  if (src === "local" && !body.localPath) { show(document.getElementById("intelMgrMsg"), "请填写源码目录路径"); return; }
+  if (src === "git" && !body.gitUrl) { show(document.getElementById("intelMgrMsg"), "请填写 Git 仓库 URL"); return; }
+  const prev = intelMgrProject || {};
+  const changed = prev.source !== src || prev.localPath !== body.localPath || prev.gitUrl !== body.gitUrl;
+  const res = await api("/api/intel/projects/" + intelCurrentProject, { method: "PUT", headers: appHeaders(), body: JSON.stringify(body) });
+  const data = await res.json();
+  if (!res.ok) { show(document.getElementById("intelMgrMsg"), data.error || "保存失败"); return; }
+  closeIntelProjectManage();
+  loadIntelDetail(intelCurrentProject);
+  loadIntelProjects();
+  if (changed) toast("已保存", "来源/目录已变更，请重新执行分析", "info");
+}
+
+// 编辑项目级命令白名单：每行一条命令，运行测试时按工具匹配执行（argv 不经 shell）。
+function editIntelProjectCommands() {
+  const pid = intelCurrentProject;
+  if (!pid) return;
+  const current = (intelSummaryCommands || []).slice();
+  const input = prompt("每行一条命令（命令白名单，运行测试时与模块构建工具匹配后执行）", current.join("\n"));
+  if (input === null) return;
+  const list = input.split("\n").map(s => s.trim()).filter(s => s);
+  api("/api/intel/projects/" + pid, { method: "PUT", headers: appHeaders(), body: JSON.stringify({ commandsJson: JSON.stringify(list) }) })
     .then(r => r.json())
     .then(d => { if (d.error) alert(d.error); else if (intelCurrentProject) loadIntelDetail(intelCurrentProject); });
 }
@@ -2771,13 +2950,16 @@ async function showIntelModuleDetail(moduleId) {
   const m = data.module || {};
   const s = data.stats || {};
   const typeLabel = INTEL_TYPE_LABELS[m.kindType] || m.kindType || "-";
-  let cmds = [];
-  try { cmds = JSON.parse(m.commandsJson || "[]"); } catch (_) {}
   box.innerHTML = `<div class="card" style="margin:0">
-    <div class="row" style="justify-content:space-between">
+    <div class="row" style="justify-content:space-between;align-items:center">
       <strong style="font-size:14px">${escapeHtml(m.relPath || ".")}</strong>
-      <span class="intel-status analyzed">${escapeHtml(typeLabel)}</span>
+      <div class="row" style="gap:6px">
+        <span class="intel-status analyzed">${escapeHtml(typeLabel)}</span>
+        <button class="ghost sm" onclick="reSummarizeIntelModule(${m.id})">重新生成摘要</button>
+        <button class="ghost sm" onclick="editIntelModuleOverrides('${m.id}', '${escapeHtml(m.kindRole || "")}', '${escapeHtml(m.summary || "")}')">编辑</button>
+      </div>
     </div>
+    ${m.summary ? `<div class="muted" style="font-size:12px;margin-top:8px;padding:8px;background:var(--surface-2);border:1px solid var(--hairline);border-radius:var(--r-sm)">${escapeHtml(m.summary)}</div>` : `<div class="muted" style="font-size:11px;margin-top:8px">（未配置编排 LLM，暂无 AI 摘要；仅确定性统计）</div>`}
     <div class="stat-grid" style="margin-top:10px">
       <div class="stat"><div class="k">接口契约</div><div class="v">${s.endpoints || 0}</div></div>
       <div class="stat"><div class="k">实体 / 列</div><div class="v">${s.entities || 0}</div></div>
@@ -2785,8 +2967,143 @@ async function showIntelModuleDetail(moduleId) {
       <div class="stat"><div class="k">构建工具</div><div class="v" style="font-size:13px">${escapeHtml(m.buildTool || "-")}</div></div>
     </div>
     <div class="muted" style="font-size:12px;margin-top:8px">角色 ${escapeHtml(m.kindRole || "-")} · 最近测试 SHA <span class="mono">${escapeHtml((m.lastTestedSha || "").slice(0, 8) || "-")}</span> · 分析时间 ${m.analyzedAt ? new Date(m.analyzedAt).toLocaleString() : "-"}</div>
-    <div class="muted" style="font-size:12px;margin-top:4px">命令白名单：<span class="mono">${cmds.length ? escapeHtml(cmds.join("；")) : "-"}</span></div>
   </div>`;
+}
+
+async function reSummarizeIntelModule(moduleId) {
+  const box = document.getElementById("intelModuleDetail");
+  if (box) box.innerHTML = `<div class="muted" style="padding:8px">AI 重新生成中…</div>`;
+  const res = await api("/api/intel/modules/" + moduleId + "/resummarize", { method: "POST", headers: appHeaders(), body: "{}" });
+  const data = await res.json();
+  if (!res.ok) { if (box) box.innerHTML = `<div class="muted" style="padding:8px">${escapeHtml(data.error || "重新生成失败")}</div>`; return; }
+  showIntelModuleDetail(moduleId);
+}
+
+async function editIntelModuleOverrides(moduleId, role, summary) {
+  const newRole = prompt("角色（留空保持不变）", role || "");
+  if (newRole === null) return;
+  const newSummary = prompt("摘要（留空保持不变；人工修改会存入覆写层，重新分析不被覆盖）", summary || "");
+  if (newSummary === null) return;
+  const body = {};
+  if (newRole.trim() && newRole.trim() !== role) body.role = newRole.trim();
+  if (newSummary.trim() && newSummary.trim() !== summary) body.summary = newSummary.trim();
+  if (!Object.keys(body).length) return;
+  const res = await api("/api/intel/modules/" + moduleId + "/overrides", { method: "PUT", headers: appHeaders(), body: JSON.stringify(body) });
+  const data = await res.json();
+  if (!res.ok) { alert(data.error || "保存失败"); return; }
+  showIntelModuleDetail(moduleId);
+}
+
+// 项目概览：展示项目关键画像（来源/路径/分析时间、概览统计、命令白名单、最近运行）
+async function loadIntelSummary(id) {
+  const wrap = document.getElementById("intelSummaryList");
+  if (!wrap) return;
+  wrap.innerHTML = `<div class="muted" style="text-align:center;padding:16px">加载中…</div>`;
+  const res = await api("/api/intel/projects/" + id, { headers: appHeaders() });
+  const data = await res.json();
+  if (!res.ok) { wrap.innerHTML = `<div class="muted" style="text-align:center;padding:16px">${escapeHtml(data.error || "加载失败")}</div>`; return; }
+  const p = data.project || {};
+  const loc = p.source === "git" ? p.gitUrl : p.localPath;
+  intelSummaryCommands = [];
+  try { intelSummaryCommands = JSON.parse(p.commandsJson || "[]"); } catch (_) {}
+
+  // 并行拉取各维度统计
+  const [epRes, entRes, featRes, caseRes, findRes, issueRes, fixRes, runRes, ovRes, pendRes] = await Promise.all([
+    api("/api/intel/endpoints?projectId=" + id, { headers: appHeaders() }),
+    api("/api/intel/entities?projectId=" + id, { headers: appHeaders() }),
+    api("/api/intel/features?projectId=" + id, { headers: appHeaders() }),
+    api("/api/intel/test-cases?projectId=" + id, { headers: appHeaders() }),
+    api("/api/intel/findings?projectId=" + id, { headers: appHeaders() }),
+    api("/api/intel/issues?projectId=" + id, { headers: appHeaders() }),
+    api("/api/intel/fixes?projectId=" + id, { headers: appHeaders() }),
+    api("/api/intel/runs?projectId=" + id, { headers: appHeaders() }),
+    api("/api/intel/overview?projectId=" + id, { headers: appHeaders() }),
+    api("/api/intel/pending?projectId=" + id, { headers: appHeaders() }),
+  ]);
+  const eps = (await epRes.json()).endpoints || [];
+  const ents = (await entRes.json()).entities || [];
+  const feats = (await featRes.json()).features || [];
+  const cases = (await caseRes.json()).testCases || [];
+  const findings = (await findRes.json()).findings || [];
+  const issues = (await issueRes.json()).issues || [];
+  const fixes = (await fixRes.json()).fixes || [];
+  const runs = (await runRes.json()).runs || [];
+  const ovData = await ovRes.json();
+  const raw = ovData.overview || null;
+  const pend = (await pendRes.json()).pending || [];
+  const tableSet = new Set(ents.map(e => e.table).filter(Boolean));
+  let envs = [], deps = [];
+  if (raw) { try { envs = JSON.parse(raw.envJson || "[]"); } catch (_) {} try { deps = JSON.parse(raw.depsJson || "[]"); } catch (_) {} }
+
+  const cmdsHtml = intelSummaryCommands.length
+    ? intelSummaryCommands.map(c => `<span class="mono" style="font-size:11.5px;padding:1px 6px;background:var(--surface-2);border:1px solid var(--hairline);border-radius:4px">${escapeHtml(c)}</span>`).join(" ")
+    : `<span class="muted" style="font-size:12px">（未配置，将使用各工具默认命令）</span>`;
+
+  const openFind = findings.filter(f => (f.status || "open") === "open").length;
+  const lastRun = runs.length ? runs[0] : null;
+  const runStats = { passed: 0, failed: 0 };
+  for (const r of runs) { if (r.status === "passed") runStats.passed++; else if (r.status === "failed") runStats.failed++; }
+
+  wrap.innerHTML = `
+    <div class="card" style="margin:0">
+      <div class="row" style="justify-content:space-between">
+        <strong style="font-size:13px">项目画像</strong>
+        <span class="intel-status ${p.analyzedAt ? "analyzed" : "pending"}">${p.analyzedAt ? "已分析" : "待分析"}</span>
+      </div>
+      <div class="muted" style="font-size:12px;margin-top:8px;display:flex;flex-direction:column;gap:4px">
+        <div>来源：${escapeHtml(p.source || "-")} · 路径：<span class="mono">${escapeHtml(loc || "-")}</span></div>
+        <div>Git 分支：<span class="mono">${escapeHtml(p.gitRef || "默认")}</span> · 最近分析：${p.analyzedAt ? new Date(p.analyzedAt).toLocaleString() : "未分析"}</div>
+        <div>最近测试 SHA：<span class="mono">${escapeHtml((p.lastTestedSha || "").slice(0, 8) || "-")}</span> · 快照 SHA：<span class="mono">${escapeHtml((p.snapshotSha || "").slice(0, 8) || "-")}</span></div>
+      </div>
+    </div>
+
+    <div class="card" style="margin:0">
+      <div class="row" style="justify-content:space-between">
+        <strong style="font-size:13px">命令白名单（项目级）</strong>
+        <button class="ghost sm" onclick="editIntelProjectCommands()">编辑</button>
+      </div>
+      <div style="margin-top:8px;display:flex;flex-wrap:wrap;gap:6px">${cmdsHtml}</div>
+    </div>
+
+    <div class="card" style="margin:0">
+      <strong style="font-size:13px">概览统计</strong>
+      <div class="stat-grid" style="margin-top:10px">
+        <div class="stat"><div class="k">子模块</div><div class="v">${(data.modules || []).length}</div></div>
+        <div class="stat primary"><div class="k">接口契约</div><div class="v">${eps.length}</div></div>
+        <div class="stat"><div class="k">实体 / 表</div><div class="v">${tableSet.size}</div></div>
+        <div class="stat"><div class="k">字段 / 列</div><div class="v">${ents.length}</div></div>
+        <div class="stat"><div class="k">功能点</div><div class="v">${feats.length}</div></div>
+        <div class="stat"><div class="k">测试用例</div><div class="v">${cases.length}</div></div>
+        <div class="stat"><div class="k">合规发现</div><div class="v">${openFind} / ${findings.length}</div></div>
+        <div class="stat"><div class="k">问题</div><div class="v">${issues.length}</div></div>
+        <div class="stat"><div class="k">修复建议</div><div class="v">${fixes.length}</div></div>
+        <div class="stat"><div class="k">待确认</div><div class="v">${pend.length}</div></div>
+        <div class="stat"><div class="k">运行通过 / 失败</div><div class="v">${runStats.passed} / ${runStats.failed}</div></div>
+        <div class="stat"><div class="k">依赖 / 环境</div><div class="v">${deps.length} / ${envs.length}</div></div>
+      </div>
+    </div>
+
+    ${lastRun ? `
+    <div class="card" style="margin:0">
+      <div class="row" style="justify-content:space-between">
+        <strong style="font-size:13px">最近运行</strong>
+        <button class="ghost sm" onclick="switchIntelTab('runs')">查看全部</button>
+      </div>
+      <div style="margin-top:8px;display:flex;flex-direction:column;gap:4px;font-size:12px">
+        <div class="row" style="justify-content:space-between">
+          <span>#${lastRun.id} · ${escapeHtml(lastRun.scope || "module")}</span>
+          <span class="intel-status ${lastRun.status === "passed" ? "analyzed" : ""}">${escapeHtml(lastRun.status || "-")}</span>
+        </div>
+        <div class="mono muted" style="font-size:11px">${escapeHtml(lastRun.command || "")}</div>
+        <div class="muted" style="font-size:11px">${lastRun.startedAt ? new Date(lastRun.startedAt).toLocaleString() : "-"}</div>
+      </div>
+    </div>` : ""}
+  `;
+}
+
+function switchIntelTab(tab) {
+  const btn = document.querySelector(`.intel-tab[data-tab="${tab}"]`);
+  if (btn) btn.click();
 }
 
 async function loadIntelContracts(id) {
@@ -3912,7 +4229,7 @@ function appendRagBubble(role, content, sources) {
   }
   const label = isUser ? "你" : "AI 助手";
   wrap.insertAdjacentHTML("beforeend",
-    `<div class="rag-msg ${isUser ? "user" : "assistant"}"><div class="rag-msg-label">${label}</div><div class="rag-bubble">${escapeHtml(content)}${sourcesHtml}</div></div>`);
+    `<div class="rag-msg ${isUser ? "user" : "assistant"}"><div class="rag-msg-label">${label}</div><div class="rag-bubble">${isUser ? escapeHtml(content) : `<div class="md">${mdRender(content)}</div>`}${sourcesHtml}</div></div>`);
   wrap.scrollTop = wrap.scrollHeight;
 }
 

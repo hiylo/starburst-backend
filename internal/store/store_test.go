@@ -881,3 +881,61 @@ func TestUpdateIntelTestCaseOutcome(t *testing.T) {
 		t.Errorf("after real failure = %+v", cases[0])
 	}
 }
+
+func TestReplaceIntelModulesStableIDAndSummary(t *testing.T) {
+	ctx := context.Background()
+	st := newTestStore(t)
+
+	// First analyze: two modules.
+	m1 := []*IntelModule{{ProjectID: 1, RelPath: "a", KindType: "java", KindRole: "backend", BuildTool: "maven"}}
+	if err := st.ReplaceIntelModules(ctx, 1, m1); err != nil {
+		t.Fatalf("first replace: %v", err)
+	}
+	mods, _ := st.ListIntelModules(ctx, 1)
+	if len(mods) != 1 || mods[0].ID == 0 {
+		t.Fatalf("modules after first = %+v", mods)
+	}
+	firstID := mods[0].ID
+
+	// Simulate a lazily generated summary (persisted directly).
+	if err := st.UpdateIntelModuleSummary(ctx, firstID, "人工/LLM 摘要"); err != nil {
+		t.Fatalf("set summary: %v", err)
+	}
+
+	// Second analyze: same module + one new one. The existing module must keep
+	// its id and summary; the new module gets inserted.
+	m2 := []*IntelModule{
+		{ProjectID: 1, RelPath: "a", KindType: "java", KindRole: "backend", BuildTool: "maven"},
+		{ProjectID: 1, RelPath: "b", KindType: "web", KindRole: "web", BuildTool: "npm"},
+	}
+	if err := st.ReplaceIntelModules(ctx, 1, m2); err != nil {
+		t.Fatalf("second replace: %v", err)
+	}
+	mods, _ = st.ListIntelModules(ctx, 1)
+	if len(mods) != 2 {
+		t.Fatalf("modules after second = %+v", mods)
+	}
+	byPath := map[string]*IntelModule{}
+	for _, m := range mods {
+		byPath[m.RelPath] = m
+	}
+	if byPath["a"].ID != firstID {
+		t.Errorf("module a id changed: %d -> %d (want stable)", firstID, byPath["a"].ID)
+	}
+	if byPath["a"].Summary != "人工/LLM 摘要" {
+		t.Errorf("module a summary lost: %q", byPath["a"].Summary)
+	}
+	if byPath["b"].ID == 0 || byPath["b"].ID == firstID {
+		t.Errorf("module b should be inserted with a fresh id: %+v", byPath["b"])
+	}
+
+	// Third analyze: module b disappears -> removed.
+	m3 := []*IntelModule{{ProjectID: 1, RelPath: "a", KindType: "java", KindRole: "backend", BuildTool: "maven"}}
+	if err := st.ReplaceIntelModules(ctx, 1, m3); err != nil {
+		t.Fatalf("third replace: %v", err)
+	}
+	mods, _ = st.ListIntelModules(ctx, 1)
+	if len(mods) != 1 || mods[0].RelPath != "a" {
+		t.Errorf("modules after removing b = %+v", mods)
+	}
+}

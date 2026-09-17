@@ -1200,6 +1200,136 @@ func TestWhitelistedTestCommand(t *testing.T) {
 
 // TestIntelProjectCommandsUpdate verifies the project-level command whitelist
 // edit: a PUT replaces projects.commands_json and the updated list is returned.
+func TestIntelProjectCommandsUpdate(t *testing.T) {
+	s := newTestServer(t)
+	wh := loginWeb(t, s)
+
+	root := t.TempDir()
+	writeTestFile(t, filepath.Join(root, "pom.xml"), `<project></project>`)
+
+	rec := s.do(t, http.MethodPost, "/api/intel/projects",
+		`{"name":"demo","source":"local","localPath":"`+filepath.ToSlash(root)+`"}`, wh)
+	var proj struct {
+		ID int64 `json:"id"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &proj); err != nil || proj.ID == 0 {
+		t.Fatalf("create project: %s", rec.Body.String())
+	}
+	rec = s.do(t, http.MethodPost, "/api/intel/analyze",
+		`{"projectId":`+jsonInt(proj.ID)+`}`, wh)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("analyze status %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// 项目级默认白名单应聚合出 mvn test。
+	rec = s.do(t, http.MethodGet, "/api/intel/projects/"+jsonInt(proj.ID), "", wh)
+	var detail struct {
+		Project struct {
+			CommandsJSON string `json:"commandsJson"`
+		} `json:"project"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &detail); err != nil {
+		t.Fatalf("detail parse: %v", err)
+	}
+	if !strings.Contains(detail.Project.CommandsJSON, "mvn test") {
+		t.Errorf("default project commands missing mvn test: %s", detail.Project.CommandsJSON)
+	}
+
+	rec = s.do(t, http.MethodPut, "/api/intel/projects/"+jsonInt(proj.ID),
+		`{"commandsJson":"[\"mvn clean install\",\"mvn test -Dcoverage\"]"}`, wh)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("update commands status %d: %s", rec.Code, rec.Body.String())
+	}
+	var upd struct {
+		CommandsJSON string `json:"commandsJson"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &upd); err != nil {
+		t.Fatalf("update parse: %v", err)
+	}
+	if !strings.Contains(upd.CommandsJSON, "mvn clean install") {
+		t.Errorf("updated commands missing entry: %s", upd.CommandsJSON)
+	}
+
+	// 非法白名单（非 JSON 字符串数组）应被拒绝。
+	rec = s.do(t, http.MethodPut, "/api/intel/projects/"+jsonInt(proj.ID),
+		`{"commandsJson":"mvn test"}`, wh)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("invalid commandsJson should 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestIntelProjectSourceAssociationUpdate verifies the detail-page "项目管理"
+// edit of the associated source directory/repo (source/localPath/gitUrl/gitRef).
+func TestIntelProjectSourceAssociationUpdate(t *testing.T) {
+	s := newTestServer(t)
+	wh := loginWeb(t, s)
+
+	root := t.TempDir()
+	writeTestFile(t, filepath.Join(root, "pom.xml"), `<project></project>`)
+
+	rec := s.do(t, http.MethodPost, "/api/intel/projects",
+		`{"name":"demo","source":"local","localPath":"`+filepath.ToSlash(root)+`"}`, wh)
+	var proj struct {
+		ID int64 `json:"id"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &proj); err != nil || proj.ID == 0 {
+		t.Fatalf("create project: %s", rec.Body.String())
+	}
+
+	// 切到 git 来源：关联仓库 URL + 分支。
+	rec = s.do(t, http.MethodPut, "/api/intel/projects/"+jsonInt(proj.ID),
+		`{"source":"git","gitUrl":"https://gitlab.example.com/group/demo.git","gitRef":"release-1.0"}`, wh)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("update to git status %d: %s", rec.Code, rec.Body.String())
+	}
+	var git struct {
+		Source    string `json:"source"`
+		LocalPath string `json:"localPath"`
+		GitURL    string `json:"gitUrl"`
+		GitRef    string `json:"gitRef"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &git); err != nil {
+		t.Fatalf("git update parse: %v", err)
+	}
+	if git.Source != "git" || git.GitURL != "https://gitlab.example.com/group/demo.git" || git.GitRef != "release-1.0" {
+		t.Errorf("git association mismatch: %+v", git)
+	}
+	if git.LocalPath != "" {
+		t.Errorf("local path should be cleared on git source: %+v", git)
+	}
+
+	// git 来源但未填仓库 URL → 400。
+	rec = s.do(t, http.MethodPut, "/api/intel/projects/"+jsonInt(proj.ID),
+		`{"source":"git","gitUrl":"  "}`, wh)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("empty git url should 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// 切回本地来源：不存在/非目录路径 → 400。
+	rec = s.do(t, http.MethodPut, "/api/intel/projects/"+jsonInt(proj.ID),
+		`{"source":"local","localPath":"/no/such/dir-xyz"}`, wh)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("missing local dir should 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// 本地来源：有效目录 → 关联源码目录落库并清空 gitUrl。
+	rec = s.do(t, http.MethodPut, "/api/intel/projects/"+jsonInt(proj.ID),
+		`{"source":"local","localPath":"`+filepath.ToSlash(root)+`"}`, wh)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("update to local status %d: %s", rec.Code, rec.Body.String())
+	}
+	var local struct {
+		Source    string `json:"source"`
+		LocalPath string `json:"localPath"`
+		GitURL    string `json:"gitUrl"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &local); err != nil {
+		t.Fatalf("local update parse: %v", err)
+	}
+	if local.Source != "local" || local.LocalPath != filepath.ToSlash(root) || local.GitURL != "" {
+		t.Errorf("local association mismatch: %+v", local)
+	}
+}
 
 // TestIntelEnvExternalConfig verifies an externally provided middleware
 // endpoint: it is probed once, persisted with provider=external, and survives
@@ -2575,5 +2705,76 @@ func TestEnsureModuleSummaryNoLLM(t *testing.T) {
 	got := s.ensureModuleSummary(context.Background(), mod, nil, nil)
 	if got != "" {
 		t.Errorf("summary without LLM = %q, want empty", got)
+	}
+}
+
+// TestIntelModuleManualOverridesSurviveReanalyze verifies the human-edit
+// mechanism: role/summary edits stored as applied overrides survive a
+// re-analysis (auto values are rebuilt, overrides are merged on read).
+func TestIntelModuleManualOverridesSurviveReanalyze(t *testing.T) {
+	s := newTestServer(t)
+	wh := loginWeb(t, s)
+
+	root := t.TempDir()
+	writeTestFile(t, filepath.Join(root, "pom.xml"), `<project></project>`)
+
+	rec := s.do(t, http.MethodPost, "/api/intel/projects",
+		`{"name":"demo","source":"local","localPath":"`+filepath.ToSlash(root)+`"}`, wh)
+	var proj struct {
+		ID int64 `json:"id"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &proj); err != nil || proj.ID == 0 {
+		t.Fatalf("create project: %s", rec.Body.String())
+	}
+	rec = s.do(t, http.MethodPost, "/api/intel/analyze",
+		`{"projectId":`+jsonInt(proj.ID)+`}`, wh)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("analyze status %d: %s", rec.Code, rec.Body.String())
+	}
+
+	rec = s.do(t, http.MethodGet, "/api/intel/projects/"+jsonInt(proj.ID), "", wh)
+	var detail struct {
+		Modules []struct {
+			ID int64 `json:"id"`
+		} `json:"modules"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &detail); err != nil || len(detail.Modules) != 1 {
+		t.Fatalf("modules: %s", rec.Body.String())
+	}
+	modID := detail.Modules[0].ID
+
+	// Human edit role + summary via the overrides endpoint.
+	rec = s.do(t, http.MethodPut, "/api/intel/modules/"+jsonInt(modID)+"/overrides",
+		`{"role":"app","summary":"人工修正的模块说明"}`, wh)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("overrides status %d: %s", rec.Code, rec.Body.String())
+	}
+	rec = s.do(t, http.MethodGet, "/api/intel/modules/"+jsonInt(modID), "", wh)
+	var md struct {
+		Module struct {
+			KindRole string `json:"kindRole"`
+			Summary  string `json:"summary"`
+		} `json:"module"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &md); err != nil {
+		t.Fatalf("detail parse: %v", err)
+	}
+	if md.Module.KindRole != "app" || md.Module.Summary != "人工修正的模块说明" {
+		t.Fatalf("override not applied: %+v", md.Module)
+	}
+
+	// Re-analyze: auto values are rebuilt but overrides must still win.
+	rec = s.do(t, http.MethodPost, "/api/intel/analyze",
+		`{"projectId":`+jsonInt(proj.ID)+`}`, wh)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("re-analyze status %d", rec.Code)
+	}
+	// Module id is stable now; re-fetch by the same id.
+	rec = s.do(t, http.MethodGet, "/api/intel/modules/"+jsonInt(modID), "", wh)
+	if err := json.Unmarshal(rec.Body.Bytes(), &md); err != nil {
+		t.Fatalf("detail parse: %v", err)
+	}
+	if md.Module.KindRole != "app" || md.Module.Summary != "人工修正的模块说明" {
+		t.Errorf("overrides lost after re-analyze: %+v", md.Module)
 	}
 }

@@ -435,6 +435,8 @@ type Store interface {
 	GetIntelOverride(ctx context.Context, id int64) (*IntelOverride, error)
 	// UpdateIntelOverride persists an override's manual value and status.
 	UpdateIntelOverride(ctx context.Context, o *IntelOverride) error
+	// UpsertIntelOverride replaces the override for the same natural key.
+	UpsertIntelOverride(ctx context.Context, o *IntelOverride) error
 	// CreateIntelFeatureChat persists a per-feature AI Q&A.
 	CreateIntelFeatureChat(ctx context.Context, c *IntelFeatureChat) error
 	// ListIntelFeatureChats returns a feature's Q&A history, newest first.

@@ -17,6 +17,7 @@ type IntelProject struct {
 	LocalPath     string     `json:"localPath"`
 	GitURL        string     `json:"gitUrl"`
 	GitRef        string     `json:"gitRef"`
+	Description   string     `json:"description"`
 	LastTestedSHA string     `json:"lastTestedSha"`
 	SnapshotSHA   string     `json:"snapshotSha"`
 	CommandsJSON  string     `json:"commandsJson"`
@@ -83,19 +84,19 @@ type IntelEndpoint struct {
 func (s *sqlStore) CreateIntelProject(ctx context.Context, p *IntelProject) error {
 	if isPostgres(s.driver) {
 		return s.db.QueryRowContext(ctx, s.q(`
-			INSERT INTO projects (name, source, local_path, git_url, git_ref, last_tested_sha,
+			INSERT INTO projects (name, source, local_path, git_url, git_ref, description, last_tested_sha,
 				snapshot_sha, commands_json, env_name, analyzed_at, created_at, updated_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
 			RETURNING id`),
-			p.Name, p.Source, p.LocalPath, p.GitURL, p.GitRef, p.LastTestedSHA,
+			p.Name, p.Source, p.LocalPath, p.GitURL, p.GitRef, p.Description, p.LastTestedSHA,
 			p.SnapshotSHA, p.CommandsJSON, p.EnvName, p.AnalyzedAt,
 		).Scan(&p.ID)
 	}
 	res, err := s.db.ExecContext(ctx, s.q(`
-		INSERT INTO projects (name, source, local_path, git_url, git_ref, last_tested_sha,
+		INSERT INTO projects (name, source, local_path, git_url, git_ref, description, last_tested_sha,
 			snapshot_sha, commands_json, env_name, analyzed_at, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`),
-		p.Name, p.Source, p.LocalPath, p.GitURL, p.GitRef, p.LastTestedSHA,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`),
+		p.Name, p.Source, p.LocalPath, p.GitURL, p.GitRef, p.Description, p.LastTestedSHA,
 		p.SnapshotSHA, p.CommandsJSON, p.EnvName, p.AnalyzedAt,
 	)
 	if err != nil {
@@ -112,7 +113,7 @@ func (s *sqlStore) CreateIntelProject(ctx context.Context, p *IntelProject) erro
 // ListIntelProjects returns all registered projects, newest first.
 func (s *sqlStore) ListIntelProjects(ctx context.Context) ([]*IntelProject, error) {
 	rows, err := s.db.QueryContext(ctx, s.q(`
-		SELECT id, name, source, local_path, git_url, git_ref, last_tested_sha,
+		SELECT id, name, source, local_path, git_url, git_ref, description, last_tested_sha,
 			snapshot_sha, commands_json, env_name, analyzed_at, created_at, updated_at
 		FROM projects ORDER BY created_at DESC`))
 	if err != nil {
@@ -133,7 +134,7 @@ func (s *sqlStore) ListIntelProjects(ctx context.Context) ([]*IntelProject, erro
 // GetIntelProject loads a single project.
 func (s *sqlStore) GetIntelProject(ctx context.Context, id int64) (*IntelProject, error) {
 	row := s.db.QueryRowContext(ctx, s.q(`
-		SELECT id, name, source, local_path, git_url, git_ref, last_tested_sha,
+		SELECT id, name, source, local_path, git_url, git_ref, description, last_tested_sha,
 			snapshot_sha, commands_json, env_name, analyzed_at, created_at, updated_at
 		FROM projects WHERE id = ?`), id)
 	p, err := scanIntelProject(row)
@@ -147,9 +148,9 @@ func (s *sqlStore) GetIntelProject(ctx context.Context, id int64) (*IntelProject
 func (s *sqlStore) UpdateIntelProject(ctx context.Context, p *IntelProject) error {
 	_, err := s.db.ExecContext(ctx, s.q(`
 		UPDATE projects SET name = ?, source = ?, local_path = ?, git_url = ?, git_ref = ?,
-			last_tested_sha = ?, snapshot_sha = ?, commands_json = ?, env_name = ?,
+			description = ?, last_tested_sha = ?, snapshot_sha = ?, commands_json = ?, env_name = ?,
 			analyzed_at = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`),
-		p.Name, p.Source, p.LocalPath, p.GitURL, p.GitRef, p.LastTestedSHA,
+		p.Name, p.Source, p.LocalPath, p.GitURL, p.GitRef, p.Description, p.LastTestedSHA,
 		p.SnapshotSHA, p.CommandsJSON, p.EnvName, p.AnalyzedAt, p.ID)
 	return err
 }
@@ -200,19 +201,53 @@ func (s *sqlStore) DeleteIntelProject(ctx context.Context, id int64) error {
 	return nil
 }
 
-// ReplaceIntelModules deletes the project's modules and re-inserts the given
-// set, so a scan always reflects the current repository layout.
+// ReplaceIntelModules syncs the project's module set by natural key (rel_path):
+// existing modules keep their stable id and cached summary, newly detected
+// modules are inserted, and modules no longer present are removed. Stable ids
+// keep child rows and overrides (keyed by rel_path) valid across analyses, and
+// the LLM summary survives re-analysis.
 func (s *sqlStore) ReplaceIntelModules(ctx context.Context, projectID int64, mods []*IntelModule) error {
-	if _, err := s.db.ExecContext(ctx, s.q(`DELETE FROM project_modules WHERE project_id = ?`), projectID); err != nil {
+	existing, err := s.ListIntelModules(ctx, projectID)
+	if err != nil {
 		return err
 	}
+	byPath := make(map[string]int64, len(existing))
+	keep := make(map[string]bool, len(mods))
 	for _, m := range mods {
+		if m.RelPath != "" {
+			keep[m.RelPath] = true
+		}
+	}
+	for _, m := range existing {
+		byPath[m.RelPath] = m.ID
+		if !keep[m.RelPath] {
+			if _, err := s.db.ExecContext(ctx, s.q(`DELETE FROM project_modules WHERE id = ?`), m.ID); err != nil {
+				return err
+			}
+		}
+	}
+	for _, m := range mods {
+		if m.RelPath == "" {
+			continue
+		}
+		if id, ok := byPath[m.RelPath]; ok {
+			// Update auto-derived fields only; summary and id are preserved.
+			if _, err := s.db.ExecContext(ctx, s.q(`
+				UPDATE project_modules SET kind_type = ?, kind_role = ?, build_tool = ?,
+					commands_json = ?, last_tested_sha = ?, analyzed_at = CURRENT_TIMESTAMP
+				WHERE id = ?`),
+				m.KindType, m.KindRole, m.BuildTool, m.CommandsJSON, m.LastTestedSHA, id); err != nil {
+				return err
+			}
+			m.ID = id
+			continue
+		}
 		if _, err := s.db.ExecContext(ctx, s.q(`
 			INSERT INTO project_modules (project_id, rel_path, kind_type, kind_role, build_tool,
 				commands_json, summary, last_tested_sha, analyzed_at, created_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`),
+			VALUES (?, ?, ?, ?, ?, ?, '', ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`),
 			projectID, m.RelPath, m.KindType, m.KindRole, m.BuildTool,
-			m.CommandsJSON, m.Summary, m.LastTestedSHA); err != nil {
+			m.CommandsJSON, m.LastTestedSHA); err != nil {
 			return err
 		}
 	}
@@ -233,13 +268,6 @@ func (s *sqlStore) GetIntelModule(ctx context.Context, id int64) (*IntelModule, 
 	}
 	m.AnalyzedAt = analyzed
 	return m, nil
-}
-
-// UpdateIntelModuleCommands persists a module's reviewed command whitelist.
-func (s *sqlStore) UpdateIntelModuleCommands(ctx context.Context, id int64, commandsJSON string) error {
-	_, err := s.db.ExecContext(ctx, s.q(`
-		UPDATE project_modules SET commands_json = ? WHERE id = ?`), commandsJSON, id)
-	return err
 }
 
 // UpdateIntelModuleSummary persists the LLM-generated module business summary.
@@ -397,7 +425,7 @@ func scanIntelProject(row rowScanner) (*IntelProject, error) {
 	p := &IntelProject{}
 	var analyzed *time.Time
 	err := row.Scan(&p.ID, &p.Name, &p.Source, &p.LocalPath, &p.GitURL, &p.GitRef,
-		&p.LastTestedSHA, &p.SnapshotSHA, &p.CommandsJSON, &p.EnvName,
+		&p.Description, &p.LastTestedSHA, &p.SnapshotSHA, &p.CommandsJSON, &p.EnvName,
 		&analyzed, &p.CreatedAt, &p.UpdatedAt)
 	if err != nil {
 		return nil, err

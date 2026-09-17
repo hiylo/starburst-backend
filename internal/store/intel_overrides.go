@@ -56,6 +56,18 @@ func (s *sqlStore) CreateIntelOverride(ctx context.Context, o *IntelOverride) er
 	return nil
 }
 
+// UpsertIntelOverride replaces the existing override for the same
+// (project_id, target, row_key, field) natural key (status applied), so a
+// human edit is idempotent and no duplicates accumulate across re-analysis.
+func (s *sqlStore) UpsertIntelOverride(ctx context.Context, o *IntelOverride) error {
+	if _, err := s.db.ExecContext(ctx, s.q(`
+		DELETE FROM intel_overrides WHERE project_id = ? AND target = ? AND row_key = ? AND field = ?`),
+		o.ProjectID, o.Target, o.RowKey, o.Field); err != nil {
+		return err
+	}
+	return s.CreateIntelOverride(ctx, o)
+}
+
 // ListIntelOverrides returns overrides for a project, optionally only pending.
 func (s *sqlStore) ListIntelOverrides(ctx context.Context, projectID int64, onlyPending bool) ([]*IntelOverride, error) {
 	query := `SELECT id, project_id, module_id, target, row_key, field, auto_value_json,

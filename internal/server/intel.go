@@ -300,21 +300,8 @@ func (s *Server) handleIntelModules(w http.ResponseWriter, r *http.Request) {
 // correction is the authoritative value while the auto-detected one stays in
 // the DB for comparison.
 func (s *Server) applyModuleOverrides(ctx context.Context, projectID int64, mods []*store.IntelModule) {
-	overrides, err := s.store.ListIntelOverrides(ctx, projectID, false)
-	if err != nil {
-		return
-	}
-	byPath := make(map[string]string)
-	for _, o := range overrides {
-		if o.Status != "applied" || o.Target != "module" || o.Field != "role" || o.ManualValue == "" {
-			continue
-		}
-		byPath[o.RowKey] = o.ManualValue
-	}
 	for _, m := range mods {
-		if v, ok := byPath[m.RelPath]; ok {
-			m.KindRole = v
-		}
+		s.applyModuleOverridesTo(ctx, m)
 	}
 }
 
@@ -342,9 +329,10 @@ func (s *Server) applyFeatureOverrides(ctx context.Context, projectID int64, fea
 	}
 }
 
-// handleIntelModuleCommands serves the per-module detail (GET). The command
-// whitelist lives at project level (projects.commands_json), edited via
-// PUT /api/intel/projects/{id}; module-level commands were removed.
+// handleIntelModuleCommands serves the per-module detail (GET), force
+// regeneration of the AI summary (POST .../resummarize) and manual overrides
+// for human-corrected role/summary (PUT .../overrides). The command whitelist
+// lives at project level (projects.commands_json).
 func (s *Server) handleIntelModuleCommands(w http.ResponseWriter, r *http.Request) {
 	if !s.requireWeb(r) {
 		if _, ok := s.requireToken(r); !ok {
@@ -356,13 +344,68 @@ func (s *Server) handleIntelModuleCommands(w http.ResponseWriter, r *http.Reques
 	if !ok {
 		return
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
 	defer cancel()
 	mod, err := s.store.GetIntelModule(ctx, id)
 	if err != nil {
 		writeErr(w, http.StatusNotFound, "module not found")
 		return
 	}
+	rest := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/api/intel/modules/"), "/")
+	s.applyModuleOverridesTo(ctx, mod)
+
+	// POST .../resummarize: clear the cached summary and regenerate now.
+	if r.Method == http.MethodPost && strings.HasSuffix(rest, "/resummarize") {
+		mod.Summary = ""
+		_ = s.store.UpdateIntelModuleSummary(ctx, mod.ID, "")
+		endpoints, _ := s.store.ListIntelEndpoints(ctx, mod.ProjectID, mod.ID)
+		entities, _ := s.store.ListIntelEntities(ctx, mod.ProjectID, mod.ID)
+		mod.Summary = s.ensureModuleSummary(ctx, mod, endpoints, entities)
+		writeJSON(w, http.StatusOK, map[string]any{"module": mod, "summary": mod.Summary})
+		return
+	}
+
+	// PUT .../overrides: store human corrections (role/summary) as applied
+	// overrides so re-analysis never overwrites them.
+	if r.Method == http.MethodPut && strings.HasSuffix(rest, "/overrides") {
+		var req struct {
+			Role    *string `json:"role"`
+			Summary *string `json:"summary"`
+		}
+		if err := readJSONLimited(w, r, &req); err != nil {
+			writeErr(w, http.StatusBadRequest, "invalid request body")
+			return
+		}
+		if req.Role != nil && strings.TrimSpace(*req.Role) != "" {
+			_ = s.store.UpsertIntelOverride(ctx, &store.IntelOverride{
+				ProjectID:   mod.ProjectID,
+				Target:      "module",
+				RowKey:      mod.RelPath,
+				Field:       "kind_role",
+				ManualValue: strings.TrimSpace(*req.Role),
+				Confidence:  "high",
+				Status:      "applied",
+				Source:      "manual",
+			})
+			mod.KindRole = strings.TrimSpace(*req.Role)
+		}
+		if req.Summary != nil && strings.TrimSpace(*req.Summary) != "" {
+			_ = s.store.UpsertIntelOverride(ctx, &store.IntelOverride{
+				ProjectID:   mod.ProjectID,
+				Target:      "module",
+				RowKey:      mod.RelPath,
+				Field:       "summary",
+				ManualValue: strings.TrimSpace(*req.Summary),
+				Confidence:  "high",
+				Status:      "applied",
+				Source:      "manual",
+			})
+			mod.Summary = strings.TrimSpace(*req.Summary)
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"module": mod})
+		return
+	}
+
 	if r.Method != http.MethodGet {
 		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
@@ -382,6 +425,26 @@ func (s *Server) handleIntelModuleCommands(w http.ResponseWriter, r *http.Reques
 			"cases":     len(cases),
 		},
 	})
+}
+
+// applyModuleOverridesTo merges human-confirmed overrides for one module:
+// kind_role and summary (the fields a human can correct on the page).
+func (s *Server) applyModuleOverridesTo(ctx context.Context, mod *store.IntelModule) {
+	overrides, err := s.store.ListIntelOverrides(ctx, mod.ProjectID, false)
+	if err != nil {
+		return
+	}
+	for _, o := range overrides {
+		if o.Status != "applied" || o.Target != "module" || o.RowKey != mod.RelPath || o.ManualValue == "" {
+			continue
+		}
+		switch o.Field {
+		case "kind_role", "role":
+			mod.KindRole = o.ManualValue
+		case "summary":
+			mod.Summary = o.ManualValue
+		}
+	}
 }
 
 // handleIntelGatewayRoutes lists the gateway routes (public exposure) of a
@@ -526,11 +589,12 @@ func (s *Server) listIntelProjects(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) createIntelProject(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Name      string `json:"name"`
-		Source    string `json:"source"`
-		LocalPath string `json:"localPath"`
-		GitURL    string `json:"gitUrl"`
-		GitRef    string `json:"gitRef"`
+		Name        string `json:"name"`
+		Source      string `json:"source"`
+		LocalPath   string `json:"localPath"`
+		GitURL      string `json:"gitUrl"`
+		GitRef      string `json:"gitRef"`
+		Description string `json:"description"`
 	}
 	if err := readJSONLimited(w, r, &req); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid request body")
@@ -540,6 +604,7 @@ func (s *Server) createIntelProject(w http.ResponseWriter, r *http.Request) {
 	req.LocalPath = strings.TrimSpace(req.LocalPath)
 	req.GitURL = strings.TrimSpace(req.GitURL)
 	req.Name = strings.TrimSpace(req.Name)
+	req.Description = strings.TrimSpace(req.Description)
 	if req.Source == "" {
 		req.Source = "local"
 	}
@@ -555,11 +620,12 @@ func (s *Server) createIntelProject(w http.ResponseWriter, r *http.Request) {
 		req.Name = deriveProjectName(req.LocalPath, req.GitURL)
 	}
 	p := &store.IntelProject{
-		Name:      req.Name,
-		Source:    req.Source,
-		LocalPath: req.LocalPath,
-		GitURL:    req.GitURL,
-		GitRef:    req.GitRef,
+		Name:        req.Name,
+		Source:      req.Source,
+		LocalPath:   req.LocalPath,
+		GitURL:      req.GitURL,
+		GitRef:      req.GitRef,
+		Description: req.Description,
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
@@ -599,10 +665,14 @@ func (s *Server) deleteIntelProject(w http.ResponseWriter, r *http.Request, id i
 
 func (s *Server) updateIntelProject(w http.ResponseWriter, r *http.Request, id int64) {
 	var req struct {
-		Name     string `json:"name"`
-		GitRef   string `json:"gitRef"`
-		Commands string `json:"commandsJson"`
-		EnvName  string `json:"envName"`
+		Name        string `json:"name"`
+		Source      string `json:"source"`
+		LocalPath   string `json:"localPath"`
+		GitURL      string `json:"gitUrl"`
+		GitRef      string `json:"gitRef"`
+		Description string `json:"description"`
+		Commands    string `json:"commandsJson"`
+		EnvName     string `json:"envName"`
 	}
 	if err := readJSONLimited(w, r, &req); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid request body")
@@ -618,8 +688,45 @@ func (s *Server) updateIntelProject(w http.ResponseWriter, r *http.Request, id i
 	if req.Name != "" {
 		p.Name = req.Name
 	}
-	if req.GitRef != "" {
-		p.GitRef = req.GitRef
+	if req.Description != "" {
+		p.Description = req.Description
+	}
+	// 关联源码目录/仓库：详情页「项目管理」可调整来源与路径，与创建语义一致。
+	switch req.Source {
+	case "":
+		// 未携带 source 时按增量更新处理（如仅改命令白名单/名称）。
+		if req.GitRef != "" {
+			p.GitRef = req.GitRef
+		}
+	case "local", "git":
+		req.LocalPath = strings.TrimSpace(req.LocalPath)
+		req.GitURL = strings.TrimSpace(req.GitURL)
+		req.GitRef = strings.TrimSpace(req.GitRef)
+		if req.Source == "local" {
+			if req.LocalPath == "" {
+				writeErr(w, http.StatusBadRequest, "local 来源必须填写源码目录路径")
+				return
+			}
+			if fi, err := os.Stat(req.LocalPath); err != nil || !fi.IsDir() {
+				writeErr(w, http.StatusBadRequest, "源码目录不存在或不是目录: "+req.LocalPath)
+				return
+			}
+			p.Source = "local"
+			p.LocalPath = req.LocalPath
+			p.GitURL = ""
+		} else {
+			if req.GitURL == "" {
+				writeErr(w, http.StatusBadRequest, "git 来源必须填写仓库 URL")
+				return
+			}
+			p.Source = "git"
+			p.GitURL = req.GitURL
+			p.GitRef = req.GitRef
+			p.LocalPath = ""
+		}
+	default:
+		writeErr(w, http.StatusBadRequest, "source 只能是 local 或 git")
+		return
 	}
 	if req.Commands != "" {
 		// 命令白名单是项目级别：必须是 JSON 字符串数组，且逐条去除首尾空白、
