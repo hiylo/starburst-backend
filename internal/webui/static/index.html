@@ -506,6 +506,9 @@
                 <div id="intelFixList" style="display:flex;flex-direction:column;gap:var(--sp-sm)"></div>
               </div>
               <div class="intel-panel hidden" id="intelPanel-runs">
+                <div class="row" style="justify-content:flex-end;margin-bottom:var(--sp-sm)">
+                  <button class="ghost sm" onclick="runIntelTestsAll()">一键回归</button>
+                </div>
                 <div class="table-wrap">
                   <table id="intelRunTable"><thead><tr><th>#</th><th>模块</th><th>命令</th><th>状态</th><th>开始时间</th><th>耗时</th><th></th></tr></thead><tbody></tbody></table>
                 </div>

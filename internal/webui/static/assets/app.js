@@ -3587,6 +3587,20 @@ async function runIntelTests() {
   loadIntelRuns(id);
 }
 
+async function runIntelTestsAll() {
+  const id = intelCurrentProject;
+  if (!id) return;
+  if (!confirm("一键回归：顺序运行项目全部模块的测试命令，继续？")) return;
+  const st = document.getElementById("intelAnalyzeStatus");
+  if (st) st.textContent = "一键回归中…";
+  const res = await api("/api/intel/run-all", { method: "POST", headers: appHeaders(), body: JSON.stringify({ projectId: id }) });
+  const data = await res.json();
+  if (!res.ok) { if (st) st.textContent = ""; show(document.getElementById("intelMsg"), data.error || "回归失败"); return; }
+  if (st) st.textContent = `回归完成：${data.passed || 0} 通 / ${(data.failed || 0)} 败（共 ${data.total || 0} 模块）`;
+  show(document.getElementById("intelMsg"), `一键回归：${data.passed || 0} 模块通过 / ${(data.failed || 0)} 失败`);
+  loadIntelRuns(id);
+}
+
 async function loadIntelImpact(id) {
   const wrap = document.getElementById("intelImpactList");
   wrap.innerHTML = `<div class="muted" style="text-align:center;padding:16px">加载中…</div>`;
