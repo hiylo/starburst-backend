@@ -401,6 +401,18 @@ type Store interface {
 	UpdateIntelAIRule(ctx context.Context, r *IntelAIRule) error
 	// DeleteIntelAIRule removes an AI rule by id.
 	DeleteIntelAIRule(ctx context.Context, id int64) error
+	// ReplaceIntelDevices replaces the device rows bound to a project.
+	ReplaceIntelDevices(ctx context.Context, projectID int64, devs []*IntelDevice) error
+	// UpsertIntelDevices upserts devices by serial, preserving binding state.
+	UpsertIntelDevices(ctx context.Context, devs []*IntelDevice) error
+	// ListIntelDevices returns all devices, optionally scoped to a project.
+	ListIntelDevices(ctx context.Context, projectID int64) ([]*IntelDevice, error)
+	// GetIntelDevice loads one device by id.
+	GetIntelDevice(ctx context.Context, id int64) (*IntelDevice, error)
+	// UpdateIntelDevice persists a device's mutable fields.
+	UpdateIntelDevice(ctx context.Context, d *IntelDevice) error
+	// DeleteIntelDevice removes a device by id.
+	DeleteIntelDevice(ctx context.Context, id int64) error
 }
 
 // Open opens a store for the given driver/dsn. It applies all migrations

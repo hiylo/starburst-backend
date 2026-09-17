@@ -1550,6 +1550,79 @@ func TestIntelEnvSchemaInit(t *testing.T) {
 	}
 }
 
+// TestIntelDevices verifies the Android device management: wireless connect
+// (stubbed adb), list, bind to a project, and delete.
+func TestIntelDevices(t *testing.T) {
+	s := newTestServer(t)
+	wh := loginWeb(t, s)
+
+	old := envagent.RunADB
+	defer func() { envagent.RunADB = old }()
+	envagent.RunADB = func(ctx context.Context, args ...string) (string, error) {
+		if len(args) == 0 {
+			return "", nil
+		}
+		switch args[0] {
+		case "connect":
+			return "connected to " + args[1], nil
+		case "devices":
+			return "List of devices attached\n192.0.2.9:5555 device product:echo model:EchoPhone\n", nil
+		}
+		return "", nil
+	}
+
+	rec := s.do(t, http.MethodPost, "/api/intel/env/devices/connect",
+		`{"ip":"192.0.2.9","port":5555}`, wh)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("connect status %d: %s", rec.Code, rec.Body.String())
+	}
+	var cResp struct {
+		Device struct {
+			ID     int64  `json:"id"`
+			Serial string `json:"serial"`
+			Status string `json:"status"`
+		} `json:"device"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &cResp); err != nil {
+		t.Fatalf("connect parse: %v", err)
+	}
+	if cResp.Device.Serial != "192.0.2.9:5555" {
+		t.Errorf("device serial = %q", cResp.Device.Serial)
+	}
+	deviceID := cResp.Device.ID
+
+	rec = s.do(t, http.MethodGet, "/api/intel/env/devices", "", wh)
+	var list struct {
+		Devices []struct {
+			ID    int64 `json:"id"`
+			Bound bool  `json:"bound"`
+		} `json:"devices"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &list); err != nil {
+		t.Fatalf("list parse: %v", err)
+	}
+	if len(list.Devices) != 1 {
+		t.Fatalf("devices = %d, want 1", len(list.Devices))
+	}
+
+	rec = s.do(t, http.MethodPut, "/api/intel/env/devices/"+jsonInt(deviceID)+"/bind",
+		`{"projectId":1}`, wh)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("bind status %d: %s", rec.Code, rec.Body.String())
+	}
+	rec = s.do(t, http.MethodDelete, "/api/intel/env/devices/"+jsonInt(deviceID), "", wh)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("delete status %d: %s", rec.Code, rec.Body.String())
+	}
+	rec = s.do(t, http.MethodGet, "/api/intel/env/devices", "", wh)
+	if err := json.Unmarshal(rec.Body.Bytes(), &list); err != nil {
+		t.Fatalf("list parse: %v", err)
+	}
+	if len(list.Devices) != 0 {
+		t.Errorf("devices after delete = %d, want 0", len(list.Devices))
+	}
+}
+
 func gitRun(t *testing.T, dir string, args ...string) {
 	t.Helper()
 	cmd := exec.Command("git", args...)

@@ -114,6 +114,7 @@ var migrations = []migration{
 	{name: "intel_ios_bindings", apply: migrationIntelIOSBindings},
 	{name: "env", apply: migrationEnv},
 	{name: "intel_ai_rules", apply: migrationIntelAIRules},
+	{name: "env_devices", apply: migrationEnvDevices},
 }
 
 // migrationIntel creates the Test Intelligence subsystem tables: flat project
@@ -1056,6 +1057,35 @@ func migrationIntelAIRules(ctx context.Context, driver string, db *sql.DB) error
 			updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 		)`, idColumn(driver)),
 		`CREATE INDEX IF NOT EXISTS idx_intel_ai_rules_enabled ON intel_ai_rules(enabled, sort_order)`,
+	}
+	for _, s := range stmts {
+		if _, err := db.ExecContext(ctx, s); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// migrationEnvDevices creates the Android device/emulator binding table:
+// devices are discovered over adb (USB or wireless), bound to a project
+// explicitly by a human (手动才变), and reused across test runs.
+func migrationEnvDevices(ctx context.Context, driver string, db *sql.DB) error {
+	stmts := []string{
+		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS env_devices (
+			%s,
+			project_id INTEGER NOT NULL DEFAULT 0,
+			name TEXT NOT NULL DEFAULT '',
+			method TEXT NOT NULL DEFAULT 'wireless',
+			adb_host TEXT NOT NULL DEFAULT '',
+			adb_port INTEGER NOT NULL DEFAULT 0,
+			serial TEXT NOT NULL DEFAULT '',
+			avd TEXT NOT NULL DEFAULT '',
+			bound BOOLEAN NOT NULL DEFAULT FALSE,
+			status TEXT NOT NULL DEFAULT 'disconnected',
+			last_seen_at TIMESTAMP NULL,
+			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+		)`, idColumn(driver)),
+		`CREATE INDEX IF NOT EXISTS idx_env_devices_project ON env_devices(project_id, bound)`,
 	}
 	for _, s := range stmts {
 		if _, err := db.ExecContext(ctx, s); err != nil {

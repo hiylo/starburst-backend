@@ -42,6 +42,10 @@ var RunDocker = runDockerExec
 // in tests.
 var RunDockerInput = runDockerInputExec
 
+// RunADB runs an adb CLI command (argv direct, no shell) for device discovery
+// and wireless connect. Tests substitute a deterministic stub.
+var RunADB = runADBExec
+
 // runDockerExec is the default docker runner (argv direct, no shell).
 func runDockerExec(ctx context.Context, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, "docker", args...)
@@ -55,6 +59,66 @@ func runDockerInputExec(ctx context.Context, stdin string, args ...string) (stri
 	cmd.Stdin = strings.NewReader(stdin)
 	out, err := cmd.CombinedOutput()
 	return string(out), err
+}
+
+// runADBExec is the default adb runner (argv direct, no shell).
+func runADBExec(ctx context.Context, args ...string) (string, error) {
+	cmd := exec.CommandContext(ctx, "adb", args...)
+	out, err := cmd.CombinedOutput()
+	return string(out), err
+}
+
+// ADBDevice is one device line from "adb devices -l".
+type ADBDevice struct {
+	Serial string // e.g. emulator-5554 or 192.0.2.5:5555
+	State  string // device | offline | unauthorized
+	Name   string
+}
+
+// ADBDeviceList runs "adb devices -l" and parses the attached devices.
+func ADBDeviceList(ctx context.Context) ([]ADBDevice, error) {
+	out, err := RunADB(ctx, "devices", "-l")
+	if err != nil {
+		return nil, err
+	}
+	devs := []ADBDevice{}
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "List of devices") || strings.HasPrefix(line, "* ") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		d := ADBDevice{Serial: fields[0], State: fields[1]}
+		for _, f := range fields[2:] {
+			if strings.HasPrefix(f, "model:") {
+				d.Name = strings.TrimPrefix(f, "model:")
+			}
+		}
+		if d.Name == "" {
+			d.Name = d.Serial
+		}
+		devs = append(devs, d)
+	}
+	return devs, nil
+}
+
+// ADBConnect connects to a wireless device host:port and reports whether the
+// device reached the "device" state.
+func ADBConnect(ctx context.Context, host string, port int) error {
+	addr := net.JoinHostPort(host, strconv.Itoa(port))
+	if _, err := RunADB(ctx, "connect", addr); err != nil {
+		return err
+	}
+	return nil
+}
+
+// ADBReady reports whether an adb binary is present and a server can start.
+func ADBReady(ctx context.Context) bool {
+	_, err := RunADB(ctx, "start-server")
+	return err == nil
 }
 
 // DockerReady reports whether the docker CLI and daemon are usable.

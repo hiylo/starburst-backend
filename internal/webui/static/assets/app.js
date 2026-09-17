@@ -2712,10 +2712,59 @@ async function loadIntelBindings(id) {
 async function loadIntelEnv(id) {
   const wrap = document.getElementById("intelEnvList");
   wrap.innerHTML = `<div class="muted" style="text-align:center;padding:16px">检测中…</div>`;
-  const res = await api("/api/intel/env/status?projectId=" + id, { headers: appHeaders() });
+  const [res, devRes] = await Promise.all([
+    api("/api/intel/env/status?projectId=" + id, { headers: appHeaders() }),
+    api("/api/intel/env/devices?projectId=" + id, { headers: appHeaders() }),
+  ]);
   const data = await res.json();
   if (!res.ok) { wrap.innerHTML = `<div class="muted" style="text-align:center;padding:16px">${escapeHtml(data.error || "检测失败")}</div>`; return; }
   renderIntelEnv(data);
+  renderIntelDevices(((await devRes.json()).devices || []), id);
+}
+
+function renderIntelDevices(devices, projectId) {
+  const wrap = document.getElementById("intelDeviceList");
+  if (!wrap) return;
+  wrap.innerHTML = "";
+  if (!devices.length) { wrap.innerHTML = `<div class="muted" style="font-size:12px">暂无设备（无线连接后出现）</div>`; return; }
+  for (const d of devices) {
+    const bound = d.projectId === projectId && d.bound;
+    const btn = bound
+      ? `<button class="ghost sm" onclick="deleteIntelDevice(${d.id})">解绑</button>`
+      : `<button class="ghost sm" onclick="bindIntelDevice(${d.id}, ${projectId})">绑定</button>`;
+    wrap.insertAdjacentHTML("beforeend", `<div class="card" style="margin:0">
+      <div class="row" style="justify-content:space-between">
+        <strong style="font-size:13px">${escapeHtml(d.name || d.serial || "-")}</strong>
+        <div class="row" style="gap:6px">
+          <span class="intel-status ${d.status === "device" || d.status === "connected" ? "analyzed" : ""}">${escapeHtml(d.status || "disconnected")}</span>
+          ${btn}
+        </div>
+      </div>
+      <div class="muted" style="font-size:11px;margin-top:4px">${escapeHtml(d.serial || "-")} · ${escapeHtml(d.method || "-")}</div>
+    </div>`);
+  }
+}
+
+async function connectIntelDevice() {
+  if (!intelCurrentProject) return;
+  const addr = prompt("无线 adb 地址（IP:端口），如 192.0.2.9:5555", "");
+  if (!addr) return;
+  const m = addr.match(/^(.*):(\d+)$/);
+  if (!m) { alert("格式应为 IP:端口"); return; }
+  const res = await api("/api/intel/env/devices/connect", { method: "POST", headers: appHeaders(), body: JSON.stringify({ ip: m[1], port: parseInt(m[2], 10) }) });
+  const data = await res.json();
+  if (!res.ok) { alert(data.error || "连接失败"); return; }
+  loadIntelEnv(intelCurrentProject);
+}
+
+async function bindIntelDevice(id, projectId) {
+  await api("/api/intel/env/devices/" + id + "/bind", { method: "PUT", headers: appHeaders(), body: JSON.stringify({ projectId }) });
+  loadIntelEnv(intelCurrentProject);
+}
+
+async function deleteIntelDevice(id) {
+  await api("/api/intel/env/devices/" + id, { method: "DELETE", headers: appHeaders() });
+  loadIntelEnv(intelCurrentProject);
 }
 
 async function ensureIntelEnv() {
