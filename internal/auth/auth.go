@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"log"
 	"strings"
 
 	"golang.org/x/crypto/bcrypt"
@@ -39,10 +40,27 @@ func (m *Manager) Initialize(ctx context.Context, defaultPassword string) (bool,
 	if err != store.ErrNotFound {
 		return false, err
 	}
-	if err := m.SetPassword(ctx, defaultPassword); err != nil {
+	if strings.TrimSpace(defaultPassword) == "" {
+		return false, fmt.Errorf("admin password must not be empty (set --default-admin-password or STARBURST_ADMIN_PASSWORD)")
+	}
+	if err := m.store.SetSetting(ctx, SettingAdminPasswordHash, mustHash(defaultPassword)); err != nil {
 		return false, err
 	}
+	if !isStrongPassword(defaultPassword) {
+		log.Printf("WARNING: initialized admin password is weak (%d chars); change it via the config UI", len(defaultPassword))
+	}
 	return true, nil
+}
+
+// mustHash bcrypt-hashes a password without enforcing strength rules. It is used
+// only on first initialization so a fresh install can boot with the configured
+// default; SetPassword keeps enforcing strength for user-set passwords.
+func mustHash(plain string) string {
+	hash, err := bcrypt.GenerateFromPassword([]byte(plain), bcrypt.DefaultCost)
+	if err != nil {
+		panic("auth: bcrypt hash failed: " + err.Error())
+	}
+	return string(hash)
 }
 
 // EnsureDefaultToken registers the configured default token on first run so

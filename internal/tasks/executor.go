@@ -301,11 +301,14 @@ func (e *Executor) execute(ctx context.Context, t *store.Task) {
 				d, err := e.decideFailure(c, t.Prompt, errMsg)
 				cancel()
 				if err == nil && d.Action == "retry" {
-					_ = e.store.RetryTask(ctx, t.ID, 60)
-					_ = e.store.UpdateTaskProgress(ctx, t.ID, "llm-retry: "+d.Reason)
-					pushTask("retrying", t)
-					log.Printf("tasks: %s LLM decided to retry after max attempts: %s", t.ID, d.Reason)
-					return
+					if rerr := e.store.RetryTask(ctx, t.ID, 60); rerr != nil {
+						log.Printf("tasks: %s llm retry re-queue failed: %v", t.ID, rerr)
+					} else {
+						_ = e.store.UpdateTaskProgress(ctx, t.ID, "llm-retry: "+d.Reason)
+						pushTask("retrying", t)
+						log.Printf("tasks: %s LLM decided to retry after max attempts: %s", t.ID, d.Reason)
+						return
+					}
 				}
 				if err == nil && d.Reason != "" {
 					errMsg = errMsg + " | " + d.Reason
@@ -592,7 +595,7 @@ func (e *Executor) abortSession(sessionID, directory string) {
 		return
 	}
 	if directory != "" {
-		req.Header.Set("x-starburst-directory", directory)
+		req.Header.Set("x-opencode-directory", directory)
 	}
 	resp, err := e.httpClient.Do(req)
 	if err == nil {

@@ -194,24 +194,27 @@ func (s *sqlStore) FailTask(ctx context.Context, id, errMsg string) error {
 	return err
 }
 
-// RetryTask re-queues a failed task for another attempt, scheduling it at
-// now+backoffSecs so the worker does not claim it again immediately.
-// The next claim counts the new attempt; the attempts field is bumped by
-// ClaimNextTask only, so it reflects the true number of executions.
+// RetryTask re-queues a task for another attempt after backoffSecs, scheduling
+// it at now+backoffSecs so the worker does not claim it again immediately.
+// The status precondition accepts both "failed" (failed by FailTask, then re-run)
+// and "running" (a worker executing this attempt decided to retry), since
+// ClaimNextTask moves the row to running before execution starts. The next claim
+// counts the new attempt; the attempts field is bumped by ClaimNextTask only, so
+// it reflects the true number of executions.
 func (s *sqlStore) RetryTask(ctx context.Context, id string, backoffSecs int) error {
 	var query string
 	if s.driver == "pgx" {
 		query = `
 			UPDATE tasks SET status = ?, error = '', finished_at = NULL,
 				available_at = CURRENT_TIMESTAMP + (? || ' seconds')::interval, updated_at = CURRENT_TIMESTAMP
-			WHERE id = ? AND status = ?`
+			WHERE id = ? AND status IN (?, ?)`
 	} else {
 		query = `
 			UPDATE tasks SET status = ?, error = '', finished_at = NULL,
 				available_at = datetime('now', '+' || ? || ' seconds'), updated_at = CURRENT_TIMESTAMP
-			WHERE id = ? AND status = ?`
+			WHERE id = ? AND status IN (?, ?)`
 	}
-	res, err := s.db.ExecContext(ctx, s.q(query), TaskQueued, itoa(backoffSecs), id, TaskFailed)
+	res, err := s.db.ExecContext(ctx, s.q(query), TaskQueued, itoa(backoffSecs), id, TaskFailed, TaskRunning)
 	if err != nil {
 		return err
 	}

@@ -369,6 +369,8 @@ func dedupPunct(s string) string {
 // the character legitimately reduplicates (看看、慢慢、妈妈) and appears exactly
 // twice. Streaming ASR routinely double-writes ordinary content words (杀杀敌、
 // 发发果、失失朝朝), so a pair is only kept when the character is allow-listed.
+// Only CJK runs are folded: consecutive digits/latin letters (2022, ID, room
+// numbers) carry real meaning and must never be collapsed.
 func dedupRuns(s string) string {
 	runes := []rune(s)
 	if len(runes) == 0 {
@@ -382,7 +384,8 @@ func dedupRuns(s string) string {
 			j++
 		}
 		keep := 1
-		if j-i == 2 && strings.ContainsRune(legalRedup, runes[i]) {
+		if j-i == 2 && runes[i] >= 0x4E00 && runes[i] <= 0x9FFF &&
+			strings.ContainsRune(legalRedup, runes[i]) {
 			keep = 2
 		}
 		for k := 0; k < keep; k++ {
@@ -414,10 +417,10 @@ func dedupAdjacentRepeat(s string) string {
 		return trimmed
 	}
 	if n > dedupScanRunes {
-		// 超长保护：只去重开头 dedupScanRunes 字，剩余部分原样保留（避免 O(n³) 卡死）。
-		trimmed = string(r[:dedupScanRunes])
-		r = []rune(trimmed)
-		n = len(r)
+		// 超长保护：只对开头 dedupScanRunes 字去重，剩余部分原样保留（避免 O(n³) 卡死）。
+		// 前缀去重结果与原尾部直接拼接，绝不丢弃正文。
+		prefix := dedupAdjacentRepeat(string(r[:dedupScanRunes]))
+		return strings.TrimSpace(prefix + string(r[dedupScanRunes:]))
 	}
 	for {
 		bestL, bestI := 0, 0
