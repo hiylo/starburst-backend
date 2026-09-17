@@ -1438,8 +1438,10 @@ function wbItemHtml(it) {
   const id = s.id;
   const title = (s.title || s.slug || id).toString();
   const dir = (s.directory || "").toString();
+  const model = modelId(s.model);
   const metaParts = [];
-  if (s.time && s.time.updated) metaParts.push(new Date(s.time.updated).toLocaleTimeString());
+  if (model) metaParts.push(`<span class="model" title="会话模型">${escapeHtml(model)}</span>`);
+  if (s.time && s.time.updated) metaParts.push(escapeHtml(new Date(s.time.updated).toLocaleTimeString()));
   const q = (it.pending || []).length;
   const pc = (it.permissions || []).length;
   const active = wbSelected === id ? "active" : "";
@@ -1449,7 +1451,7 @@ function wbItemHtml(it) {
   return `<div class="wb-item ${active}" data-sid="${escapeHtml(id)}">
     <div class="t"><span class="dot ${escapeHtml(it.status)}"></span><span class="ttl">${escapeHtml(title)}</span>${newDot}${wrap}</div>
     <div class="dir">${escapeHtml(dir) || "-"}</div>
-    ${metaParts.length ? `<div class="meta">${escapeHtml(metaParts.join(" · "))}</div>` : ""}
+    ${metaParts.length ? `<div class="meta">${metaParts.join(" · ")}</div>` : ""}
   </div>`;
 }
 
@@ -1462,7 +1464,7 @@ function renderWbList() {
   // 内容指纹：状态/排序/关键字/选中项都没变就不重建 DOM，避免滚动条跳动；
   // 选中项必须参与比对，否则点选其他会话时高亮不会更新。
   const sig = filter + "\u0001" + kw + "\u0001" + (wbSelected || "") + "\u0001" + wbItems.map(it =>
-    it.session.id + ":" + it.status + ":" + (it.pending || []).length + ":" + (it.permissions || []).length + ":" + (it.session.time && it.session.time.updated || 0) + ":U" + (wbNewSet.has(it.session.id) ? 1 : 0)
+    it.session.id + ":" + it.status + ":" + (it.pending || []).length + ":" + (it.permissions || []).length + ":" + (it.session.time && it.session.time.updated || 0) + ":M" + modelId(it.session.model) + ":U" + (wbNewSet.has(it.session.id) ? 1 : 0)
   ).join(",");
   if (sig === wbListSig) return;
   wbListSig = sig;
