@@ -460,6 +460,7 @@
                 <button class="intel-tab" data-tab="impact">影响面</button>
                 <button class="intel-tab" data-tab="overview">依赖 / 环境</button>
                 <button class="intel-tab" data-tab="env">环境供给</button>
+                <button class="intel-tab" data-tab="pending">待确认</button>
               </div>
 
               <div class="intel-panel" id="intelPanel-modules">
@@ -526,6 +527,13 @@
                   <button class="ghost sm" onclick="addIntelNode()">新增节点</button>
                 </div>
                 <div id="intelNodeList" style="display:flex;flex-direction:column;gap:var(--sp-sm)"></div>
+              </div>
+              <div class="intel-panel hidden" id="intelPanel-pending">
+                <div class="row" style="justify-content:space-between;align-items:center;margin-bottom:var(--sp-sm)">
+                  <div class="muted" style="font-size:12px">低置信度自动值 / LLM 建议，人工确认后固化为覆写</div>
+                  <button class="ghost sm" onclick="suggestIntelOverride()">AI 建议</button>
+                </div>
+                <div id="intelPendingList" style="display:flex;flex-direction:column;gap:var(--sp-sm)"></div>
               </div>
             </div>
           </div>

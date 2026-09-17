@@ -2276,6 +2276,7 @@ document.addEventListener("DOMContentLoaded", () => {
     features: loadIntelFeatures, cases: loadIntelCases, findings: loadIntelFindings,
     issues: loadIntelIssues, fixes: loadIntelFixes, runs: loadIntelRuns, impact: loadIntelImpact,
     overview: loadIntelOverview, bindings: loadIntelBindings, env: loadIntelEnv,
+    pending: loadIntelPending,
   };
   document.querySelectorAll(".intel-tab").forEach(t => {
     t.addEventListener("click", () => {
@@ -2683,6 +2684,53 @@ async function deleteAIRule(id) {
   if (!confirm("删除该规则？")) return;
   await api("/api/intel/ai-rules/" + id, { method: "DELETE", headers: appHeaders() });
   loadIntelAiRules();
+}
+
+async function loadIntelPending(id) {
+  const wrap = document.getElementById("intelPendingList");
+  if (!wrap) return;
+  wrap.innerHTML = "";
+  const res = await api("/api/intel/pending?projectId=" + id, { headers: appHeaders() });
+  const data = await res.json();
+  const pending = data.pending || [];
+  if (!pending.length) { wrap.innerHTML = `<div class="muted" style="text-align:center;padding:16px">暂无待确认项</div>`; return; }
+  for (const p of pending) {
+    let auto = "";
+    try { const av = JSON.parse(p.autoValueJson || "{}"); auto = JSON.stringify(av); } catch (_) { auto = p.autoValueJson || ""; }
+    wrap.insertAdjacentHTML("beforeend", `<div class="card" style="margin:0">
+      <div class="row" style="justify-content:space-between">
+        <strong style="font-size:13px">${escapeHtml(p.target || "-")} · ${escapeHtml(p.field || "-")}</strong>
+        <span class="badge sev-${p.confidence === "low" ? "high" : "medium"}">${escapeHtml(p.confidence || "medium")}</span>
+      </div>
+      <div class="muted" style="font-size:11px;margin-top:4px">自动值：<span class="mono">${escapeHtml(auto)}</span></div>
+      <div class="row" style="gap:6px;margin-top:8px">
+        <input type="text" id="intelPendingValue-${p.id}" placeholder="人工确认值" style="flex:1" value="${escapeHtml(p.manualValue || "")}">
+        <button class="ghost sm" onclick="confirmIntelPending(${p.id})">确认</button>
+        <button class="tertiary sm" onclick="rejectIntelPending(${p.id})">驳回</button>
+      </div>
+    </div>`);
+  }
+}
+
+async function confirmIntelPending(id) {
+  const value = document.getElementById("intelPendingValue-" + id).value.trim();
+  await api("/api/intel/pending/" + id + "/confirm", { method: "POST", headers: appHeaders(), body: JSON.stringify({ manualValue: value, status: "applied" }) });
+  loadIntelPending(intelCurrentProject);
+}
+
+async function rejectIntelPending(id) {
+  await api("/api/intel/pending/" + id + "/confirm", { method: "POST", headers: appHeaders(), body: JSON.stringify({ status: "rejected" }) });
+  loadIntelPending(intelCurrentProject);
+}
+
+async function suggestIntelOverride() {
+  if (!intelCurrentProject) return;
+  const instruction = prompt("描述校正方向（如：把管理端模块角色标为 admin）", "");
+  if (instruction === null) return;
+  const res = await api("/api/intel/overrides/suggest", { method: "POST", headers: appHeaders(), body: JSON.stringify({ projectId: intelCurrentProject, instruction }) });
+  const data = await res.json();
+  if (!res.ok) { alert(data.error || "建议失败"); return; }
+  alert("AI 建议草稿（仅预览，请人工核对后自行添加覆写）：\n\n" + JSON.stringify(data.drafts || [], null, 2));
 }
 
 async function loadIntelBindings(id) {
