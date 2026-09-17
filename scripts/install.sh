@@ -36,6 +36,7 @@ ADMIN_PASSWORD="${STARBURST_ADMIN_PASSWORD:-}"
 DEFAULT_TOKEN="${STARBURST_DEFAULT_TOKEN:-}"
 WORKERS="${STARBURST_WORKERS:-4}"
 TASK_RETENTION="${STARBURST_TASK_RETENTION:-}"
+VERSION="${STARBURST_VERSION:-}"
 STT_URL="${STARBURST_STT_URL:-}"
 STT_TIMEOUT="${STARBURST_STT_TIMEOUT:-}"
 STT_MAX_CHUNK_BYTES="${STARBURST_STT_MAX_CHUNK_BYTES:-}"
@@ -46,10 +47,10 @@ while [[ $# -gt 0 ]]; do
   case "$opt" in
     -h|--help)
       echo "用法: $0 [--port 18880] [--db sqlite|postgres] [--pg-dsn dsn] [--admin-password pw] [--default-token tok] \\"
-      echo "       [--workers 4] [--task-retention 168h0m] [--prefix /] \\"
+      echo "       [--workers 4] [--task-retention 168h0m] [--prefix /] [--version 1.0.0] \\"
       echo "       [--stt-url http://192.0.2.150:18090] [--stt-timeout 30s] [--stt-max-chunk-bytes 2097152]"
       exit 0 ;;
-    --port|--db|--pg-dsn|--admin-password|--default-token|--workers|--task-retention|--prefix|--stt-url|--stt-timeout|--stt-max-chunk-bytes)
+    --port|--db|--pg-dsn|--admin-password|--default-token|--workers|--task-retention|--prefix|--stt-url|--stt-timeout|--stt-max-chunk-bytes|--version)
       if [[ $# -lt 2 ]]; then
         echo "!! 参数 $opt 需要一个值" >&2
         exit 1
@@ -66,6 +67,7 @@ while [[ $# -gt 0 ]]; do
         --stt-url) STT_URL="$2" ;;
         --stt-timeout) STT_TIMEOUT="$2" ;;
         --stt-max-chunk-bytes) STT_MAX_CHUNK_BYTES="$2" ;;
+        --version) VERSION="$2" ;;
       esac
       shift 2
       ;;
@@ -146,7 +148,15 @@ case "$ARCH" in
   *) echo "!! 不支持的架构: $ARCH" >&2; exit 1 ;;
 esac
 
-BIN_URL="${STARBURST_BIN_URL:-https://github.com/hiylo/starburst-backend/releases/latest/download/starburst-backend-${OS}-${ARCH}}"
+# 二进制版本钉死：显式 STARBURST_BIN_URL 优先；否则 --version 指定时下载对应 tag 的 release
+# （与客户端 BackendGate.REQUIRED_BACKEND_VERSION 一致），未指定则回退 latest。
+if [[ -n "${STARBURST_BIN_URL:-}" ]]; then
+  BIN_URL="$STARBURST_BIN_URL"
+elif [[ -n "$VERSION" ]]; then
+  BIN_URL="https://github.com/hiylo/starburst-backend/releases/download/v${VERSION}/starburst-backend-${OS}-${ARCH}"
+else
+  BIN_URL="https://github.com/hiylo/starburst-backend/releases/latest/download/starburst-backend-${OS}-${ARCH}"
+fi
 if [[ "$SYSTEMD" -eq 1 ]]; then
   INSTALL_DIR="/usr/local/bin"
   CONFIG_DIR="/etc/starburst-backend"
