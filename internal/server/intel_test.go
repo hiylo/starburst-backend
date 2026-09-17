@@ -2487,6 +2487,8 @@ func TestIntelRunRemoteNode(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("remote run status %d: %s", rec.Code, rec.Body.String())
 	}
+	// 异步执行：等待后台任务真正路由到 RunSSH。
+	waitIntelCondition(t, func() bool { return called }, "RunSSH 未在后台任务中被调用")
 	if !called {
 		t.Error("RunSSH was not invoked (run did not route to node)")
 	}
@@ -2499,6 +2501,97 @@ func TestIntelRunRemoteNode(t *testing.T) {
 	}
 	if !strings.Contains(joined, "cd /srv/repos/echo &&") {
 		t.Errorf("ssh args missing workDir cd: %v", sshArgs)
+	}
+}
+
+// TestIntelRunCancel verifies a running test run can be cancelled: the async
+// executor registers a cancel func per run, and POST .../cancel aborts it,
+// driving the run to a terminal state.
+func TestIntelRunCancel(t *testing.T) {
+	s := newTestServer(t)
+	wh := loginWeb(t, s)
+
+	// A reachable node target (keeps reachable=true).
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	port := ln.Addr().(*net.TCPAddr).Port
+
+	root := t.TempDir()
+	writeTestFile(t, filepath.Join(root, "go.mod"), "module demo\n\ngo 1.22\n")
+	writeTestFile(t, filepath.Join(root, "main.go"), "package main\nfunc main() {}\n")
+
+	rec := s.do(t, http.MethodPost, "/api/intel/projects",
+		`{"name":"demo","source":"local","localPath":"`+filepath.ToSlash(root)+`"}`, wh)
+	var proj struct {
+		ID int64 `json:"id"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &proj); err != nil || proj.ID == 0 {
+		t.Fatalf("create project: %s", rec.Body.String())
+	}
+	rec = s.do(t, http.MethodPost, "/api/intel/analyze",
+		`{"projectId":`+jsonInt(proj.ID)+`}`, wh)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("analyze status %d: %s", rec.Code, rec.Body.String())
+	}
+	rec = s.do(t, http.MethodPost, "/api/intel/nodes",
+		`{"name":"go-runner","host":"127.0.0.1","port":`+jsonInt(int64(port))+`,"capabilities":"linux-docker","workDir":"/srv/repos/echo"}`, wh)
+	var node struct {
+		Node struct {
+			ID int64 `json:"id"`
+		} `json:"node"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &node); err != nil || node.Node.ID == 0 {
+		t.Fatalf("create node: %s", rec.Body.String())
+	}
+
+	// RunSSH blocks until its ctx is cancelled, letting us cancel mid-run.
+	old := envagent.RunSSH
+	defer func() { envagent.RunSSH = old }()
+	envagent.RunSSH = func(ctx context.Context, args ...string) (string, error) {
+		<-ctx.Done()
+		return "", ctx.Err()
+	}
+
+	rec = s.do(t, http.MethodPost, "/api/intel/run",
+		`{"projectId":`+jsonInt(proj.ID)+`,"node":`+jsonInt(node.Node.ID)+`}`, wh)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("run status %d: %s", rec.Code, rec.Body.String())
+	}
+	var enq struct {
+		Run struct {
+			ID int64 `json:"id"`
+		} `json:"run"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &enq); err != nil || enq.Run.ID == 0 {
+		t.Fatalf("run enqueue parse: %s", rec.Body.String())
+	}
+	// 等 run 进入 running（cancel 注册完成）再取消。
+	waitIntelCondition(t, func() bool {
+		rec := s.do(t, http.MethodGet, "/api/intel/runs/"+jsonInt(enq.Run.ID), "", wh)
+		var resp struct {
+			Run struct {
+				Status string `json:"status"`
+			} `json:"run"`
+		}
+		_ = json.Unmarshal(rec.Body.Bytes(), &resp)
+		return resp.Run.Status == "running"
+	}, "run 未进入 running 状态")
+
+	rec = s.do(t, http.MethodPost, "/api/intel/runs/"+jsonInt(enq.Run.ID)+"/cancel", "", wh)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("cancel status %d: %s", rec.Code, rec.Body.String())
+	}
+	status := waitIntelRunFinished(t, s, wh, enq.Run.ID)
+	if status != "failed" {
+		t.Fatalf("cancelled run status = %q, want failed", status)
+	}
+	// 已结束的 run 再次取消应 404。
+	rec = s.do(t, http.MethodPost, "/api/intel/runs/"+jsonInt(enq.Run.ID)+"/cancel", "", wh)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("re-cancel status %d, want 404", rec.Code)
 	}
 }
 
@@ -2704,21 +2797,39 @@ func TestIntelRunAll(t *testing.T) {
 		t.Fatalf("run-all status %d: %s", rec.Code, rec.Body.String())
 	}
 	var resp struct {
+		Run struct {
+			ID int64 `json:"id"`
+		} `json:"run"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil || resp.Run.ID == 0 {
+		t.Fatalf("run-all parse: %s", rec.Body.String())
+	}
+	// 异步聚合执行：等待 run 进入终态，再拉 runs 列表校验模块级状态。
+	status := waitIntelRunFinished(t, s, wh, resp.Run.ID)
+	if status != "passed" {
+		t.Fatalf("run-all status = %q, want passed", status)
+	}
+	rec = s.do(t, http.MethodGet, "/api/intel/runs?projectId="+jsonInt(proj.ID), "", wh)
+	var runs struct {
 		Runs []struct {
+			Scope  string `json:"scope"`
 			Status string `json:"status"`
 		} `json:"runs"`
-		Total  int `json:"total"`
-		Passed int `json:"passed"`
-		Failed int `json:"failed"`
 	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("run-all parse: %v", err)
+	if err := json.Unmarshal(rec.Body.Bytes(), &runs); err != nil {
+		t.Fatalf("runs parse: %v", err)
 	}
-	if resp.Total != 1 || len(resp.Runs) != 1 {
-		t.Fatalf("run-all total/runs = %d/%d, want 1/1", resp.Total, len(resp.Runs))
+	moduleRuns := 0
+	for _, r := range runs.Runs {
+		if r.Scope == "module" {
+			moduleRuns++
+			if r.Status != "passed" {
+				t.Errorf("module run status = %q, want passed", r.Status)
+			}
+		}
 	}
-	if resp.Passed != 1 || resp.Failed != 0 {
-		t.Errorf("run-all passed/failed = %d/%d, want 1/0", resp.Passed, resp.Failed)
+	if moduleRuns != 1 {
+		t.Errorf("module runs = %d, want 1", moduleRuns)
 	}
 }
 
@@ -2945,6 +3056,46 @@ func gitRun(t *testing.T, dir string, args ...string) {
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("git %v: %v: %s", args, err, out)
 	}
+}
+
+// waitIntelRunFinished polls a run until it leaves "queued"/"running" and
+// returns the final status. Async runs execute in the background, so tests that
+// exercise /api/intel/run must wait for the terminal state.
+func waitIntelRunFinished(t *testing.T, s *Server, wh map[string]string, runID int64) string {
+	t.Helper()
+	deadline := time.Now().Add(20 * time.Second)
+	status := ""
+	for time.Now().Before(deadline) {
+		rec := s.do(t, http.MethodGet, "/api/intel/runs/"+jsonInt(runID), "", wh)
+		if rec.Code == http.StatusOK {
+			var resp struct {
+				Run struct {
+					Status string `json:"status"`
+				} `json:"run"`
+			}
+			_ = json.Unmarshal(rec.Body.Bytes(), &resp)
+			status = resp.Run.Status
+			if status == "passed" || status == "failed" || status == "error" {
+				return status
+			}
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatalf("run %d not finished within 20s (last status %q)", runID, status)
+	return status
+}
+
+// waitIntelCondition polls until fn returns true or the deadline elapses.
+func waitIntelCondition(t *testing.T, fn func() bool, msg string) {
+	t.Helper()
+	deadline := time.Now().Add(20 * time.Second)
+	for time.Now().Before(deadline) {
+		if fn() {
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatalf("condition not met within 20s: %s", msg)
 }
 
 // loginWeb logs in as the web admin and returns the auth header map.

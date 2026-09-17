@@ -383,10 +383,14 @@ func dedupRuns(s string) string {
 		for j < len(runes) && runes[j] == runes[i] {
 			j++
 		}
-		keep := 1
-		if j-i == 2 && runes[i] >= 0x4E00 && runes[i] <= 0x9FFF &&
-			strings.ContainsRune(legalRedup, runes[i]) {
-			keep = 2
+		keep := j - i
+		// 只有 CJK 合法叠词（人人/常常…）折叠成 2 个；连续数字/拉丁字母
+		//（2022、ID、room 号）携带真实含义，一个都不能折叠。
+		if j-i > 1 && runes[i] >= 0x4E00 && runes[i] <= 0x9FFF {
+			keep = 1
+			if j-i == 2 && strings.ContainsRune(legalRedup, runes[i]) {
+				keep = 2
+			}
 		}
 		for k := 0; k < keep; k++ {
 			out = append(out, runes[i])

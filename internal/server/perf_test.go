@@ -26,19 +26,36 @@ func TestDedupAdjacentRepeatPerformance(t *testing.T) {
 	}
 }
 
-// TestDedupAdjacentRepeatTruncatesLongText verifies the scan cap.
+// TestDedupAdjacentRepeatTruncatesLongText verifies the scan cap: the O(n³)
+// scan is bounded to the prefix window, and the tail beyond the window passes
+// through unchanged (never dropped, never rescanned).
 func TestDedupAdjacentRepeatTruncatesLongText(t *testing.T) {
 	var sb strings.Builder
 	for i := 0; i < 500; i++ {
 		sb.WriteString("今天我们一起去超市买东西然后回家做饭")
 	}
 	long := sb.String()
-	if len([]rune(long)) <= dedupScanRunes {
-		t.Fatalf("test input too short: %d", len([]rune(long)))
+	runes := []rune(long)
+	inLen := len(runes)
+	if inLen <= dedupScanRunes {
+		t.Fatalf("test input too short: %d", inLen)
 	}
+	tailLen := inLen - dedupScanRunes
+	start := time.Now()
 	out := dedupAdjacentRepeat(long)
-	// 输出不应超过 dedupScanRunes + 一些边距
-	if len([]rune(out)) > dedupScanRunes+10 {
-		t.Fatalf("output too long: %d", len([]rune(out)))
+	elapsed := time.Since(start)
+	outLen := len([]rune(out))
+	// 扫描窗口外的正文必须原样保留：输出 ≥ 窗口后尾部长度。
+	if outLen < tailLen {
+		t.Fatalf("output length = %d, want >= tail %d (扫描窗口外正文被截断)", outLen, tailLen)
+	}
+	// 输入里是 15 字完整句子重复，前缀窗口（2000 字）应被折叠到很短，
+	// 因此输出应明显小于原长——证明窗口确实执行了去重。
+	if outLen >= inLen {
+		t.Fatalf("output length = %d, want < %d (扫描窗口未去重)", outLen, inLen)
+	}
+	// 扫描窗口去重必须快速完成（O(n³) 上限防护）。
+	if elapsed > 500*time.Millisecond {
+		t.Fatalf("dedupAdjacentRepeat took %v, want < 500ms", elapsed)
 	}
 }
