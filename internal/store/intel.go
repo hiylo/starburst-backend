@@ -208,11 +208,11 @@ func (s *sqlStore) ReplaceIntelModules(ctx context.Context, projectID int64, mod
 	}
 	for _, m := range mods {
 		if _, err := s.db.ExecContext(ctx, s.q(`
-		INSERT INTO project_modules (project_id, rel_path, kind_type, kind_role, build_tool,
-			commands_json, summary, last_tested_sha, analyzed_at, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`),
+			INSERT INTO project_modules (project_id, rel_path, kind_type, kind_role, build_tool,
+				commands_json, summary, last_tested_sha, analyzed_at, created_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`),
 			projectID, m.RelPath, m.KindType, m.KindRole, m.BuildTool,
-			m.CommandsJSON, m.Summary, m.LastTestedSHA, m.AnalyzedAt); err != nil {
+			m.CommandsJSON, m.Summary, m.LastTestedSHA); err != nil {
 			return err
 		}
 	}

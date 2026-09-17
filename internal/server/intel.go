@@ -673,10 +673,6 @@ func (s *Server) runIntelAnalyze(ctx context.Context, projectID int64) error {
 	if err != nil {
 		return err
 	}
-	now := time.Now()
-	for _, m := range mods {
-		m.AnalyzedAt = &now
-	}
 	if err := s.store.ReplaceIntelModules(ctx, projectID, mods); err != nil {
 		return err
 	}
