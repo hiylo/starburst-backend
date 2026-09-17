@@ -142,3 +142,66 @@ public class ActivityDto {
 		t.Fatalf("got %d fields, want 2: %+v", len(fields), fields)
 	}
 }
+
+func TestGraphQLMappingAt(t *testing.T) {
+	cases := []struct {
+		in     string
+		verb   string
+		name   string
+		found  bool
+	}{
+		{"@QueryMapping", "Query", "", true},
+		{"@MutationMapping(name = \"createActivity\")", "Mutation", "createActivity", true},
+		{"@SubscriptionMapping(\"activityFeed\")", "Subscription", "activityFeed", true},
+		{"@GetMapping(\"/x\")", "", "", false},
+	}
+	for _, c := range cases {
+		verb, name, ok := graphQLMappingAt(c.in)
+		if ok != c.found || verb != c.verb || name != c.name {
+			t.Errorf("graphQLMappingAt(%q) = (%q,%q,%v), want (%q,%q,%v)",
+				c.in, verb, name, ok, c.verb, c.name, c.found)
+		}
+	}
+}
+
+func TestScanGraphQLOps(t *testing.T) {
+	root := t.TempDir()
+	writeTree(t, root, map[string]string{
+		"src/main/java/com/echo/bff/ActivityController.java": `package com.echo.bff;
+import org.springframework.graphql.data.method.annotation.*;
+import com.echo.dto.ActivityDto;
+import java.util.List;
+@Controller
+public class ActivityController {
+    @QueryMapping
+    public List<ActivityDto> activities(@Argument String keyword) { return null; }
+    @MutationMapping(name = "createActivity")
+    public ActivityDto create(@Argument String title) { return null; }
+}`,
+		"src/main/java/com/echo/dto/ActivityDto.java": `package com.echo.dto;
+public class ActivityDto {
+    private Long id;
+    private String title;
+}`,
+	})
+	idx := map[string]string{
+		"com.echo.dto.ActivityDto": filepath.Join(root, "src/main/java/com/echo/dto/ActivityDto.java"),
+	}
+	lines, err := readLines(filepath.Join(root, "src/main/java/com/echo/bff/ActivityController.java"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ops := scanGraphQLOps("ActivityController.java", lines, idx)
+	if len(ops) != 2 {
+		t.Fatalf("got %d graphql ops, want 2: %+v", len(ops), ops)
+	}
+	if ops[0].Method != "QUERY" || ops[0].Path != "activities" {
+		t.Errorf("op0 = %s %s, want QUERY activities", ops[0].Method, ops[0].Path)
+	}
+	if ops[1].Method != "MUTATION" || ops[1].Path != "createActivity" {
+		t.Errorf("op1 = %s %s, want MUTATION createActivity", ops[1].Method, ops[1].Path)
+	}
+	if ops[0].FieldsJSON == "" {
+		t.Error("op0 fieldsJson is empty, expected ActivityDto fields")
+	}
+}

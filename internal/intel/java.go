@@ -39,6 +39,8 @@ var (
 	rePathVariable    = regexp.MustCompile(`@PathVariable(?:\(\s*(?:value\s*=\s*|name\s*=\s*)?"([^"]*)")?\s*([A-Za-z0-9_<>,\[\]\.]+)\s+([A-Za-z0-9_]+)`)
 	reRequestParam    = regexp.MustCompile(`@RequestParam(?:\(\s*(?:value\s*=\s*|name\s*=\s*)?"([^"]*)"[^)]*\))?\s*([A-Za-z0-9_<>,\[\]\.]+)\s+([A-Za-z0-9_]+)`)
 	reRequestRequired = regexp.MustCompile(`required\s*=\s*false`)
+	reGraphQLMapping   = regexp.MustCompile(`@(Query|Mutation|Subscription)Mapping(?:\s*\(\s*(?:(?:name|value)\s*=\s*)?["']?([^"')\s]+)["']?\s*\))?`)
+	reGraphQLArgument  = regexp.MustCompile(`@Argument(?:\s*\(\s*(?:name\s*=\s*)?["']?([^"'),]*)["']?\s*\))?\s*([A-Za-z0-9_<>,\[\]\.]+)\s+([A-Za-z0-9_]+)`)
 )
 
 // scanJavaFiles scans a set of .java files and returns the extracted entity
@@ -250,6 +252,8 @@ func scanController(file string, lines []string, idx map[string]string) []*store
 	}
 	// Resolve endpoints inherited from implemented Feign provider interfaces.
 	out = append(out, resolveInterfaceEndpoints(lines, idx)...)
+	// GraphQL operations declared via @QueryMapping/@MutationMapping (BFF layer).
+	out = append(out, scanGraphQLOps(file, lines, idx)...)
 	return out
 }
 
@@ -313,6 +317,71 @@ func resolveInterfaceEndpoints(lines []string, idx map[string]string) []*store.I
 		}
 	}
 	return out
+}
+
+// scanGraphQLOps extracts Spring GraphQL operation contracts from a @Controller:
+// @QueryMapping / @MutationMapping / @SubscriptionMapping methods become
+// endpoints with Method = QUERY/MUTATION/SUBSCRIPTION and Path = the GraphQL
+// field name (annotation name, falling back to the method name).
+func scanGraphQLOps(file string, lines []string, idx map[string]string) []*store.IntelEndpoint {
+	out := make([]*store.IntelEndpoint, 0)
+	for i, l := range lines {
+		verb, name, ok := graphQLMappingAt(l)
+		if !ok {
+			continue
+		}
+		respType, methodName, _ := methodReturnAt(lines, i)
+		if name == "" {
+			name = methodName
+		}
+		out = append(out, &store.IntelEndpoint{
+			Method:       strings.ToUpper(verb),
+			Path:         name,
+			ResponseType: respType,
+			RequestJSON:  extractGraphQLArgs(lines, i),
+			FieldsJSON:   resolveResponseFields(respType, lines, idx),
+			SourceFile:   file,
+			SourceLine:   i + 1,
+		})
+	}
+	return out
+}
+
+// graphQLMappingAt recognizes a Spring GraphQL operation mapping annotation on a
+// line, returning the verb (Query/Mutation/Subscription) and the declared field
+// name ("" when absent so the caller falls back to the method name).
+func graphQLMappingAt(l string) (string, string, bool) {
+	m := reGraphQLMapping.FindStringSubmatch(l)
+	if m == nil {
+		return "", "", false
+	}
+	return m[1], m[2], true
+}
+
+// extractGraphQLArgs scans the method signature following a GraphQL mapping for
+// @Argument parameters and renders a JSON request contract.
+func extractGraphQLArgs(lines []string, start int) string {
+	end := start + 9
+	if end > len(lines) {
+		end = len(lines)
+	}
+	window := strings.Join(lines[start:end], "\n")
+	params := make([]paramInfo, 0)
+	for _, m := range reGraphQLArgument.FindAllStringSubmatch(window, -1) {
+		name := m[1]
+		if name == "" {
+			name = m[3]
+		}
+		params = append(params, paramInfo{Name: name, Type: m[2], Source: "arg", Required: true})
+	}
+	if len(params) == 0 {
+		return ""
+	}
+	b, err := json.Marshal(map[string]any{"params": params})
+	if err != nil {
+		return ""
+	}
+	return string(b)
 }
 
 // packageOf extracts the package declaration of a Java file.
