@@ -295,6 +295,7 @@ func (s *Server) runIntelTests(ctx context.Context, projectID, moduleID int64) (
 	}
 
 	results := parseReport(reportKind, dir, output)
+	flakyRetry(ctx, dir, reportKind, results)
 	if err := s.store.AddIntelTestResults(ctx, results); err != nil {
 		return nil, err
 	}
@@ -382,6 +383,71 @@ func hasTestIntent(argv []string) bool {
 		}
 	}
 	return false
+}
+
+// runCmd is the process runner used by the test flow (overridable in tests to
+// stub the flaky-retry re-run).
+var runCmd = runCommand
+
+// flakyRetryMaxRetries is the fixed re-run budget for flaky detection: a case
+// that fails on the first run but passes on a bounded retry is marked flaky
+// (still recorded as passed) instead of becoming a bug issue.
+const flakyRetryMaxRetries = 1
+
+// flakyRetry re-runs the failed Go tests once (bounded by filter) and marks the
+// results that then pass as flaky. Non-Go report kinds and build failures abort
+// the retry deterministically (no unbounded re-execution).
+func flakyRetry(ctx context.Context, dir, reportKind string, results []*store.TestResult) {
+	if reportKind != "go" {
+		return
+	}
+	failed := make([]*store.TestResult, 0)
+	seen := map[string]bool{}
+	names := make([]string, 0)
+	for _, r := range results {
+		if r == nil || r.Passed {
+			continue
+		}
+		failed = append(failed, r)
+		n := strings.TrimPrefix(r.Endpoint, ".")
+		if n != "" && !seen[n] {
+			seen[n] = true
+			names = append(names, n)
+		}
+	}
+	if len(failed) == 0 || len(names) == 0 {
+		return
+	}
+	filter := "^(" + strings.Join(names, "|") + ")$"
+	for attempt := 0; attempt < flakyRetryMaxRetries; attempt++ {
+		out, err := runCmd(ctx, dir, "go", "test", "-count=1", "-run", filter, "./...")
+		if err != nil {
+			return // build/test command failure aborts flaky retry
+		}
+		rerun := parseReport("go", dir, out)
+		passed := map[string]bool{}
+		for _, r := range rerun {
+			if r != nil && r.Passed {
+				passed[strings.TrimPrefix(r.Endpoint, ".")] = true
+			}
+		}
+		changed := false
+		for _, r := range failed {
+			n := strings.TrimPrefix(r.Endpoint, ".")
+			if !passed[n] {
+				continue
+			}
+			r.Passed = true
+			r.FailuresJSON = encodeJSON(map[string]any{
+				"flaky": true,
+				"note":  fmt.Sprintf("首次失败，重跑通过（固定重试预算 %d 次）", flakyRetryMaxRetries),
+			})
+			changed = true
+		}
+		if changed {
+			return
+		}
+	}
 }
 
 // runCommand runs an executable with a bounded timeout and returns stdout.

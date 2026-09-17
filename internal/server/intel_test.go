@@ -1910,6 +1910,63 @@ func TestIntelEnvToolchainInstall(t *testing.T) {
 	}
 }
 
+// TestFlakyRetry verifies the deterministic flaky governance: a failed Go case
+// that passes on the bounded retry is marked flaky (recorded as passed) and is
+// not turned into a bug; a still-failing rerun keeps it failed.
+func TestFlakyRetry(t *testing.T) {
+	old := runCmd
+	defer func() { runCmd = old }()
+
+	// Rerun passes -> flaky.
+	calls := 0
+	runCmd = func(ctx context.Context, dir, name string, args ...string) ([]byte, error) {
+		calls++
+		return []byte(`{"Action":"pass","Test":"TestFoo","Package":"pkg","Elapsed":0.01}
+{"Action":"pass","Test":"TestBar","Package":"pkg","Elapsed":0.02}
+`), nil
+	}
+	results := []*store.TestResult{
+		{Endpoint: ".TestFoo", Kind: "go", Passed: false, FailuresJSON: `{"error":"x"}`},
+		{Endpoint: ".TestBar", Kind: "go", Passed: false, FailuresJSON: `{"error":"y"}`},
+		{Endpoint: ".TestOk", Kind: "go", Passed: true},
+	}
+	flakyRetry(context.Background(), "/tmp", "go", results)
+	if calls != 1 {
+		t.Fatalf("rerun calls = %d, want 1", calls)
+	}
+	if !results[0].Passed {
+		t.Error("TestFoo should be marked flaky-passed")
+	}
+	if !results[1].Passed {
+		t.Error("TestBar should be marked flaky-passed")
+	}
+	if !strings.Contains(results[0].FailuresJSON, "flaky") {
+		t.Errorf("flaky marker missing: %s", results[0].FailuresJSON)
+	}
+	if !results[2].Passed {
+		t.Error("passing case must stay passed")
+	}
+
+	// Non-Go report kinds never re-execute.
+	calls = 0
+	flakyRetry(context.Background(), "/tmp", "surefire", results)
+	if calls != 0 {
+		t.Errorf("surefire triggered rerun (%d calls)", calls)
+	}
+
+	// Rerun still fails -> stays failed.
+	runCmd = func(ctx context.Context, dir, name string, args ...string) ([]byte, error) {
+		calls++
+		return []byte(`{"Action":"fail","Test":"TestFoo","Package":"pkg","Output":"boom"}
+`), nil
+	}
+	results2 := []*store.TestResult{{Endpoint: ".TestFoo", Kind: "go", Passed: false}}
+	flakyRetry(context.Background(), "/tmp", "go", results2)
+	if results2[0].Passed {
+		t.Error("still-failing case must stay failed")
+	}
+}
+
 func gitRun(t *testing.T, dir string, args ...string) {
 	t.Helper()
 	cmd := exec.Command("git", args...)
