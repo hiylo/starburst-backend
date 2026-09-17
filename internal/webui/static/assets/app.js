@@ -105,7 +105,7 @@ function switchPage(name) {
   else if (name === "archives") { loadArchives(); loadArchiveSessions(); }
   else if (name === "audit") loadAudit();
   else if (name === "tokens") { loadTokens(); loadTokenUsage(); }
-  else if (name === "settings") { loadLLMConfig(); loadEmbedConfig(); }
+  else if (name === "settings") { loadLLMConfig(); loadEmbedConfig(); loadIntelAiRules(); }
   else if (name === "stream") ensureStream();
   else if (name === "intel") loadIntelProjects();
 }
@@ -2637,6 +2637,53 @@ async function checkIntelContract() {
 
 /* ---------- 分析结果 Tab：功能点 / 用例 / 审计 / 问题 / 修复 / 运行 ---------- */
 const SEV_LABELS = { critical: "严重", high: "高", medium: "中", low: "低" };
+
+async function loadIntelAiRules() {
+  const res = await api("/api/intel/ai-rules", { headers: appHeaders() });
+  const data = await res.json();
+  const wrap = document.getElementById("aiRuleList");
+  if (!wrap) return;
+  wrap.innerHTML = "";
+  for (const r of data.rules || []) {
+    wrap.insertAdjacentHTML("beforeend", `<div class="row" style="justify-content:space-between;gap:8px;padding:6px;border:1px solid var(--hairline);border-radius:var(--r-sm)">
+      <div style="flex:1;min-width:0">
+        <strong style="font-size:13px">${escapeHtml(r.name || "-")}</strong>
+        <div class="muted clip" style="font-size:11px;margin-top:2px" title="${escapeHtml(r.prompt || "")}">${escapeHtml((r.prompt || "").slice(0, 80))}</div>
+        <div class="muted" style="font-size:10px;margin-top:2px">${escapeHtml(r.target || "-")} · ${escapeHtml(r.severity || "-")} · ${r.enabled ? "启用" : "停用"}</div>
+      </div>
+      <div class="row" style="gap:4px">
+        <button class="ghost sm" onclick="toggleAIRule(${r.id}, ${r.enabled})">${r.enabled ? "停用" : "启用"}</button>
+        <button class="ghost sm" onclick="deleteAIRule(${r.id})">删除</button>
+      </div>
+    </div>`);
+  }
+  if (!(data.rules || []).length) wrap.innerHTML = `<div class="muted" style="font-size:12px">暂无规则（新增后可在项目详情扫描）</div>`;
+}
+
+async function createAIRule() {
+  const name = document.getElementById("aiRuleName").value.trim();
+  const prompt = document.getElementById("aiRulePrompt").value.trim();
+  const msg = document.getElementById("aiRuleMsg");
+  if (!name || !prompt) { msg.textContent = "请填写名称与提示词"; return; }
+  const res = await api("/api/intel/ai-rules", { method: "POST", headers: appHeaders(), body: JSON.stringify({ name, prompt }) });
+  const data = await res.json();
+  if (!res.ok) { msg.textContent = data.error || "新增失败"; return; }
+  document.getElementById("aiRuleName").value = "";
+  document.getElementById("aiRulePrompt").value = "";
+  msg.textContent = "已新增";
+  loadIntelAiRules();
+}
+
+async function toggleAIRule(id, enabled) {
+  await api("/api/intel/ai-rules/" + id, { method: "PUT", headers: appHeaders(), body: JSON.stringify({ enabled: !enabled }) });
+  loadIntelAiRules();
+}
+
+async function deleteAIRule(id) {
+  if (!confirm("删除该规则？")) return;
+  await api("/api/intel/ai-rules/" + id, { method: "DELETE", headers: appHeaders() });
+  loadIntelAiRules();
+}
 
 async function loadIntelBindings(id) {
   const [aRes, wRes, iRes] = await Promise.all([
