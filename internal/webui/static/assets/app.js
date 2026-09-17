@@ -3316,6 +3316,7 @@ async function loadIntelFeatures(id) {
           <span class="muted" style="font-size:12px">涉及端 ${endBadges}</span>
           <button class="ghost sm" onclick="testIntelFeature(${f.id})">单测</button>
           <button class="ghost sm" onclick="chatIntelFeature(${f.id})">对话</button>
+          <button class="ghost sm" onclick="historyIntelFeatureChat(${f.id})">历史</button>
         </div>
       </div>
       <div id="intelFeatureResult-${f.id}" class="muted" style="font-size:12px;margin-top:6px"></div>
@@ -3354,6 +3355,22 @@ async function chatIntelFeature(featureId) {
       <div class="muted" style="font-size:11px;margin-bottom:4px">Q：${escapeHtml(chat.question || q)}</div>
       <div class="mono" style="font-size:12px">${escapeHtml(chat.answer || "（无回答）")}</div>
     </div>`;
+}
+
+async function historyIntelFeatureChat(featureId) {
+  const box = document.getElementById("intelFeatureResult-" + featureId);
+  if (box) box.textContent = "加载历史…";
+  const res = await api("/api/intel/features/" + featureId + "/chats?projectId=" + intelCurrentProject, { headers: appHeaders() });
+  const data = await res.json();
+  if (!res.ok) { if (box) box.textContent = data.error || "加载失败"; return; }
+  const chats = data.chats || [];
+  if (!chats.length) { if (box) box.innerHTML = `<span class="muted" style="font-size:12px">暂无对话记录</span>`; return; }
+  const rows = chats.map(c => `<div style="padding:6px 0;border-bottom:1px solid var(--hairline)">
+      <div class="muted" style="font-size:11px">${new Date(c.createdAt).toLocaleString()}</div>
+      <div class="mono" style="font-size:12px;margin-top:2px">Q：${escapeHtml(c.question || "")}</div>
+      <div class="mono muted" style="font-size:11px;margin-top:2px">A：${escapeHtml(c.answer || "")}</div>
+    </div>`).join("");
+  if (box) box.innerHTML = `<div style="max-height:220px;overflow:auto">${rows}</div>`;
 }
 
 async function loadIntelCases(id) {
