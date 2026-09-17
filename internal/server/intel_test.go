@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/hiylo/starburst-backend/internal/intel/envagent"
 )
 
 // TestIntelFlow verifies M1 acceptance end-to-end through the HTTP API:
@@ -852,6 +854,179 @@ struct PostCardView: View {
 	if got["post.coverURL"] != "image" {
 		t.Errorf("post.coverURL slot = %q, want image", got["post.coverURL"])
 	}
+}
+
+// TestIntelEnvEnsureAndInstall verifies the environment layer: requirements are
+// detected during analyze, ensure probes each one (with a stubbed docker), and
+// a one-click install provisions a middleware container and flips it to ready.
+func TestIntelEnvEnsureAndInstall(t *testing.T) {
+	s := newTestServer(t)
+	wh := loginWeb(t, s)
+
+	root := t.TempDir()
+	writeTestFile(t, filepath.Join(root, "pom.xml"), `<project>
+  <properties><java.version>17</java.version></properties>
+  <dependencies>
+    <dependency><groupId>com.mysql</groupId><artifactId>mysql-connector-j</artifactId><version>8.0.33</version></dependency>
+    <dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-data-redis</artifactId><version>3.2.0</version></dependency>
+  </dependencies>
+</project>`)
+
+	rec := s.do(t, http.MethodPost, "/api/intel/projects",
+		`{"name":"demo","source":"local","localPath":"`+filepath.ToSlash(root)+`"}`, wh)
+	var proj struct {
+		ID int64 `json:"id"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &proj); err != nil || proj.ID == 0 {
+		t.Fatalf("create project: %s", rec.Body.String())
+	}
+	pid := proj.ID
+
+	rec = s.do(t, http.MethodPost, "/api/intel/analyze",
+		`{"projectId":`+jsonInt(pid)+`}`, wh)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("analyze status %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// Stub docker: daemon reachable, no containers running initially.
+	old := envagent.RunDocker
+	defer func() { envagent.RunDocker = old }()
+	oldRetries := envagent.ProvisionWaitRetries
+	envagent.ProvisionWaitRetries = 2
+	defer func() { envagent.ProvisionWaitRetries = oldRetries }()
+	running := map[string]bool{}
+	envagent.RunDocker = func(ctx context.Context, args ...string) (string, error) {
+		if len(args) == 0 {
+			return "", nil
+		}
+		switch args[0] {
+		case "info":
+			return "24.0.0", nil
+		case "ps":
+			name := dockerFilterName(args)
+			if name != "" && running[name] {
+				return name, nil
+			}
+			return "", nil
+		case "run":
+			name := dockerRunName(args)
+			running[name] = true
+			return "abc123def456", nil
+		case "rm":
+			delete(running, args[len(args)-1])
+			return "", nil
+		}
+		return "", nil
+	}
+
+	rec = s.do(t, http.MethodPost, "/api/intel/env/ensure",
+		`{"projectId":`+jsonInt(pid)+`}`, wh)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("ensure status %d: %s", rec.Code, rec.Body.String())
+	}
+	var envResp struct {
+		Services []struct {
+			Service  string `json:"service"`
+			Category string `json:"category"`
+			Status   string `json:"status"`
+			Provider string `json:"provider"`
+		} `json:"services"`
+		DockerReady bool `json:"dockerReady"`
+		Ready       int  `json:"ready"`
+		Missing     int  `json:"missing"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &envResp); err != nil {
+		t.Fatalf("ensure parse: %v", err)
+	}
+	if !envResp.DockerReady {
+		t.Error("dockerReady should be true with stubbed docker")
+	}
+	status := map[string]string{}
+	for _, svc := range envResp.Services {
+		status[svc.Service+"|"+svc.Category] = svc.Status
+	}
+	if status["mysql|middleware"] != "missing" {
+		t.Errorf("mysql status = %q, want missing (docker up, no container)", status["mysql|middleware"])
+	}
+	if status["redis|middleware"] != "missing" {
+		t.Errorf("redis status = %q, want missing", status["redis|middleware"])
+	}
+	if status["jdk|toolchain"] != "" && status["jdk|toolchain"] == "missing" && envResp.Missing == 0 {
+		t.Errorf("unexpected missing tally: %+v", envResp)
+	}
+
+	// One-click install mysql -> container "runs", probe flips to ready.
+	rec = s.do(t, http.MethodPost, "/api/intel/env/install",
+		`{"projectId":`+jsonInt(pid)+`,"service":"mysql"}`, wh)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("install status %d: %s", rec.Code, rec.Body.String())
+	}
+	var installResp struct {
+		Service struct {
+			Service       string `json:"service"`
+			Status        string `json:"status"`
+			Provider      string `json:"provider"`
+			Port          int    `json:"port"`
+			ContainerName string `json:"containerName"`
+		} `json:"service"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &installResp); err != nil {
+		t.Fatalf("install parse: %v", err)
+	}
+	if installResp.Service.Status != "ready" {
+		t.Errorf("post-install mysql status = %q, want ready", installResp.Service.Status)
+	}
+	if installResp.Service.Provider != "container" {
+		t.Errorf("mysql provider = %q, want container", installResp.Service.Provider)
+	}
+	if installResp.Service.Port != 3306 {
+		t.Errorf("mysql port = %d, want 3306", installResp.Service.Port)
+	}
+
+	// Stop -> back to missing.
+	rec = s.do(t, http.MethodPost, "/api/intel/env/stop",
+		`{"projectId":`+jsonInt(pid)+`,"service":"mysql"}`, wh)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("stop status %d: %s", rec.Code, rec.Body.String())
+	}
+	rec = s.do(t, http.MethodGet, "/api/intel/env/status?projectId="+jsonInt(pid), "", wh)
+	var statusResp struct {
+		Services []struct {
+			Service string `json:"service"`
+			Status  string `json:"status"`
+		} `json:"services"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &statusResp); err != nil {
+		t.Fatalf("status parse: %v", err)
+	}
+	for _, svc := range statusResp.Services {
+		if svc.Service == "mysql" && svc.Status != "missing" {
+			t.Errorf("mysql status after stop = %q, want missing", svc.Status)
+		}
+	}
+}
+
+// dockerFilterName extracts "name" from docker ps filter arg "name=^/name$".
+func dockerFilterName(args []string) string {
+	for _, a := range args {
+		if strings.HasPrefix(a, "name=^/") && strings.HasSuffix(a, "$") {
+			return strings.TrimSuffix(strings.TrimPrefix(a, "name=^/"), "$")
+		}
+	}
+	return ""
+}
+
+// dockerRunName extracts the container name following "--name".
+func dockerRunName(args []string) string {
+	for i, a := range args {
+		if a == "--name" && i+1 < len(args) {
+			return args[i+1]
+		}
+	}
+	if len(args) >= 4 {
+		return args[3]
+	}
+	return ""
 }
 
 func gitRun(t *testing.T, dir string, args ...string) {

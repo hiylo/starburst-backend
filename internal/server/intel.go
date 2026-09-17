@@ -617,6 +617,7 @@ func (s *Server) runIntelAnalyze(ctx context.Context, projectID int64) error {
 	}
 	s.enrichIntelWithLLM(ctx, projectID, root)
 	s.persistOverview(ctx, projectID, p, root)
+	s.persistEnvRequirements(ctx, projectID, root)
 	sha, err := snapshotSHA(root)
 	if err != nil {
 		sha = ""

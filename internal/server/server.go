@@ -221,6 +221,10 @@ func (s *Server) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/intel/android-bindings", s.handleIntelAndroidBindings)
 	mux.HandleFunc("/api/intel/web-bindings", s.handleIntelWebBindings)
 	mux.HandleFunc("/api/intel/ios-bindings", s.handleIntelIosBindings)
+	mux.HandleFunc("/api/intel/env/ensure", s.handleIntelEnvEnsure)
+	mux.HandleFunc("/api/intel/env/status", s.handleIntelEnvStatus)
+	mux.HandleFunc("/api/intel/env/install", s.handleIntelEnvInstall)
+	mux.HandleFunc("/api/intel/env/stop", s.handleIntelEnvStop)
 	mux.HandleFunc("/", s.handleIndex)
 }
 

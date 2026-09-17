@@ -375,6 +375,16 @@ type Store interface {
 	ReplaceIntelIosBindings(ctx context.Context, projectID int64, bindings []*IntelIosBinding) error
 	// ListIntelIosBindings returns the project's iOS field bindings.
 	ListIntelIosBindings(ctx context.Context, projectID int64) ([]*IntelIosBinding, error)
+	// ReplaceIntelEnvRequirements replaces the project's declared environment requirements.
+	ReplaceIntelEnvRequirements(ctx context.Context, projectID int64, reqs []*IntelEnvRequirement) error
+	// ListIntelEnvRequirements returns the project's declared environment requirements.
+	ListIntelEnvRequirements(ctx context.Context, projectID int64) ([]*IntelEnvRequirement, error)
+	// ReplaceIntelEnvServices replaces the project's environment status rows.
+	ReplaceIntelEnvServices(ctx context.Context, projectID int64, services []*IntelEnvService) error
+	// UpsertIntelEnvServices upserts per-service status rows without dropping others.
+	UpsertIntelEnvServices(ctx context.Context, projectID int64, services []*IntelEnvService) error
+	// ListIntelEnvServices returns the project's environment status rows.
+	ListIntelEnvServices(ctx context.Context, projectID int64) ([]*IntelEnvService, error)
 }
 
 // Open opens a store for the given driver/dsn. It applies all migrations

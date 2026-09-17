@@ -459,6 +459,7 @@
                 <button class="intel-tab" data-tab="runs">运行记录</button>
                 <button class="intel-tab" data-tab="impact">影响面</button>
                 <button class="intel-tab" data-tab="overview">依赖 / 环境</button>
+                <button class="intel-tab" data-tab="env">环境供给</button>
               </div>
 
               <div class="intel-panel" id="intelPanel-modules">
@@ -508,6 +509,13 @@
               </div>
               <div class="intel-panel hidden" id="intelPanel-overview">
                 <div id="intelOverviewList" style="display:flex;flex-direction:column;gap:var(--sp-sm)"></div>
+              </div>
+              <div class="intel-panel hidden" id="intelPanel-env">
+                <div class="row" style="justify-content:space-between;align-items:center;margin-bottom:var(--sp-sm)">
+                  <div class="muted" style="font-size:12px">逐项检测本机中间件/工具链，缺失项可一键容器拉起（中间件）</div>
+                  <button class="ghost sm" onclick="ensureIntelEnv()">重新检测</button>
+                </div>
+                <div id="intelEnvList" style="display:flex;flex-direction:column;gap:var(--sp-sm)"></div>
               </div>
             </div>
           </div>

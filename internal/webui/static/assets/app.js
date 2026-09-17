@@ -2275,7 +2275,7 @@ document.addEventListener("DOMContentLoaded", () => {
   const tabLoaders = {
     features: loadIntelFeatures, cases: loadIntelCases, findings: loadIntelFindings,
     issues: loadIntelIssues, fixes: loadIntelFixes, runs: loadIntelRuns, impact: loadIntelImpact,
-    overview: loadIntelOverview, bindings: loadIntelBindings,
+    overview: loadIntelOverview, bindings: loadIntelBindings, env: loadIntelEnv,
   };
   document.querySelectorAll(".intel-tab").forEach(t => {
     t.addEventListener("click", () => {
@@ -2647,6 +2647,79 @@ async function loadIntelBindings(id) {
     </tr>`);
   }
   if (!bindings.length) tb.insertAdjacentHTML("beforeend", `<tr><td colspan="5" class="muted" style="text-align:center;padding:16px">暂无客户端绑定（Android/Web 项目分析后自动提取字段）</td></tr>`);
+}
+
+async function loadIntelEnv(id) {
+  const wrap = document.getElementById("intelEnvList");
+  wrap.innerHTML = `<div class="muted" style="text-align:center;padding:16px">检测中…</div>`;
+  const res = await api("/api/intel/env/status?projectId=" + id, { headers: appHeaders() });
+  const data = await res.json();
+  if (!res.ok) { wrap.innerHTML = `<div class="muted" style="text-align:center;padding:16px">${escapeHtml(data.error || "检测失败")}</div>`; return; }
+  renderIntelEnv(data);
+}
+
+async function ensureIntelEnv() {
+  const wrap = document.getElementById("intelEnvList");
+  if (!intelCurrentProject) return;
+  wrap.innerHTML = `<div class="muted" style="text-align:center;padding:16px">检测中…</div>`;
+  const res = await api("/api/intel/env/ensure", { method: "POST", headers: appHeaders(), body: JSON.stringify({ projectId: intelCurrentProject }) });
+  const data = await res.json();
+  if (!res.ok) { wrap.innerHTML = `<div class="muted" style="text-align:center;padding:16px">${escapeHtml(data.error || "检测失败")}</div>`; return; }
+  renderIntelEnv(data);
+}
+
+function renderIntelEnv(data) {
+  const wrap = document.getElementById("intelEnvList");
+  const svcs = data.services || [];
+  wrap.innerHTML = "";
+  if (!svcs.length) {
+    wrap.innerHTML = `<div class="muted" style="text-align:center;padding:16px">未检测到环境依赖（分析项目后自动识别中间件/工具链）</div>`;
+    return;
+  }
+  if (data.dockerNotice) {
+    wrap.insertAdjacentHTML("beforeend", `<div class="msg" style="margin:0 0 8px">${escapeHtml(data.dockerNotice)}</div>`);
+  }
+  wrap.insertAdjacentHTML("beforeend", `<div class="muted" style="font-size:12px;margin-bottom:6px">就绪 ${data.ready || 0} · 缺失 ${data.missing || 0} · 不支持 ${data.unsupported || 0}</div>`);
+  for (const svc of svcs) {
+    const ready = svc.status === "ready";
+    const unsupported = svc.status === "unsupported";
+    const provider = svc.provider === "container" ? "容器" : svc.provider === "installed" ? "已装" : "-";
+    const ep = svc.port ? `127.0.0.1:${svc.port}` : (svc.endpoint || "-");
+    let action = "";
+    if (ready) {
+      action = `<button class="ghost sm" onclick="stopIntelEnv('${escapeHtml(svc.service)}')">停止</button>`;
+    } else if (svc.category === "middleware") {
+      action = `<button class="ghost sm" onclick="installIntelEnv('${escapeHtml(svc.service)}')">安装</button>`;
+    } else if (unsupported) {
+      action = `<span class="muted" style="font-size:11px">需手动安装</span>`;
+    }
+    wrap.insertAdjacentHTML("beforeend", `<div class="card" style="margin:0">
+      <div class="row" style="justify-content:space-between">
+        <strong>${escapeHtml(svc.service)}</strong>
+        <div class="row" style="gap:6px">
+          <span class="intel-status ${ready ? "analyzed" : unsupported ? "pending" : ""}">${ready ? "就绪" : unsupported ? "不支持" : "缺失"}</span>
+          ${action}
+        </div>
+      </div>
+      <div class="muted" style="font-size:12px;margin-top:6px">
+        类别 ${escapeHtml(svc.category)} · 版本 ${escapeHtml(svc.version || "latest")} · 供给 ${escapeHtml(provider)} · 连接 ${escapeHtml(ep)}
+      </div>
+    </div>`);
+  }
+}
+
+async function installIntelEnv(service) {
+  if (!intelCurrentProject) return;
+  const res = await api("/api/intel/env/install", { method: "POST", headers: appHeaders(), body: JSON.stringify({ projectId: intelCurrentProject, service }) });
+  const data = await res.json();
+  if (!res.ok) { alert(data.error || "安装失败"); return; }
+  loadIntelEnv(intelCurrentProject);
+}
+
+async function stopIntelEnv(service) {
+  if (!intelCurrentProject) return;
+  await api("/api/intel/env/stop", { method: "POST", headers: appHeaders(), body: JSON.stringify({ projectId: intelCurrentProject, service }) });
+  loadIntelEnv(intelCurrentProject);
 }
 
 async function loadIntelFeatures(id) {

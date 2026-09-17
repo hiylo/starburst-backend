@@ -112,6 +112,7 @@ var migrations = []migration{
 	{name: "intel_web_bindings", apply: migrationIntelWebBindings},
 	{name: "sync_bundle", apply: migrationSyncBundle},
 	{name: "intel_ios_bindings", apply: migrationIntelIOSBindings},
+	{name: "env", apply: migrationEnv},
 }
 
 // migrationIntel creates the Test Intelligence subsystem tables: flat project
@@ -977,6 +978,54 @@ func migrationIntelFixes(ctx context.Context, driver string, db *sql.DB) error {
 			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 		)`, idColumn(driver)),
 		`CREATE INDEX IF NOT EXISTS idx_intel_fixes_project ON intel_fixes(project_id, status)`,
+	}
+	for _, s := range stmts {
+		if _, err := db.ExecContext(ctx, s); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// migrationEnv creates the environment-management tables: env_requirements
+// (project dependency declarations from static detection) and env_services
+// (the current per-item status of each middleware/toolchain after probing and
+// provisioning). status: ready|missing|unsupported; provider: container|
+// external|installed.
+func migrationEnv(ctx context.Context, driver string, db *sql.DB) error {
+	stmts := []string{
+		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS env_requirements (
+			%s,
+			project_id INTEGER NOT NULL DEFAULT 0,
+			module_id INTEGER NOT NULL DEFAULT 0,
+			service TEXT NOT NULL DEFAULT '',
+			category TEXT NOT NULL DEFAULT '',
+			version TEXT NOT NULL DEFAULT '',
+			source TEXT NOT NULL DEFAULT 'auto',
+			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+		)`, idColumn(driver)),
+		`CREATE INDEX IF NOT EXISTS idx_env_requirements_project ON env_requirements(project_id)`,
+		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS env_services (
+			%s,
+			project_id INTEGER NOT NULL DEFAULT 0,
+			service TEXT NOT NULL DEFAULT '',
+			category TEXT NOT NULL DEFAULT '',
+			version TEXT NOT NULL DEFAULT '',
+			provider TEXT NOT NULL DEFAULT '',
+			status TEXT NOT NULL DEFAULT 'missing',
+			host TEXT NOT NULL DEFAULT '',
+			port INTEGER NOT NULL DEFAULT 0,
+			endpoint TEXT NOT NULL DEFAULT '',
+			healthy BOOLEAN NOT NULL DEFAULT FALSE,
+			container_name TEXT NOT NULL DEFAULT '',
+			container_id TEXT NOT NULL DEFAULT '',
+			username TEXT NOT NULL DEFAULT '',
+			password TEXT NOT NULL DEFAULT '',
+			health_check_at TIMESTAMP NULL,
+			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+		)`, idColumn(driver)),
+		`CREATE INDEX IF NOT EXISTS idx_env_services_project ON env_services(project_id)`,
 	}
 	for _, s := range stmts {
 		if _, err := db.ExecContext(ctx, s); err != nil {
