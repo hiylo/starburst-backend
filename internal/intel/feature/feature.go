@@ -55,7 +55,7 @@ func Cluster(endpoints []*store.IntelEndpoint) []Candidate {
 			groups[key] = g
 		}
 		g.ids = append(g.ids, ep.ID)
-		for _, e := range detectedEnds(ep.SourceFile) {
+		for _, e := range detectedEnds(ep) {
 			g.ends[e] = true
 		}
 	}
@@ -129,12 +129,17 @@ func titleName(seg string) string {
 	return string(r)
 }
 
-// detectedEnds derives the ends touched by an endpoint. The Java backend is
-// always present by default; client-side keywords in the source file path add
-// android, ios, h5 or web (case-insensitive).
-func detectedEnds(sourceFile string) []string {
+// detectedEnds derives the ends touched by an endpoint. GraphQL operations
+// (@QueryMapping/@MutationMapping) belong to the BFF end; everything else is
+// treated as the Java backend by default. Client-side keywords in the source
+// file path or HTTP path add android, ios, h5 or web (case-insensitive).
+func detectedEnds(ep *store.IntelEndpoint) []string {
 	ends := []string{"java"}
-	low := strings.ToLower(sourceFile)
+	switch ep.Method {
+	case "QUERY", "MUTATION", "SUBSCRIPTION":
+		ends[0] = "bff"
+	}
+	low := strings.ToLower(ep.SourceFile + " " + ep.Path)
 	for _, kw := range []string{"android", "ios", "h5", "web"} {
 		if strings.Contains(low, kw) {
 			ends = append(ends, kw)

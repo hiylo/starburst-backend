@@ -86,6 +86,22 @@ func TestCluster(t *testing.T) {
 				},
 			},
 		},
+		{
+			name: "graphql operations cluster to bff end",
+			endpoints: []*store.IntelEndpoint{
+				{ID: 1, Method: "QUERY", Path: "activities", SourceFile: "com/x/app/bff/ActivityController.java"},
+				{ID: 2, Method: "MUTATION", Path: "createActivity", SourceFile: "com/x/app/bff/ActivityController.java"},
+			},
+			want: []Candidate{
+				{
+					Name:        "Activity",
+					Anchor:      "Activity",
+					EndpointIDs: []int64{1, 2},
+					Ends:        []string{"bff"},
+					Confidence:  "high",
+				},
+			},
+		},
 	}
 
 	for _, tt := range tests {
