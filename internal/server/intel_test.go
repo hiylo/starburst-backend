@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/hiylo/starburst-backend/internal/intel/envagent"
+	"github.com/hiylo/starburst-backend/internal/store"
 )
 
 // TestIntelFlow verifies M1 acceptance end-to-end through the HTTP API:
@@ -1074,6 +1075,73 @@ func TestIntelEnvGateBlocksRun(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), "环境门禁") {
 		t.Errorf("run failure should mention 环境门禁: %s", rec.Body.String())
+	}
+}
+
+// TestIntelFixApplyAndRollback verifies the fix workflow end-to-end: a proposed
+// fix applies its edit into the project working tree with a backup, then a
+// one-click rollback restores the original content.
+func TestIntelFixApplyAndRollback(t *testing.T) {
+	s := newTestServer(t)
+	wh := loginWeb(t, s)
+
+	root := t.TempDir()
+	writeTestFile(t, filepath.Join(root, "app.properties"), "host=127.0.0.1\npassword=plain\n")
+
+	rec := s.do(t, http.MethodPost, "/api/intel/projects",
+		`{"name":"demo","source":"local","localPath":"`+filepath.ToSlash(root)+`"}`, wh)
+	var proj struct {
+		ID int64 `json:"id"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &proj); err != nil || proj.ID == 0 {
+		t.Fatalf("create project: %s", rec.Body.String())
+	}
+
+	fx := &store.IntelFix{
+		ProjectID: proj.ID,
+		Kind:      "ai-suggest",
+		Title:     "mask password",
+		DiffJSON:  `[{"file":"app.properties","oldText":"password=plain","newText":"password=*****","line":2,"confidence":"high"}]`,
+		Status:    "proposed",
+	}
+	ctx := context.Background()
+	if err := s.store.CreateIntelFix(ctx, fx); err != nil {
+		t.Fatalf("create fix: %v", err)
+	}
+
+	// Apply -> file updated.
+	rec = s.do(t, http.MethodPost, "/api/intel/fixes/"+jsonInt(fx.ID)+"/apply", "", wh)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("apply status %d: %s", rec.Code, rec.Body.String())
+	}
+	data, err := os.ReadFile(filepath.Join(root, "app.properties"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "password=*****") {
+		t.Errorf("after apply file has: %q", string(data))
+	}
+	if strings.Contains(string(data), "password=plain") {
+		t.Errorf("after apply old password still present: %q", string(data))
+	}
+
+	// Rollback -> restored.
+	rec = s.do(t, http.MethodPost, "/api/intel/fixes/"+jsonInt(fx.ID)+"/rollback", "", wh)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("rollback status %d: %s", rec.Code, rec.Body.String())
+	}
+	data, err = os.ReadFile(filepath.Join(root, "app.properties"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "password=plain") {
+		t.Errorf("after rollback file has: %q", string(data))
+	}
+
+	// Invalid state: applying a rolled-back fix is rejected.
+	rec = s.do(t, http.MethodPost, "/api/intel/fixes/"+jsonInt(fx.ID)+"/apply", "", wh)
+	if rec.Code == 200 {
+		t.Errorf("apply after rollback should be rejected")
 	}
 }
 

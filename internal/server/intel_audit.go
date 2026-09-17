@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
@@ -117,7 +118,9 @@ func (s *Server) handleIntelFixes(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"fixes": fixes})
 }
 
-// handleIntelFixAction applies or rejects a fix suggestion.
+// handleIntelFixAction applies, rejects or rolls back a fix suggestion. Apply
+// writes the approved edit back to the project working tree (with a backup for
+// one-click rollback); rollback restores the original content.
 func (s *Server) handleIntelFixAction(w http.ResponseWriter, r *http.Request) {
 	if !s.requireWeb(r) {
 		if _, ok := s.requireToken(r); !ok {
@@ -145,25 +148,111 @@ func (s *Server) handleIntelFixAction(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
 
-	fix, err := s.store.GetIntelFix(ctx, id)
+	fx, err := s.store.GetIntelFix(ctx, id)
 	if err != nil {
 		writeErr(w, http.StatusNotFound, "fix not found")
 		return
 	}
 	switch action {
 	case "apply":
-		fix.Status = "applied"
+		if fx.Status != "proposed" {
+			writeErr(w, http.StatusBadRequest, "fix is not in proposed state")
+			return
+		}
+		if err := s.applyIntelFix(ctx, fx); err != nil {
+			writeErr(w, http.StatusInternalServerError, "应用修复失败: "+err.Error())
+			return
+		}
 	case "reject":
-		fix.Status = "rejected"
+		fx.Status = "rejected"
+	case "rollback":
+		if fx.Status != "applied" {
+			writeErr(w, http.StatusBadRequest, "fix is not applied")
+			return
+		}
+		if err := s.rollbackIntelFix(ctx, fx); err != nil {
+			writeErr(w, http.StatusInternalServerError, "回滚失败: "+err.Error())
+			return
+		}
 	default:
-		writeErr(w, http.StatusBadRequest, "action must be apply|reject")
+		writeErr(w, http.StatusBadRequest, "action must be apply|reject|rollback")
 		return
 	}
-	if err := s.store.UpdateIntelFix(ctx, fix); err != nil {
+	if err := s.store.UpdateIntelFix(ctx, fx); err != nil {
 		writeErr(w, http.StatusInternalServerError, "update fix failed")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "status": fix.Status})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "status": fx.Status})
+}
+
+// applyIntelFix writes a proposed fix's edits into the project working tree,
+// validating each oldText against the current file content. The original
+// content of every touched file is captured into AppliedBackup for rollback.
+func (s *Server) applyIntelFix(ctx context.Context, rec *store.IntelFix) error {
+	var suggestions []*fix.Suggestion
+	if err := json.Unmarshal([]byte(rec.DiffJSON), &suggestions); err != nil {
+		return fmt.Errorf("diff_json 不是合法的建议列表: %w", err)
+	}
+	if len(suggestions) == 0 {
+		return fmt.Errorf("diff_json 为空")
+	}
+	p, err := s.store.GetIntelProject(ctx, rec.ProjectID)
+	if err != nil {
+		return err
+	}
+	root, err := s.projectRoot(ctx, p)
+	if err != nil {
+		return err
+	}
+	backups := make(map[string]string)
+	for _, sg := range suggestions {
+		if sg == nil || sg.File == "" {
+			continue
+		}
+		abs := filepath.Join(root, filepath.FromSlash(sg.File))
+		data, err := os.ReadFile(abs)
+		if err != nil {
+			return fmt.Errorf("读取 %s: %w", sg.File, err)
+		}
+		if _, ok := backups[sg.File]; !ok {
+			backups[sg.File] = string(data)
+		}
+		newContent, err := fix.ApplyDryRun(string(data), sg)
+		if err != nil {
+			return fmt.Errorf("应用 %s: %w", sg.File, err)
+		}
+		if err := os.WriteFile(abs, []byte(newContent), 0o644); err != nil {
+			return fmt.Errorf("写入 %s: %w", sg.File, err)
+		}
+	}
+	buf, _ := json.Marshal(backups)
+	rec.AppliedBackup = string(buf)
+	rec.Status = "applied"
+	return nil
+}
+
+// rollbackIntelFix restores the pre-apply content of every file a fix touched.
+func (s *Server) rollbackIntelFix(ctx context.Context, rec *store.IntelFix) error {
+	var backups map[string]string
+	if err := json.Unmarshal([]byte(rec.AppliedBackup), &backups); err != nil || len(backups) == 0 {
+		return fmt.Errorf("无可用备份，无法回滚")
+	}
+	p, err := s.store.GetIntelProject(ctx, rec.ProjectID)
+	if err != nil {
+		return err
+	}
+	root, err := s.projectRoot(ctx, p)
+	if err != nil {
+		return err
+	}
+	for file, orig := range backups {
+		abs := filepath.Join(root, filepath.FromSlash(file))
+		if err := os.WriteFile(abs, []byte(orig), 0o644); err != nil {
+			return fmt.Errorf("回滚 %s: %w", file, err)
+		}
+	}
+	rec.Status = "rolled_back"
+	return nil
 }
 
 // handleIntelFixGenerate asks the orchestration LLM to propose a minimal code
@@ -256,12 +345,14 @@ func (s *Server) generateFixForFinding(ctx context.Context, projectID, findingID
 		return nil, fmt.Errorf("model oldText is not a unique match (%d occurrences)", n)
 	}
 
-	diff, err := fix.GeneratePatch(map[string]string{relFile: content}, []*fix.Suggestion{{
-		File:    relFile,
-		OldText: proposal.OldText,
-		NewText: proposal.NewText,
-		Line:    line,
-	}})
+	suggestions := []*fix.Suggestion{{
+		File:       relFile,
+		OldText:    proposal.OldText,
+		NewText:    proposal.NewText,
+		Line:       line,
+		Confidence: "high",
+	}}
+	suggJSON, err := json.Marshal(suggestions)
 	if err != nil {
 		return nil, err
 	}
@@ -274,7 +365,7 @@ func (s *Server) generateFixForFinding(ctx context.Context, projectID, findingID
 		FindingID: findingID,
 		Kind:      "ai-suggest",
 		Title:     title,
-		DiffJSON:  diff,
+		DiffJSON:  string(suggJSON),
 		Status:    "proposed",
 	}
 	if err := s.store.CreateIntelFix(ctx, stored); err != nil {

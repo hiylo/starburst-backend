@@ -2845,19 +2845,38 @@ async function loadIntelFixes(id) {
   wrap.innerHTML = "";
   if (!fixes.length) { wrap.innerHTML = `<div class="muted" style="text-align:center;padding:16px">暂无修复建议</div>`; return; }
   for (const fx of fixes) {
-    const diff = fx.diffJson || "";
     wrap.insertAdjacentHTML("beforeend", `<div class="card" style="margin:0">
       <div class="row" style="justify-content:space-between">
         <strong>${escapeHtml(fx.title || fx.kind || "-")}</strong>
         <span class="intel-status ${fx.status === "applied" ? "analyzed" : ""}">${escapeHtml(fx.status || "pending")}</span>
       </div>
-      ${diff ? `<pre class="mono" style="font-size:11px;max-height:180px;overflow:auto;background:var(--surface-2);border:1px solid var(--hairline);border-radius:var(--r-sm);padding:8px;margin:8px 0 0">${escapeHtml(diff)}</pre>` : ""}
+      ${renderIntelFixDiff(fx.diffJson)}
       <div class="row" style="gap:6px;margin-top:6px">
-        <button class="ghost sm" onclick="applyIntelFix(${fx.id}, 'apply')">应用</button>
-        <button class="tertiary sm" onclick="applyIntelFix(${fx.id}, 'reject')">拒绝</button>
+        ${fx.status === "proposed" ? `<button class="ghost sm" onclick="applyIntelFix(${fx.id}, 'apply')">应用</button>
+        <button class="tertiary sm" onclick="applyIntelFix(${fx.id}, 'reject')">拒绝</button>` : ""}
+        ${fx.status === "applied" ? `<button class="ghost sm" onclick="applyIntelFix(${fx.id}, 'rollback')">回滚</button>` : ""}
       </div>
     </div>`);
   }
+}
+
+function renderIntelFixDiff(diffJson) {
+  if (!diffJson) return "";
+  let suggs = [];
+  try { suggs = JSON.parse(diffJson); } catch (_) { return `<pre class="mono" style="font-size:11px;max-height:180px;overflow:auto;background:var(--surface-2);border:1px solid var(--hairline);border-radius:var(--r-sm);padding:8px;margin:8px 0 0">${escapeHtml(diffJson)}</pre>`; }
+  if (!Array.isArray(suggs)) return "";
+  const blocks = suggs.map(s => {
+    const oldTxt = escapeHtml(s.oldText || "");
+    const newTxt = escapeHtml(s.newText || "");
+    return `<div style="margin-top:8px">
+      <div class="muted mono" style="font-size:11px">${escapeHtml(s.file || "-")}${s.line ? ":" + s.line : ""}</div>
+      <div class="mono" style="font-size:11px;background:var(--surface-2);border:1px solid var(--hairline);border-radius:var(--r-sm);padding:6px;margin-top:4px;white-space:pre-wrap">
+        <span style="color:var(--red,#dc2626)">- ${oldTxt}</span>
+        <br><span style="color:var(--green,#16a34a)">+ ${newTxt}</span>
+      </div>
+    </div>`;
+  }).join("");
+  return `<div style="max-height:220px;overflow:auto">${blocks}</div>`;
 }
 
 async function applyIntelFix(fixId, action) {
