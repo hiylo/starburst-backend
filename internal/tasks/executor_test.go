@@ -123,8 +123,10 @@ func TestExecutorRunsTaskToCompletion(t *testing.T) {
 }
 
 func TestExecutorFailureMarksTaskFailed(t *testing.T) {
-	// Upstream always 500s on prompt.
-	exec, st, _ := newTestEnv(t, func(w http.ResponseWriter, r *http.Request) {
+	// Upstream always 500s on prompt. Retries disabled so the failure surfaces
+	// immediately as failed (with retries enabled the task would park in backoff
+	// and stay queued, which the retry test below exercises instead).
+	exec0, st, _ := newTestEnv(t, func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodPost && r.URL.Path == "/session":
 			_, _ = w.Write([]byte(`{"id":"ses_fail"}`))
@@ -132,6 +134,7 @@ func TestExecutorFailureMarksTaskFailed(t *testing.T) {
 			http.Error(w, "boom", http.StatusInternalServerError)
 		}
 	})
+	exec := exec0.WithMaxRetries(0)
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
@@ -166,6 +169,70 @@ func TestExecutorFailureMarksTaskFailed(t *testing.T) {
 	}
 	if got.Error == "" {
 		t.Fatalf("expected non-empty error")
+	}
+}
+
+// TestExecutorRetriesTransientFailure verifies a task that fails on its first
+// attempt is actually re-queued (backoff + second attempt) instead of being
+// permanently failed. This regresses the RetryTask status-precondition bug where
+// a running task failed the `status = failed` guard and skipped retry entirely.
+func TestExecutorRetriesTransientFailure(t *testing.T) {
+	attempts := 0
+	envExec, st, _ := newTestEnv(t, func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		if r.Method == http.MethodPost && r.URL.Path == "/session" {
+			_, _ = w.Write([]byte(`{"id":"ses_retry"}`))
+			return
+		}
+		if attempts <= 1 {
+			http.Error(w, "boom", http.StatusInternalServerError)
+			return
+		}
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/session/ses_retry/message":
+			_, _ = w.Write([]byte(`[{"role":"assistant","content":[{"type":"text","text":"这是结果"}]}]`))
+		case r.Method == http.MethodGet && r.URL.Path == "/session/status":
+			_, _ = w.Write([]byte(`{"ses_retry":{"type":"idle"}}`))
+		default:
+			_, _ = w.Write([]byte(`{"data":{"admittedSeq":1,"id":"msg_x","sessionID":"ses_retry"}}`))
+		}
+	})
+	exec := envExec.WithMaxRetries(2)
+	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
+	defer cancel()
+
+	if err := st.CreateTask(ctx, &store.Task{ID: "task_retry", Directory: "/w", Prompt: "flaky"}); err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		exec.Run(ctx)
+	}()
+
+	var got *store.Task
+	deadline := time.Now().Add(20 * time.Second)
+	for time.Now().Before(deadline) {
+		got, _ = st.GetTask(ctx, "task_retry")
+		if got != nil && got.Status == store.TaskSucceeded {
+			break
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	cancel()
+	<-done
+
+	if got == nil || got.Status != store.TaskSucceeded {
+		t.Fatalf("task should succeed after retry, status=%v", func() any {
+			if got == nil {
+				return "nil"
+			}
+			return got.Status
+		}())
+	}
+	if attempts < 2 {
+		t.Fatalf("expected at least 2 execution attempts, got %d", attempts)
 	}
 }
 
