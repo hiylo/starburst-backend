@@ -3612,9 +3612,11 @@ async function showResultRootcause(resultId) {
 async function runIntelTests() {
   const id = intelCurrentProject;
   if (!id) return;
+  if (!confirm("运行测试？\n（环境缺失时默认被门禁拦截，可下一步选择强制继续）")) return;
+  const force = confirm("环境缺失时强制继续执行？\n确定=跳过门禁，取消=按门禁拦截");
   const st = document.getElementById("intelAnalyzeStatus");
   if (st) st.textContent = "运行测试中…";
-  const res = await api("/api/intel/run", { method: "POST", headers: appHeaders(), body: JSON.stringify({ projectId: id }) });
+  const res = await api("/api/intel/run", { method: "POST", headers: appHeaders(), body: JSON.stringify({ projectId: id, force }) });
   const data = await res.json();
   if (!res.ok) { if (st) st.textContent = ""; show(document.getElementById("intelMsg"), data.error || "运行失败"); return; }
   if (st) st.textContent = "运行完成：" + (data.run ? data.run.status : "");
