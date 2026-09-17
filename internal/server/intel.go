@@ -318,6 +318,30 @@ func (s *Server) applyModuleOverrides(ctx context.Context, projectID int64, mods
 	}
 }
 
+// applyFeatureOverrides merges human-confirmed name overrides (status=applied,
+// target=feature, field=name) into the feature list at read time, keyed by the
+// feature id (rowKey = feature id as string) so renames flow from the
+// 待确认队列 without touching the auto-derived row.
+func (s *Server) applyFeatureOverrides(ctx context.Context, projectID int64, feats []*store.IntelFeature) {
+	overrides, err := s.store.ListIntelOverrides(ctx, projectID, false)
+	if err != nil {
+		return
+	}
+	byID := make(map[string]string)
+	for _, o := range overrides {
+		if o.Status != "applied" || o.Target != "feature" || o.Field != "name" || o.ManualValue == "" {
+			continue
+		}
+		byID[o.RowKey] = o.ManualValue
+	}
+	for _, f := range feats {
+		key := strconv.FormatInt(f.ID, 10)
+		if v, ok := byID[key]; ok {
+			f.Name = v
+		}
+	}
+}
+
 // handleIntelModuleCommands updates a module's reviewed command whitelist
 // (commands_json). The body must be a JSON array of command strings; the list
 // is validated before persisting so edited entries cannot smuggle shell

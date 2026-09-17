@@ -70,6 +70,7 @@ func (s *Server) handleIntelFeatures(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusInternalServerError, "load features failed")
 			return
 		}
+		s.applyFeatureOverrides(ctx, projectID, feats)
 		writeJSON(w, http.StatusOK, map[string]any{"features": feats})
 	case http.MethodPost:
 		projectID, ok := s.intelQueryProject(w, r)

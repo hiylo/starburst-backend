@@ -2337,6 +2337,67 @@ func TestSplitEndpointAndFlaky(t *testing.T) {
 	}
 }
 
+// TestIntelFeatureNameOverride verifies the overrides layer renames a feature
+// from the 待确认队列 (applied override keyed by feature id).
+func TestIntelFeatureNameOverride(t *testing.T) {
+	s := newTestServer(t)
+	wh := loginWeb(t, s)
+
+	root := t.TempDir()
+	writeTestFile(t, filepath.Join(root, "pom.xml"), `<project></project>`)
+	writeTestFile(t, filepath.Join(root, "src/main/java/demo/UserController.java"), `package demo;
+import org.springframework.web.bind.annotation.*;
+@RestController
+@RequestMapping("/api/users")
+public class UserController { @GetMapping("/list") public String list() { return "x"; } }`)
+
+	rec := s.do(t, http.MethodPost, "/api/intel/projects",
+		`{"name":"demo","source":"local","localPath":"`+filepath.ToSlash(root)+`"}`, wh)
+	var proj struct {
+		ID int64 `json:"id"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &proj); err != nil || proj.ID == 0 {
+		t.Fatalf("create project: %s", rec.Body.String())
+	}
+	rec = s.do(t, http.MethodPost, "/api/intel/analyze",
+		`{"projectId":`+jsonInt(proj.ID)+`}`, wh)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("analyze status %d: %s", rec.Code, rec.Body.String())
+	}
+	rec = s.do(t, http.MethodGet, "/api/intel/features?projectId="+jsonInt(proj.ID), "", wh)
+	var fResp struct {
+		Features []struct {
+			ID   int64  `json:"id"`
+			Name string `json:"name"`
+		} `json:"features"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &fResp); err != nil || len(fResp.Features) != 1 {
+		t.Fatalf("features: %s", rec.Body.String())
+	}
+	feat := fResp.Features[0]
+
+	if err := s.store.CreateIntelOverride(context.Background(), &store.IntelOverride{
+		ProjectID:   proj.ID,
+		Target:      "feature",
+		RowKey:      jsonInt(feat.ID),
+		Field:       "name",
+		ManualValue: "用户管理（人工改名）",
+		Confidence:  "high",
+		Status:      "applied",
+		Source:      "manual",
+	}); err != nil {
+		t.Fatalf("create override: %v", err)
+	}
+
+	rec = s.do(t, http.MethodGet, "/api/intel/features?projectId="+jsonInt(proj.ID), "", wh)
+	if err := json.Unmarshal(rec.Body.Bytes(), &fResp); err != nil {
+		t.Fatalf("features parse: %v", err)
+	}
+	if len(fResp.Features) != 1 || fResp.Features[0].Name != "用户管理（人工改名）" {
+		t.Errorf("feature name after override = %+v", fResp.Features)
+	}
+}
+
 func gitRun(t *testing.T, dir string, args ...string) {
 	t.Helper()
 	cmd := exec.Command("git", args...)
