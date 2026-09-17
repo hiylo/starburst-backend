@@ -2748,6 +2748,7 @@ function renderIntelEnv(data) {
     let action = "";
     if (ready) {
       action = `<button class="ghost sm" onclick="stopIntelEnv('${escapeHtml(svc.service)}')">停止</button>`;
+      if (svc.service === "mysql") action += ` <button class="ghost sm" onclick="initIntelEnvSchema('${escapeHtml(svc.service)}')">初始化库</button>`;
     } else if (svc.category === "middleware") {
       action = `<button class="ghost sm" onclick="installIntelEnv('${escapeHtml(svc.service)}')">安装</button>
         <button class="ghost sm" onclick="externalIntelEnv('${escapeHtml(svc.service)}')">外部配置</button>`;
@@ -2780,6 +2781,16 @@ async function installIntelEnv(service) {
 async function stopIntelEnv(service) {
   if (!intelCurrentProject) return;
   await api("/api/intel/env/stop", { method: "POST", headers: appHeaders(), body: JSON.stringify({ projectId: intelCurrentProject, service }) });
+  loadIntelEnv(intelCurrentProject);
+}
+
+async function initIntelEnvSchema(service) {
+  if (!intelCurrentProject) return;
+  if (!confirm("将把项目内的 SQL 迁移脚本（Flyway/Liquibase/*.sql）执行到该 MySQL 容器，继续？")) return;
+  const res = await api("/api/intel/env/schema-init", { method: "POST", headers: appHeaders(), body: JSON.stringify({ projectId: intelCurrentProject, service }) });
+  const data = await res.json();
+  if (!res.ok) { alert(data.error || "初始化失败"); return; }
+  alert(`已执行脚本 ${data.executed}/${data.total}`);
   loadIntelEnv(intelCurrentProject);
 }
 

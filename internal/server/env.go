@@ -6,12 +6,14 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/hiylo/starburst-backend/internal/intel/envagent"
 	"github.com/hiylo/starburst-backend/internal/intel/envdetect"
+	"github.com/hiylo/starburst-backend/internal/intel/schemainit"
 	"github.com/hiylo/starburst-backend/internal/store"
 )
 
@@ -313,6 +315,105 @@ func (s *Server) handleIntelEnvExternal(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"service": svc})
+}
+
+// handleIntelEnvSchemaInit runs the project's discovered SQL migration scripts
+// against a ready middleware container (currently MySQL) before integration
+// tests: each script is fed via "docker exec -i <container> mysql ... on stdin".
+// It reports per-script success and the number of scripts executed.
+func (s *Server) handleIntelEnvSchemaInit(w http.ResponseWriter, r *http.Request) {
+	if !s.requireWeb(r) {
+		if _, ok := s.requireToken(r); !ok {
+			writeErr(w, http.StatusUnauthorized, "web session or APP token required")
+			return
+		}
+	}
+	if r.Method != http.MethodPost {
+		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	var req struct {
+		ProjectID int64  `json:"projectId"`
+		Service   string `json:"service"`
+	}
+	if err := readJSONLimited(w, r, &req); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if req.ProjectID <= 0 {
+		writeErr(w, http.StatusBadRequest, "projectId is required")
+		return
+	}
+	if req.Service == "" {
+		req.Service = "mysql"
+	}
+	if req.Service != "mysql" {
+		writeErr(w, http.StatusBadRequest, "库初始化目前仅支持 mysql")
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Minute)
+	defer cancel()
+
+	var svc *store.IntelEnvService
+	services, _ := s.store.ListIntelEnvServices(ctx, req.ProjectID)
+	for _, x := range services {
+		if x.Service == req.Service {
+			svc = x
+			break
+		}
+	}
+	if svc == nil || svc.Status != "ready" || svc.ContainerName == "" {
+		writeErr(w, http.StatusBadRequest, "mysql 环境未就绪（容器未启动或未在环境 Tab 供给）")
+		return
+	}
+	p, err := s.store.GetIntelProject(ctx, req.ProjectID)
+	if err != nil {
+		writeErr(w, http.StatusNotFound, "project not found")
+		return
+	}
+	root, err := s.projectRoot(ctx, p)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "resolve project root failed")
+		return
+	}
+	scripts := schemainit.Discover(root)
+	if len(scripts) == 0 {
+		writeJSON(w, http.StatusOK, map[string]any{"scripts": []any{}, "executed": 0, "note": "未发现 SQL 迁移脚本（Flyway/Liquibase/*.sql）"})
+		return
+	}
+
+	type scriptResult struct {
+		Rel string `json:"rel"`
+		OK  bool   `json:"ok"`
+		Err string `json:"error,omitempty"`
+	}
+	results := make([]scriptResult, 0, len(scripts))
+	for _, script := range scripts {
+		data, err := os.ReadFile(script.Abs)
+		if err != nil {
+			results = append(results, scriptResult{Rel: script.Rel, Err: err.Error()})
+			continue
+		}
+		args := []string{"exec", "-i", svc.ContainerName, "mysql",
+			"-uroot", "-p" + svc.Password}
+		if _, err := envagent.RunDockerInput(ctx, string(data), args...); err != nil {
+			results = append(results, scriptResult{Rel: script.Rel, Err: err.Error()})
+			continue
+		}
+		results = append(results, scriptResult{Rel: script.Rel, OK: true})
+	}
+	executed := 0
+	for _, r := range results {
+		if r.OK {
+			executed++
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"scripts":   results,
+		"executed":  executed,
+		"total":     len(results),
+		"container": svc.ContainerName,
+	})
 }
 
 // probeEnvServices probes every requirement on the local machine and builds

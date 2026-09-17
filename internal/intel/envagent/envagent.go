@@ -37,9 +37,22 @@ const (
 // the production path runs real containers unless this executes docker).
 var RunDocker = runDockerExec
 
+// RunDockerInput runs a docker CLI command feeding payload on stdin (used for
+// "docker exec -i ... mysql < script" schema initialization). Also overridable
+// in tests.
+var RunDockerInput = runDockerInputExec
+
 // runDockerExec is the default docker runner (argv direct, no shell).
 func runDockerExec(ctx context.Context, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, "docker", args...)
+	out, err := cmd.CombinedOutput()
+	return string(out), err
+}
+
+// runDockerInputExec is the default stdin-fed docker runner (argv direct).
+func runDockerInputExec(ctx context.Context, stdin string, args ...string) (string, error) {
+	cmd := exec.CommandContext(ctx, "docker", args...)
+	cmd.Stdin = strings.NewReader(stdin)
 	out, err := cmd.CombinedOutput()
 	return string(out), err
 }

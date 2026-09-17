@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/hiylo/starburst-backend/internal/intel/envagent"
 	"github.com/hiylo/starburst-backend/internal/store"
@@ -1476,6 +1477,76 @@ public class UserController { @GetMapping("/list") public String list() { return
 	}
 	if autoCount != 1 {
 		t.Errorf("auto features = %d, want 1", autoCount)
+	}
+}
+
+// TestIntelEnvSchemaInit verifies lib initialization: discovered SQL scripts
+// are fed to a ready MySQL container via stubbed "docker exec -i mysql".
+func TestIntelEnvSchemaInit(t *testing.T) {
+	s := newTestServer(t)
+	wh := loginWeb(t, s)
+
+	root := t.TempDir()
+	writeTestFile(t, filepath.Join(root, "src/main/resources/db/migration/V1__init.sql"),
+		"CREATE TABLE t (id INT);\n")
+	writeTestFile(t, filepath.Join(root, "src/main/resources/application.yml"),
+		"spring:\n  datasource:\n    url: jdbc:mysql://127.0.0.1:3306/db")
+
+	rec := s.do(t, http.MethodPost, "/api/intel/projects",
+		`{"name":"demo","source":"local","localPath":"`+filepath.ToSlash(root)+`"}`, wh)
+	var proj struct {
+		ID int64 `json:"id"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &proj); err != nil || proj.ID == 0 {
+		t.Fatalf("create project: %s", rec.Body.String())
+	}
+	// Mark mysql as a ready container with a known password (skips real docker).
+	now := time.Now()
+	s.store.UpsertIntelEnvServices(context.Background(), proj.ID, []*store.IntelEnvService{{
+		ProjectID:     proj.ID,
+		Service:       "mysql",
+		Category:      "middleware",
+		Provider:      "container",
+		Status:        "ready",
+		ContainerName: "intel-X-mysql",
+		Password:      "pw",
+		HealthCheckAt: &now,
+	}})
+
+	// Stub the stdin-fed docker runner to record the script content.
+	old := envagent.RunDockerInput
+	defer func() { envagent.RunDockerInput = old }()
+	got := ""
+	count := 0
+	envagent.RunDockerInput = func(ctx context.Context, stdin string, args ...string) (string, error) {
+		got = stdin
+		count++
+		if len(args) < 2 || args[0] != "exec" || args[1] != "-i" {
+			t.Errorf("docker exec args = %v", args)
+		}
+		return "", nil
+	}
+
+	rec = s.do(t, http.MethodPost, "/api/intel/env/schema-init",
+		`{"projectId":`+jsonInt(proj.ID)+`}`, wh)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("schema-init status %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Executed int `json:"executed"`
+		Total    int `json:"total"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("schema-init parse: %v", err)
+	}
+	if resp.Executed != 1 || resp.Total != 1 {
+		t.Errorf("schema-init executed=%d total=%d, want 1/1", resp.Executed, resp.Total)
+	}
+	if count != 1 {
+		t.Errorf("docker exec call count = %d, want 1", count)
+	}
+	if !strings.Contains(got, "CREATE TABLE t") {
+		t.Errorf("script not fed to docker exec: %q", got)
 	}
 }
 
