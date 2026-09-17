@@ -1926,7 +1926,9 @@ func (s *Server) ensureGitClone(ctx context.Context, p *store.IntelProject, targ
 		if p.GitRef != "" {
 			args = append(args, "--branch", p.GitRef)
 		}
-		args = append(args, p.GitURL, target)
+		// `--` 终止选项解析：以 `-` 开头的 GitURL（如 --upload-pack=<cmd>）会被
+		// git 当作选项走私执行任意命令，必须显式声明其后是位置参数。
+		args = append(args, "--", p.GitURL, target)
 		cmd := exec.CommandContext(ctx, "git", args...)
 		if out, err := cmd.CombinedOutput(); err != nil {
 			return fmt.Errorf("git clone: %w: %s", err, strings.TrimSpace(string(out)))
