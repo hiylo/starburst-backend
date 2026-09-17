@@ -3305,6 +3305,7 @@ async function loadIntelFeatures(id) {
         <div class="row" style="gap:6px">
           <span class="muted" style="font-size:12px">涉及端 ${endBadges}</span>
           <button class="ghost sm" onclick="testIntelFeature(${f.id})">单测</button>
+          <button class="ghost sm" onclick="chatIntelFeature(${f.id})">对话</button>
         </div>
       </div>
       <div id="intelFeatureResult-${f.id}" class="muted" style="font-size:12px;margin-top:6px"></div>
@@ -3328,6 +3329,21 @@ async function testIntelFeature(featureId) {
     return `${r.method} ${r.path} → ${r.status || "ERR"} ${c}${r.error ? " · " + r.error : ""}`;
   });
   if (box) box.innerHTML = `<span class="mono" style="font-size:11px">${okCount} 通 / ${failCount} 败</span>` + lines.map(l => `<div class="mono" style="font-size:11px">${escapeHtml(l)}</div>`).join("");
+}
+
+async function chatIntelFeature(featureId) {
+  const q = prompt("针对该功能点提问（自动携带接口契约 + 最近实测 + 挂载问题上下文）", "");
+  if (q === null || !q.trim()) return;
+  const box = document.getElementById("intelFeatureResult-" + featureId);
+  if (box) box.textContent = "AI 归因中…";
+  const res = await api("/api/intel/features/" + featureId + "/chat", { method: "POST", headers: appHeaders(), body: JSON.stringify({ projectId: intelCurrentProject, question: q }) });
+  const data = await res.json();
+  if (!res.ok) { if (box) box.textContent = data.error || "对话失败"; return; }
+  const chat = data.chat || {};
+  if (box) box.innerHTML = `<div class="card" style="margin:0;padding:8px">
+      <div class="muted" style="font-size:11px;margin-bottom:4px">Q：${escapeHtml(chat.question || q)}</div>
+      <div class="mono" style="font-size:12px">${escapeHtml(chat.answer || "（无回答）")}</div>
+    </div>`;
 }
 
 async function loadIntelCases(id) {
