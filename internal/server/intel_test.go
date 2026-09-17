@@ -297,6 +297,99 @@ public class UserEntity {
 	}
 }
 
+// TestIntelAnalyzeNoDuplicateAccumulation verifies that analyzing the same
+// project twice does not duplicate entities, endpoints, test cases or findings
+// (module ids change per scan; the child tables must be replaced by project).
+func TestIntelAnalyzeNoDuplicateAccumulation(t *testing.T) {
+	s := newTestServer(t)
+	wh := loginWeb(t, s)
+
+	root := t.TempDir()
+	writeTestFile(t, filepath.Join(root, "pom.xml"), `<project></project>`)
+	writeTestFile(t, filepath.Join(root, "src/main/java/demo/UserController.java"), `package demo;
+import org.springframework.web.bind.annotation.*;
+@RestController
+@RequestMapping("/api/users")
+public class UserController {
+    @GetMapping("/list")
+    public java.util.List<demo.UserEntity> list() { return null; }
+}`)
+	writeTestFile(t, filepath.Join(root, "src/main/java/demo/UserEntity.java"), `package demo;
+import javax.persistence.*;
+@Entity
+@Table(name = "sys_user")
+public class UserEntity {
+    @Id
+    @Column(name = "id", nullable = false)
+    private Long id;
+    @Column(name = "password")
+    private String password;
+}`)
+	writeTestFile(t, filepath.Join(root, "src/test/java/demo/UserControllerTest.java"), `package demo;
+import org.junit.jupiter.api.Test;
+public class UserControllerTest {
+    @Test
+    public void listWorks() {}
+}`)
+
+	rec := s.do(t, http.MethodPost, "/api/intel/projects",
+		`{"name":"demo","source":"local","localPath":"`+filepath.ToSlash(root)+`"}`, wh)
+	var proj struct {
+		ID int64 `json:"id"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &proj); err != nil || proj.ID == 0 {
+		t.Fatalf("create project: %s", rec.Body.String())
+	}
+
+	count := func(path, field string) int {
+		t.Helper()
+		rec := s.do(t, http.MethodGet, path+"?projectId="+jsonInt(proj.ID), "", wh)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s status %d: %s", path, rec.Code, rec.Body.String())
+		}
+		raw := map[string][]json.RawMessage{}
+		if err := json.Unmarshal(rec.Body.Bytes(), &raw); err != nil {
+			t.Fatalf("%s parse: %v", path, err)
+		}
+		return len(raw[field])
+	}
+
+	for round := 0; round < 2; round++ {
+		rec = s.do(t, http.MethodPost, "/api/intel/analyze",
+			`{"projectId":`+jsonInt(proj.ID)+`}`, wh)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("analyze round %d status %d: %s", round, rec.Code, rec.Body.String())
+		}
+	}
+
+	entities := count("/api/intel/entities", "entities")
+	endpoints := count("/api/intel/endpoints", "endpoints")
+	cases := count("/api/intel/test-cases", "testCases")
+	findings := count("/api/intel/findings", "findings")
+
+	if entities != 2 {
+		t.Errorf("entities = %d, want 2 (id + password, no duplicates)", entities)
+	}
+	if endpoints != 1 {
+		t.Errorf("endpoints = %d, want 1", endpoints)
+	}
+	if cases != 1 {
+		t.Errorf("test cases = %d, want 1", cases)
+	}
+
+	// A third analyze must not grow the finding count (dedup by rule+location).
+	before := findings
+	rec = s.do(t, http.MethodPost, "/api/intel/analyze",
+		`{"projectId":`+jsonInt(proj.ID)+`}`, wh)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("third analyze status %d: %s", rec.Code, rec.Body.String())
+	}
+	after := count("/api/intel/findings", "findings")
+	if after != before {
+		t.Errorf("findings grew %d -> %d across re-analyze (accumulation)", before, after)
+	}
+}
+
 // loginWeb logs in as the web admin and returns the auth header map.
 func loginWeb(t *testing.T, s *Server) map[string]string {
 	t.Helper()

@@ -73,6 +73,27 @@ func (s *sqlStore) CreateIntelFinding(ctx context.Context, f *IntelFinding) erro
 	return nil
 }
 
+// CreateIntelFindingIfAbsent inserts a finding only when no finding with the
+// same detector + rule + location already exists for the project, so a rescan
+// preserves user review state (waive/resolve) instead of duplicating rows.
+// It reports whether a new row was inserted.
+func (s *sqlStore) CreateIntelFindingIfAbsent(ctx context.Context, f *IntelFinding) (bool, error) {
+	var n int
+	if err := s.db.QueryRowContext(ctx, s.q(`
+		SELECT COUNT(*) FROM intel_findings
+		WHERE project_id = ? AND detector = ? AND cve_or_rule_id = ? AND location = ?`),
+		f.ProjectID, f.Detector, f.CveOrRuleID, f.Location).Scan(&n); err != nil {
+		return false, err
+	}
+	if n > 0 {
+		return false, nil
+	}
+	if err := s.CreateIntelFinding(ctx, f); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 // ListIntelFindings returns findings for a project, optionally filtered by
 // status and detector ("" = all).
 func (s *sqlStore) ListIntelFindings(ctx context.Context, projectID int64, status, detector string) ([]*IntelFinding, error) {

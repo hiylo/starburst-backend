@@ -482,26 +482,33 @@ func (s *Server) runIntelAnalyze(ctx context.Context, projectID int64) error {
 	mods, _ = s.store.ListIntelModules(ctx, projectID)
 	var allEndpoints []*store.IntelEndpoint
 	var allEntities []*store.IntelEntity
+	var allCases []*store.TestCase
 	for _, m := range mods {
 		sum, err := intel.ScanModule(root, m.RelPath)
 		if err != nil {
 			continue
 		}
-		if len(sum.Entities) > 0 {
-			if err := s.store.ReplaceIntelEntities(ctx, projectID, m.ID, sum.Entities); err != nil {
-				return err
-			}
-			allEntities = append(allEntities, sum.Entities...)
+		for i := range sum.Entities {
+			sum.Entities[i].ModuleID = m.ID
 		}
-		if len(sum.Endpoints) > 0 {
-			if err := s.store.ReplaceIntelEndpoints(ctx, projectID, m.ID, sum.Endpoints); err != nil {
-				return err
-			}
-			allEndpoints = append(allEndpoints, sum.Endpoints...)
+		for i := range sum.Endpoints {
+			sum.Endpoints[i].ModuleID = m.ID
 		}
-		if err := s.persistTestAssets(ctx, projectID, m, root); err != nil {
-			return err
+		allEntities = append(allEntities, sum.Entities...)
+		allEndpoints = append(allEndpoints, sum.Endpoints...)
+		assets, err := testassets.Discover(root, m.RelPath)
+		if err == nil {
+			allCases = append(allCases, buildTestCases(m, assets)...)
 		}
+	}
+	if err := s.store.ReplaceIntelEntities(ctx, projectID, allEntities); err != nil {
+		return err
+	}
+	if err := s.store.ReplaceIntelEndpoints(ctx, projectID, allEndpoints); err != nil {
+		return err
+	}
+	if err := s.store.ReplaceIntelTestCases(ctx, projectID, allCases); err != nil {
+		return err
 	}
 	if err := s.persistFeatures(ctx, projectID, allEndpoints); err != nil {
 		return err
@@ -525,12 +532,10 @@ func (s *Server) runIntelAnalyze(ctx context.Context, projectID int64) error {
 	return s.store.MarkIntelProjectAnalyzed(ctx, projectID, sha)
 }
 
-// persistTestAssets discovers and stores a module's test assets.
-func (s *Server) persistTestAssets(ctx context.Context, projectID int64, m *store.IntelModule, root string) error {
-	assets, err := testassets.Discover(root, m.RelPath)
-	if err != nil || len(assets) == 0 {
-		return nil
-	}
+// buildTestCases converts a module's discovered test assets into store models
+// with the module id stamped (for later per-module filtering and execution
+// status attribution).
+func buildTestCases(m *store.IntelModule, assets []testassets.Asset) []*store.TestCase {
 	cases := make([]*store.TestCase, 0, len(assets))
 	for _, a := range assets {
 		tags := "[]"
@@ -538,6 +543,7 @@ func (s *Server) persistTestAssets(ctx context.Context, projectID int64, m *stor
 			tags = string(b)
 		}
 		cases = append(cases, &store.TestCase{
+			ModuleID:  m.ID,
 			Module:    m.RelPath,
 			Kind:      a.Kind,
 			Framework: a.Framework,
@@ -547,7 +553,7 @@ func (s *Server) persistTestAssets(ctx context.Context, projectID int64, m *stor
 			Tags:      tags,
 		})
 	}
-	return s.store.ReplaceIntelTestCases(ctx, projectID, m.ID, cases)
+	return cases
 }
 
 // persistFeatures clusters the extracted endpoints into candidate feature

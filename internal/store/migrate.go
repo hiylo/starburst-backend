@@ -107,6 +107,7 @@ var migrations = []migration{
 	{name: "intel_impacts", apply: migrationIntelImpacts},
 	{name: "intel_overviews", apply: migrationIntelOverviews},
 	{name: "intel_fix_finding", apply: migrationIntelFixFinding},
+	{name: "intel_dedup", apply: migrationIntelDedup},
 }
 
 // migrationIntel creates the Test Intelligence subsystem tables: flat project
@@ -821,6 +822,32 @@ func migrationIntelOverviews(ctx context.Context, driver string, db *sql.DB) err
 func migrationIntelFixFinding(ctx context.Context, driver string, db *sql.DB) error {
 	stmts := []string{
 		`ALTER TABLE intel_fixes ADD COLUMN finding_id INTEGER NOT NULL DEFAULT 0`,
+	}
+	for _, s := range stmts {
+		if _, err := db.ExecContext(ctx, s); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// migrationIntelDedup removes duplicate rows left by earlier scans that keyed
+// the child tables by an unstable module id. Each table is collapsed to the
+// lowest id per natural key; a subsequent analyze re-inserts a clean snapshot.
+func migrationIntelDedup(ctx context.Context, driver string, db *sql.DB) error {
+	stmts := []string{
+		`DELETE FROM intel_entities WHERE id NOT IN (
+			SELECT MIN(id) FROM intel_entities
+			GROUP BY project_id, entity, table_name, column_name, source_file, source_line)`,
+		`DELETE FROM intel_endpoints WHERE id NOT IN (
+			SELECT MIN(id) FROM intel_endpoints
+			GROUP BY project_id, method, path, source_file, source_line)`,
+		`DELETE FROM test_cases WHERE id NOT IN (
+			SELECT MIN(id) FROM test_cases
+			GROUP BY project_id, module, class, method, path)`,
+		`DELETE FROM intel_findings WHERE id NOT IN (
+			SELECT MIN(id) FROM intel_findings
+			GROUP BY project_id, detector, cve_or_rule_id, location)`,
 	}
 	for _, s := range stmts {
 		if _, err := db.ExecContext(ctx, s); err != nil {

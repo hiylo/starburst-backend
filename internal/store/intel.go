@@ -225,11 +225,12 @@ func (s *sqlStore) ListIntelModules(ctx context.Context, projectID int64) ([]*In
 	return out, rows.Err()
 }
 
-// ReplaceIntelEntities deletes the module's entity mappings and re-inserts the
-// given set (a full rescan replaces the prior snapshot).
-func (s *sqlStore) ReplaceIntelEntities(ctx context.Context, projectID, moduleID int64, ents []*IntelEntity) error {
+// ReplaceIntelEntities deletes the project's entity mappings and re-inserts the
+// given set (a full rescan replaces the prior snapshot). Each entity carries
+// its own ModuleID.
+func (s *sqlStore) ReplaceIntelEntities(ctx context.Context, projectID int64, ents []*IntelEntity) error {
 	if _, err := s.db.ExecContext(ctx, s.q(`
-		DELETE FROM intel_entities WHERE project_id = ? AND module_id = ?`), projectID, moduleID); err != nil {
+		DELETE FROM intel_entities WHERE project_id = ?`), projectID); err != nil {
 		return err
 	}
 	for _, e := range ents {
@@ -237,7 +238,7 @@ func (s *sqlStore) ReplaceIntelEntities(ctx context.Context, projectID, moduleID
 			INSERT INTO intel_entities (project_id, module_id, entity, table_name, column_name,
 				field_type, nullable, is_primary, source_file, source_line)
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
-			projectID, moduleID, e.Entity, e.TableName, e.ColumnName,
+			projectID, e.ModuleID, e.Entity, e.TableName, e.ColumnName,
 			e.FieldType, e.Nullable, e.IsPrimary, e.SourceFile, e.SourceLine); err != nil {
 			return err
 		}
@@ -273,11 +274,11 @@ func (s *sqlStore) ListIntelEntities(ctx context.Context, projectID, moduleID in
 	return out, rows.Err()
 }
 
-// ReplaceIntelEndpoints deletes the module's endpoint contracts and re-inserts
+// ReplaceIntelEndpoints deletes the project's endpoint contracts and re-inserts
 // the given set (a full rescan replaces the prior snapshot).
-func (s *sqlStore) ReplaceIntelEndpoints(ctx context.Context, projectID, moduleID int64, eps []*IntelEndpoint) error {
+func (s *sqlStore) ReplaceIntelEndpoints(ctx context.Context, projectID int64, eps []*IntelEndpoint) error {
 	if _, err := s.db.ExecContext(ctx, s.q(`
-		DELETE FROM intel_endpoints WHERE project_id = ? AND module_id = ?`), projectID, moduleID); err != nil {
+		DELETE FROM intel_endpoints WHERE project_id = ?`), projectID); err != nil {
 		return err
 	}
 	for _, ep := range eps {
@@ -285,7 +286,7 @@ func (s *sqlStore) ReplaceIntelEndpoints(ctx context.Context, projectID, moduleI
 			INSERT INTO intel_endpoints (project_id, module_id, method, path, response_type,
 				request_json, fields_json, source_file, source_line, summary)
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
-			projectID, moduleID, ep.Method, ep.Path, ep.ResponseType,
+			projectID, ep.ModuleID, ep.Method, ep.Path, ep.ResponseType,
 			ep.RequestJSON, ep.FieldsJSON, ep.SourceFile, ep.SourceLine, ep.Summary); err != nil {
 			return err
 		}

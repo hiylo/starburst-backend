@@ -327,7 +327,7 @@ func (s *Server) runIntelComplianceScan(ctx context.Context, projectID int64, ro
 			Summary:     f.Message,
 			Status:      "open",
 		}
-		if err := s.store.CreateIntelFinding(ctx, finding); err != nil {
+		if _, err := s.store.CreateIntelFindingIfAbsent(ctx, finding); err != nil {
 			log.Printf("intel compliance finding: %v", err)
 		}
 	}
@@ -337,7 +337,7 @@ func (s *Server) runIntelComplianceScan(ctx context.Context, projectID int64, ro
 // runIntelSecurityScan runs the deterministic sensitive-field detector over the
 // scanned entity columns and records security findings (detector=security) so
 // password/token/id-card/bank-card/mobile/amount fields are surfaced in the
-// audit view. Findings are deduplicated by location+summary.
+// audit view. Findings are deduplicated by location+rule.
 func (s *Server) runIntelSecurityScan(ctx context.Context, projectID int64, entities []*store.IntelEntity) error {
 	if len(entities) == 0 {
 		return nil
@@ -365,7 +365,7 @@ func (s *Server) runIntelSecurityScan(ctx context.Context, projectID int64, enti
 			Summary:    w.Message,
 			Status:     "open",
 		}
-		if err := s.store.CreateIntelFinding(ctx, finding); err != nil {
+		if _, err := s.store.CreateIntelFindingIfAbsent(ctx, finding); err != nil {
 			log.Printf("intel security finding: %v", err)
 		}
 	}

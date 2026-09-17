@@ -247,12 +247,12 @@ type Store interface {
 	ReplaceIntelModules(ctx context.Context, projectID int64, mods []*IntelModule) error
 	// ListIntelModules returns the project's sub-modules.
 	ListIntelModules(ctx context.Context, projectID int64) ([]*IntelModule, error)
-	// ReplaceIntelEntities replaces a module's entity↔table↔column mappings.
-	ReplaceIntelEntities(ctx context.Context, projectID, moduleID int64, ents []*IntelEntity) error
+	// ReplaceIntelEntities replaces the project's entity↔table↔column mappings.
+	ReplaceIntelEntities(ctx context.Context, projectID int64, ents []*IntelEntity) error
 	// ListIntelEntities returns entity mappings for a project/module.
 	ListIntelEntities(ctx context.Context, projectID, moduleID int64) ([]*IntelEntity, error)
-	// ReplaceIntelEndpoints replaces a module's endpoint contracts.
-	ReplaceIntelEndpoints(ctx context.Context, projectID, moduleID int64, eps []*IntelEndpoint) error
+	// ReplaceIntelEndpoints replaces the project's endpoint contracts.
+	ReplaceIntelEndpoints(ctx context.Context, projectID int64, eps []*IntelEndpoint) error
 	// ListIntelEndpoints returns endpoint contracts for a project/module.
 	ListIntelEndpoints(ctx context.Context, projectID, moduleID int64) ([]*IntelEndpoint, error)
 	// UpdateIntelEndpointSummary persists a business summary for one endpoint.
@@ -260,8 +260,8 @@ type Store interface {
 
 	// ---- Test Intelligence: test assets & execution ----
 
-	// ReplaceIntelTestCases replaces a module's discovered test cases.
-	ReplaceIntelTestCases(ctx context.Context, projectID, moduleID int64, cases []*TestCase) error
+	// ReplaceIntelTestCases replaces the project's discovered test cases.
+	ReplaceIntelTestCases(ctx context.Context, projectID int64, cases []*TestCase) error
 	// ListIntelTestCases returns test cases for a project/module.
 	ListIntelTestCases(ctx context.Context, projectID, moduleID int64) ([]*TestCase, error)
 	// CreateIntelTestRun persists a new test run and populates its id.
@@ -322,6 +322,8 @@ type Store interface {
 
 	// CreateIntelFinding persists a new audit finding.
 	CreateIntelFinding(ctx context.Context, f *IntelFinding) error
+	// CreateIntelFindingIfAbsent inserts a finding unless a matching one exists.
+	CreateIntelFindingIfAbsent(ctx context.Context, f *IntelFinding) (bool, error)
 	// ListIntelFindings returns findings for a project, filtered by status/detector.
 	ListIntelFindings(ctx context.Context, projectID int64, status, detector string) ([]*IntelFinding, error)
 	// GetIntelFinding loads a single finding by id.

@@ -96,8 +96,8 @@ type IntelFeature struct {
 
 // ReplaceIntelTestCases deletes a module's test cases and re-inserts the given
 // set, so a scan reflects the current repository layout.
-func (s *sqlStore) ReplaceIntelTestCases(ctx context.Context, projectID, moduleID int64, cases []*TestCase) error {
-	if _, err := s.db.ExecContext(ctx, s.q(`DELETE FROM test_cases WHERE project_id = ? AND module_id = ?`), projectID, moduleID); err != nil {
+func (s *sqlStore) ReplaceIntelTestCases(ctx context.Context, projectID int64, cases []*TestCase) error {
+	if _, err := s.db.ExecContext(ctx, s.q(`DELETE FROM test_cases WHERE project_id = ?`), projectID); err != nil {
 		return err
 	}
 	for _, c := range cases {
@@ -105,7 +105,7 @@ func (s *sqlStore) ReplaceIntelTestCases(ctx context.Context, projectID, moduleI
 			INSERT INTO test_cases (project_id, module_id, module, kind, framework, class, method,
 				path, tags, last_status, last_duration_ms, flaky_count, last_run_at, created_at)
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`),
-			projectID, moduleID, c.Module, c.Kind, c.Framework, c.Class, c.Method,
+			projectID, c.ModuleID, c.Module, c.Kind, c.Framework, c.Class, c.Method,
 			c.Path, c.Tags, c.LastStatus, c.LastDurationMs, c.FlakyCount, c.LastRunAt); err != nil {
 			return err
 		}
