@@ -3100,7 +3100,15 @@ async function suggestIntelOverride() {
   const res = await api("/api/intel/overrides/suggest", { method: "POST", headers: appHeaders(), body: JSON.stringify({ projectId: intelCurrentProject, instruction }) });
   const data = await res.json();
   if (!res.ok) { alert(data.error || "建议失败"); return; }
-  alert("AI 建议草稿（仅预览，请人工核对后自行添加覆写）：\n\n" + JSON.stringify(data.drafts || [], null, 2));
+  const drafts = data.drafts || [];
+  if (!drafts.length) { alert("AI 未提出有明确依据的覆写建议"); return; }
+  const ok = confirm("AI 建议草稿（仅预览）：\n\n" + JSON.stringify(drafts, null, 2) + "\n\n加入待确认队列，由人工确认后生效？");
+  if (!ok) return;
+  const r2 = await api("/api/intel/overrides/enqueue", { method: "POST", headers: appHeaders(), body: JSON.stringify({ projectId: intelCurrentProject, drafts }) });
+  const d2 = await r2.json();
+  if (!r2.ok) { alert(d2.error || "入队失败"); return; }
+  alert(`已加入待确认队列 ${d2.queued || 0} 条（待确认 Tab 处理）`);
+  loadIntelPending(intelCurrentProject);
 }
 
 async function scanIntelRules() {

@@ -2409,6 +2409,47 @@ public class UserController { @GetMapping("/list") public String list() { return
 	}
 }
 
+// TestIntelOverrideEnqueue verifies that override drafts flow into the 待确认
+// queue as pending rows (human reviews before they take effect).
+func TestIntelOverrideEnqueue(t *testing.T) {
+	s := newTestServer(t)
+	wh := loginWeb(t, s)
+
+	rec := s.do(t, http.MethodPost, "/api/intel/overrides/enqueue",
+		`{"projectId":1,"drafts":[{"target":"module","rowKey":"app","field":"role","autoValue":"provider","manualValue":"app","confidence":"high"},{"target":"feature","rowKey":"3","field":"name","manualValue":"改名"}]}`, wh)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("enqueue status %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Queued int `json:"queued"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("enqueue parse: %v", err)
+	}
+	if resp.Queued != 2 {
+		t.Errorf("queued = %d, want 2", resp.Queued)
+	}
+
+	rec = s.do(t, http.MethodGet, "/api/intel/pending?projectId=1", "", wh)
+	var pending struct {
+		Pending []struct {
+			Status string `json:"status"`
+			Source string `json:"source"`
+		} `json:"pending"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &pending); err != nil {
+		t.Fatalf("pending parse: %v", err)
+	}
+	if len(pending.Pending) != 2 {
+		t.Fatalf("pending = %d, want 2", len(pending.Pending))
+	}
+	for _, p := range pending.Pending {
+		if p.Status != "pending" || p.Source != "llm-suggest" {
+			t.Errorf("pending row = %+v", p)
+		}
+	}
+}
+
 func gitRun(t *testing.T, dir string, args ...string) {
 	t.Helper()
 	cmd := exec.Command("git", args...)

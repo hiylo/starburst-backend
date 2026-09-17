@@ -239,3 +239,69 @@ func (s *Server) handleIntelOverrideSuggest(w http.ResponseWriter, r *http.Reque
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"drafts": capLLMList(valid, 20)})
 }
+
+// handleIntelOverrideEnqueue persists AI-suggested (or free-form) override
+// drafts into the 待确认队列 as pending rows, so a human can review and
+// confirm them before they take effect on the analysis outputs.
+func (s *Server) handleIntelOverrideEnqueue(w http.ResponseWriter, r *http.Request) {
+	if !s.requireWeb(r) {
+		if _, ok := s.requireToken(r); !ok {
+			writeErr(w, http.StatusUnauthorized, "web session or APP token required")
+			return
+		}
+	}
+	if r.Method != http.MethodPost {
+		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	var req struct {
+		ProjectID int64 `json:"projectId"`
+		Drafts    []struct {
+			Target      string `json:"target"`
+			RowKey      string `json:"rowKey"`
+			Field       string `json:"field"`
+			AutoValue   string `json:"autoValue"`
+			ManualValue string `json:"manualValue"`
+			Confidence  string `json:"confidence"`
+		} `json:"drafts"`
+	}
+	if err := readJSONLimited(w, r, &req); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if req.ProjectID <= 0 || len(req.Drafts) == 0 {
+		writeErr(w, http.StatusBadRequest, "projectId and drafts are required")
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+	queued := 0
+	for _, d := range req.Drafts {
+		d.Target = cleanLLMText(d.Target, 64)
+		d.Field = cleanLLMText(d.Field, 64)
+		d.ManualValue = cleanLLMText(d.ManualValue, 200)
+		if d.Target == "" || d.Field == "" || d.ManualValue == "" {
+			continue
+		}
+		conf := cleanLLMText(d.Confidence, 16)
+		if conf == "" {
+			conf = "medium"
+		}
+		o := &store.IntelOverride{
+			ProjectID:     req.ProjectID,
+			Target:        d.Target,
+			RowKey:        cleanLLMText(d.RowKey, 128),
+			Field:         d.Field,
+			AutoValueJSON: cleanLLMText(d.AutoValue, 200),
+			ManualValue:   d.ManualValue,
+			Confidence:    conf,
+			Status:        "pending",
+			Source:        "llm-suggest",
+		}
+		if err := s.store.CreateIntelOverride(ctx, o); err != nil {
+			continue
+		}
+		queued++
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"queued": queued})
+}
