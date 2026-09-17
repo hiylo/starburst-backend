@@ -2491,6 +2491,7 @@ let mockMethod = "GET";
 let mockPath = "/";
 let mockParams = [];
 let mockBodyType = "";
+let mockEndpointId = 0;
 
 function mockValue(type, name) {
   const t = (type || "").toLowerCase();
@@ -2529,12 +2530,16 @@ function openIntelMock(idx) {
   mockPath = ep.path || "/";
   mockParams = params;
   mockBodyType = bodyType;
+  mockEndpointId = ep.id || 0;
   document.getElementById("intelMockTitle").textContent =
     `${mockMethod} ${mockPath}${bodyType ? "  ·  请求体类型 " + bodyType : ""}${ep.summary ? "  ·  " + ep.summary : ""}`;
   document.getElementById("intelMockUrl").value = buildMockUrl(mockMethod, mockPath, params);
   document.getElementById("intelMockBody").value = bodyType ? "{\n}" : "";
   document.getElementById("intelMockCurl").value = renderMockCurl();
   document.getElementById("intelMockStatus").textContent = "";
+  document.getElementById("intelContractJson").value = "";
+  document.getElementById("intelContractStatus").textContent = "";
+  document.getElementById("intelContractResult").innerHTML = "";
   document.getElementById("intelMockModal").classList.remove("hidden");
 }
 
@@ -2561,6 +2566,32 @@ async function copyIntelMock() {
   } catch (_) {
     document.getElementById("intelMockStatus").textContent = "复制失败，请手动选择";
   }
+}
+
+async function checkIntelContract() {
+  const st = document.getElementById("intelContractStatus");
+  const box = document.getElementById("intelContractResult");
+  const resp = document.getElementById("intelContractJson").value.trim();
+  st.textContent = "";
+  box.innerHTML = "";
+  if (!mockEndpointId) { st.textContent = "该接口暂无 id，无法校验"; return; }
+  if (!resp) { st.textContent = "请粘贴响应 JSON"; return; }
+  const res = await api("/api/intel/contracts/check", { method: "POST", headers: appHeaders(), body: JSON.stringify({ endpointId: mockEndpointId, responseJson: resp }) });
+  const data = await res.json();
+  if (!res.ok) { st.textContent = data.error || "校验失败"; return; }
+  const results = data.results || [];
+  st.textContent = `通过 ${data.passed || 0} / 失败 ${data.failed || 0}` + (data.note ? " · " + data.note : "");
+  if (!results.length) { box.innerHTML = `<div class="muted" style="padding:8px">${escapeHtml(data.note || "暂无字段契约")}</div>`; return; }
+  const rows = results.map(r => {
+    const ok = r.status === "passed";
+    const label = { missing: "缺失", null: "为 null", type_mismatch: "类型不符", unexpected: "结构不符" }[r.status] || r.status;
+    return `<div class="row" style="justify-content:space-between;gap:8px;padding:4px 0;border-bottom:1px solid var(--border)">
+      <span class="mono" style="font-size:12px">${escapeHtml(r.field || "-")}</span>
+      <span style="font-size:12px;color:${ok ? "var(--green,#16a34a)" : "var(--red,#dc2626)"}">${ok ? "✓" : "✗"} ${escapeHtml(label)}</span>
+      <span class="muted" style="font-size:11px;flex:1;text-align:right">${escapeHtml(r.reason || "")}</span>
+    </div>`;
+  }).join("");
+  box.innerHTML = rows;
 }
 
 /* ---------- 分析结果 Tab：功能点 / 用例 / 审计 / 问题 / 修复 / 运行 ---------- */

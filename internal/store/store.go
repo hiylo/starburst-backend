@@ -255,6 +255,8 @@ type Store interface {
 	ReplaceIntelEndpoints(ctx context.Context, projectID int64, eps []*IntelEndpoint) error
 	// ListIntelEndpoints returns endpoint contracts for a project/module.
 	ListIntelEndpoints(ctx context.Context, projectID, moduleID int64) ([]*IntelEndpoint, error)
+	// GetIntelEndpoint loads a single endpoint contract by id.
+	GetIntelEndpoint(ctx context.Context, id int64) (*IntelEndpoint, error)
 	// UpdateIntelEndpointSummary persists a business summary for one endpoint.
 	UpdateIntelEndpointSummary(ctx context.Context, projectID int64, method, path, summary string) error
 

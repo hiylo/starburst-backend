@@ -331,6 +331,20 @@ func (s *sqlStore) ListIntelEndpoints(ctx context.Context, projectID, moduleID i
 	return out, rows.Err()
 }
 
+// GetIntelEndpoint loads a single endpoint contract by id.
+func (s *sqlStore) GetIntelEndpoint(ctx context.Context, id int64) (*IntelEndpoint, error) {
+	row := s.db.QueryRowContext(ctx, s.q(`
+		SELECT id, project_id, module_id, method, path, response_type,
+			request_json, fields_json, source_file, source_line, summary
+		FROM intel_endpoints WHERE id = ?`), id)
+	ep := &IntelEndpoint{}
+	if err := row.Scan(&ep.ID, &ep.ProjectID, &ep.ModuleID, &ep.Method, &ep.Path,
+		&ep.ResponseType, &ep.RequestJSON, &ep.FieldsJSON, &ep.SourceFile, &ep.SourceLine, &ep.Summary); err != nil {
+		return nil, err
+	}
+	return ep, nil
+}
+
 // UpdateIntelEndpointSummary persists the LLM-derived business summary for a
 // single endpoint, matched by project + method + path.
 func (s *sqlStore) UpdateIntelEndpointSummary(ctx context.Context, projectID int64, method, path, summary string) error {

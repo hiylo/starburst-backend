@@ -457,6 +457,108 @@ public class UserEntity {
 	}
 }
 
+// TestIntelContractCheck verifies the response-contract validation endpoint:
+// analyze a repo with a DTO-returning controller, then validate a pasted
+// response that matches and one that violates the extracted field contract.
+func TestIntelContractCheck(t *testing.T) {
+	s := newTestServer(t)
+	wh := loginWeb(t, s)
+
+	root := t.TempDir()
+	writeTestFile(t, filepath.Join(root, "pom.xml"), `<project></project>`)
+	writeTestFile(t, filepath.Join(root, "src/main/java/demo/ActivityController.java"), `package demo;
+import org.springframework.web.bind.annotation.*;
+@RestController
+@RequestMapping("/api/activity")
+public class ActivityController {
+    @GetMapping("/get")
+    public demo.ActivityDto get() { return null; }
+}`)
+	writeTestFile(t, filepath.Join(root, "src/main/java/demo/ActivityDto.java"), `package demo;
+public class ActivityDto {
+    private Long id;
+    private String title;
+    private Boolean active;
+}`)
+
+	rec := s.do(t, http.MethodPost, "/api/intel/projects",
+		`{"name":"demo","source":"local","localPath":"`+filepath.ToSlash(root)+`"}`, wh)
+	var proj struct {
+		ID int64 `json:"id"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &proj); err != nil || proj.ID == 0 {
+		t.Fatalf("create project: %s", rec.Body.String())
+	}
+	rec = s.do(t, http.MethodPost, "/api/intel/analyze",
+		`{"projectId":`+jsonInt(proj.ID)+`}`, wh)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("analyze status %d: %s", rec.Code, rec.Body.String())
+	}
+
+	rec = s.do(t, http.MethodGet, "/api/intel/endpoints?projectId="+jsonInt(proj.ID), "", wh)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("endpoints status %d", rec.Code)
+	}
+	var epResp struct {
+		Endpoints []struct {
+			ID         int64  `json:"id"`
+			FieldsJSON string `json:"fieldsJson"`
+		} `json:"endpoints"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &epResp); err != nil {
+		t.Fatalf("endpoints parse: %v", err)
+	}
+	if len(epResp.Endpoints) != 1 {
+		t.Fatalf("endpoints = %d, want 1", len(epResp.Endpoints))
+	}
+	ep := epResp.Endpoints[0]
+	if !stringsContains(ep.FieldsJSON, "title") {
+		t.Fatalf("endpoint fieldsJson missing title: %s", ep.FieldsJSON)
+	}
+
+	// Matching response: all present, correct types.
+	rec = s.do(t, http.MethodPost, "/api/intel/contracts/check",
+		`{"endpointId":`+jsonInt(ep.ID)+`,"responseJson":"{\"id\":1,\"title\":\"hi\",\"active\":true}"}`, wh)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("contract check status %d: %s", rec.Code, rec.Body.String())
+	}
+	var okResp struct {
+		Passed int `json:"passed"`
+		Failed int `json:"failed"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &okResp); err != nil {
+		t.Fatalf("contract check parse: %v", err)
+	}
+	if okResp.Failed != 0 {
+		t.Errorf("matching response has %d failures: %s", okResp.Failed, rec.Body.String())
+	}
+
+	// Violating response: title is a number instead of string.
+	rec = s.do(t, http.MethodPost, "/api/intel/contracts/check",
+		`{"endpointId":`+jsonInt(ep.ID)+`,"responseJson":"{\"id\":1,\"title\":7,\"active\":true}"}`, wh)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("contract check status %d: %s", rec.Code, rec.Body.String())
+	}
+	var badResp struct {
+		Failed  int `json:"failed"`
+		Results []struct {
+			Field  string `json:"field"`
+			Status string `json:"status"`
+		} `json:"results"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &badResp); err != nil {
+		t.Fatalf("contract check parse: %v", err)
+	}
+	if badResp.Failed == 0 {
+		t.Fatalf("violating response reported 0 failures: %s", rec.Body.String())
+	}
+	for _, r := range badResp.Results {
+		if r.Field == "title" && r.Status != "type_mismatch" {
+			t.Errorf("title status = %q, want type_mismatch", r.Status)
+		}
+	}
+}
+
 func gitRun(t *testing.T, dir string, args ...string) {
 	t.Helper()
 	cmd := exec.Command("git", args...)

@@ -609,6 +609,14 @@
       <button onclick="copyIntelMock()">复制 cURL</button>
       <span id="intelMockStatus" class="muted" style="font-size:12px"></span>
     </div>
+    <hr style="margin:16px 0 10px">
+    <div class="muted" style="font-size:12px;margin-bottom:6px">响应契约校验（粘贴真实响应 JSON，与代码 DTO 字段比对）</div>
+    <textarea id="intelContractJson" rows="6" placeholder='{"id":1,"title":"hello","active":true}' style="font-family:monospace"></textarea>
+    <div class="row" style="margin-top:8px">
+      <button class="ghost" onclick="checkIntelContract()">校验响应</button>
+      <span id="intelContractStatus" class="muted" style="font-size:12px"></span>
+    </div>
+    <div id="intelContractResult" style="margin-top:8px;max-height:220px;overflow:auto"></div>
   </div>
 </div>
 

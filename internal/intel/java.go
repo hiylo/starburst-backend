@@ -243,6 +243,7 @@ func scanController(file string, lines []string, idx map[string]string) []*store
 			Path:         path,
 			ResponseType: respType,
 			RequestJSON:  extractRequestInfo(lines, i),
+			FieldsJSON:   resolveResponseFields(respType, lines, idx),
 			SourceFile:   file,
 			SourceLine:   i + 1,
 		})
@@ -304,6 +305,7 @@ func resolveInterfaceEndpoints(lines []string, idx map[string]string) []*store.I
 					Path:         path,
 					ResponseType: respType,
 					RequestJSON:  extractRequestInfo(ifaceLines, i),
+					FieldsJSON:   resolveResponseFields(respType, ifaceLines, idx),
 					SourceFile:   ifaceFile,
 					SourceLine:   i + 1,
 				})
@@ -558,4 +560,122 @@ func relPath(root, file string) string {
 		return file
 	}
 	return r
+}
+
+// fieldSpec is one response-field contract (name + JSON type + required flag)
+// produced from a DTO class.
+type fieldSpec struct {
+	Name     string `json:"name"`
+	Type     string `json:"type"`
+	Required bool   `json:"required"`
+}
+
+// resolveResponseFields resolves an endpoint's return type to the fields of the
+// DTO it wraps (via the repo-wide class index), rendering them as a JSON array
+// of {name,type,required}. It returns "" for primitive/void/list-of-primitive
+// responses or when the DTO cannot be located.
+func resolveResponseFields(returnType string, lines []string, idx map[string]string) string {
+	dto := innermostType(returnType)
+	if dto == "" || isPrimitiveOrVoid(dto) || len(idx) == 0 {
+		return ""
+	}
+	pkg := packageOf(lines)
+	imports := importsOf(lines)
+	var fqcn string
+	if strings.Contains(dto, ".") {
+		fqcn = dto
+	} else if imp := imports[dto]; imp != "" {
+		fqcn = imp
+	} else if pkg != "" {
+		fqcn = pkg + "." + dto
+	} else {
+		fqcn = dto
+	}
+	file, ok := idx[fqcn]
+	if !ok {
+		return ""
+	}
+	dtoLines, err := readLines(file)
+	if err != nil {
+		return ""
+	}
+	fields := extractDtoFields(dtoLines)
+	if len(fields) == 0 {
+		return ""
+	}
+	b, err := json.Marshal(fields)
+	if err != nil {
+		return ""
+	}
+	return string(b)
+}
+
+// innermostType extracts the innermost generic type argument of a return type
+// (OperationResponse<FriendPageDto> / List<FriendPageDto> → FriendPageDto), or
+// the bare type when there is no generic.
+func innermostType(t string) string {
+	t = strings.TrimSpace(t)
+	if i := strings.LastIndexByte(t, '<'); i >= 0 {
+		inner := t[i+1:]
+		if j := strings.IndexByte(inner, '>'); j >= 0 {
+			inner = inner[:j]
+		}
+		return strings.TrimSpace(inner)
+	}
+	return t
+}
+
+// isPrimitiveOrVoid reports whether a Java type name has no meaningful field
+// contract (void, wrappers, strings, collections, dates).
+func isPrimitiveOrVoid(t string) bool {
+	switch t {
+	case "void", "Void", "String", "Integer", "Long", "int", "long", "boolean", "Boolean",
+		"double", "Double", "float", "Float", "short", "Short", "byte", "Byte", "char",
+		"Character", "BigDecimal", "BigInteger", "Date", "LocalDate", "LocalDateTime",
+		"LocalTime", "Object", "Map", "List", "Set", "Collection", "UUID":
+		return true
+	}
+	return false
+}
+
+// extractDtoFields extracts the declared fields of a DTO class, mapping each
+// Java type to a JSON type. required defaults to false (nullability annotations
+// are not yet parsed; the LLM assist layer can refine it later).
+func extractDtoFields(lines []string) []fieldSpec {
+	out := make([]fieldSpec, 0)
+	for _, l := range lines {
+		fm := reField.FindStringSubmatch(l)
+		if fm == nil {
+			continue
+		}
+		out = append(out, fieldSpec{
+			Name: fm[2],
+			Type: javaToJSONType(fm[1]),
+		})
+	}
+	return out
+}
+
+// javaToJSONType maps a Java type to one of the canonical JSON types used by
+// the contract checker (string|number|boolean|array|object).
+func javaToJSONType(t string) string {
+	t = strings.TrimSpace(t)
+	switch t {
+	case "String", "char", "Character", "CharSequence", "Date", "LocalDate",
+		"LocalDateTime", "LocalTime", "UUID", "BigDecimal":
+		return "string"
+	case "int", "long", "short", "byte", "double", "float", "Integer", "Long",
+		"Short", "Byte", "Double", "Float", "BigInteger", "Number":
+		return "number"
+	case "boolean", "Boolean":
+		return "boolean"
+	}
+	if strings.HasPrefix(t, "List<") || strings.HasPrefix(t, "Set<") ||
+		strings.HasPrefix(t, "Collection<") || strings.HasSuffix(t, "[]") {
+		return "array"
+	}
+	if strings.HasPrefix(t, "Map<") {
+		return "object"
+	}
+	return "object"
 }
