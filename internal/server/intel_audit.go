@@ -416,6 +416,7 @@ func splitLocation(loc string) (string, int) {
 // scan root (main + associated repos) and persists findings (detector=rule). It
 // is invoked after a successful analyze so the audit view reflects the code.
 func (s *Server) runIntelComplianceScan(ctx context.Context, projectID int64, roots []string) error {
+	keep := make(map[string]bool)
 	for _, root := range roots {
 		findings, err := compliance.ScanDir(root)
 		if err != nil {
@@ -436,10 +437,19 @@ func (s *Server) runIntelComplianceScan(ctx context.Context, projectID int64, ro
 				Summary:     f.Message,
 				Status:      "open",
 			}
+			keep[f.RuleID+"\x00"+loc] = true
 			if _, err := s.store.CreateIntelFindingIfAbsent(ctx, finding); err != nil {
 				log.Printf("intel compliance finding: %v", err)
 			}
 		}
+	}
+	// 闭环：本次未命中的同规则 open finding 标记为 fixed（代码已修复的告警
+	// 不再残留在审计视图）。用户显式 waive/resolved 的不受影响。
+	n, err := s.store.CloseStaleIntelFindings(ctx, projectID, "rule", keep)
+	if err != nil {
+		log.Printf("intel compliance close-stale: %v", err)
+	} else if n > 0 {
+		log.Printf("intel compliance project %d: closed %d stale findings", projectID, n)
 	}
 	return nil
 }
@@ -449,7 +459,15 @@ func (s *Server) runIntelComplianceScan(ctx context.Context, projectID int64, ro
 // password/token/id-card/bank-card/mobile/amount fields are surfaced in the
 // audit view. Findings are deduplicated by location+rule.
 func (s *Server) runIntelSecurityScan(ctx context.Context, projectID int64, entities []*store.IntelEntity) error {
+	keep := make(map[string]bool)
 	if len(entities) == 0 {
+		// 无实体时也闭环保留告警闭环：security finding 在源码中消失即视为已修复。
+		n, err := s.store.CloseStaleIntelFindings(ctx, projectID, "security", keep)
+		if err != nil {
+			log.Printf("intel security close-stale: %v", err)
+		} else if n > 0 {
+			log.Printf("intel security project %d: closed %d stale findings", projectID, n)
+		}
 		return nil
 	}
 	seen := make(map[string]bool)
@@ -464,6 +482,7 @@ func (s *Server) runIntelSecurityScan(ctx context.Context, projectID int64, enti
 			continue
 		}
 		seen[key] = true
+		keep[w.Kind+"\x00"+loc] = true
 		finding := &store.IntelFinding{
 			ProjectID:   projectID,
 			ModuleID:    e.ModuleID,
@@ -478,6 +497,12 @@ func (s *Server) runIntelSecurityScan(ctx context.Context, projectID int64, enti
 		if _, err := s.store.CreateIntelFindingIfAbsent(ctx, finding); err != nil {
 			log.Printf("intel security finding: %v", err)
 		}
+	}
+	n, err := s.store.CloseStaleIntelFindings(ctx, projectID, "security", keep)
+	if err != nil {
+		log.Printf("intel security close-stale: %v", err)
+	} else if n > 0 {
+		log.Printf("intel security project %d: closed %d stale findings", projectID, n)
 	}
 	return nil
 }

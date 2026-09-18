@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/hiylo/starburst-backend/internal/store"
@@ -229,26 +230,73 @@ func (s *Server) handleIntelRuleScan(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	selected := selectedRules(rules, req.RuleIDs)
-	count := 0
+	if len(selected) == 0 {
+		writeJSON(w, http.StatusOK, map[string]any{"created": 0, "rules": 0})
+		return
+	}
+	// 限制扫描规模：每规则最多扫 aiRuleMaxChunks 个 chunk，避免规则×chunk
+	// 串行 LLM 在 5 分钟预算内必然超时。超出部分按 chunk 顺序截断（文档分块
+	// 已按语义切分，越靠前越贴近项目概要）。
+	const aiRuleMaxChunks = 60
+	if len(chunks) > aiRuleMaxChunks {
+		chunks = chunks[:aiRuleMaxChunks]
+	}
+	// rune 安全截断：按字节切片会从中间切断多字节 UTF-8，产生非法文本。
+	truncateRunes := func(s string, n int) string {
+		r := []rune(s)
+		if len(r) <= n {
+			return s
+		}
+		return string(r[:n]) + "…"
+	}
+
+	// 规则×chunk 组合扁平化后用有限并发扫描（默认 4 并发），LLM 调用是 IO
+	// 密集，串行在 chunk 多时严重拖垮吞吐。
+	type job struct {
+		rule    *store.IntelAIRule
+		title   string
+		loc     string
+		content string
+	}
+	var jobs []job
 	for _, rule := range selected {
 		for _, chunk := range chunks {
-			if len(chunk.Content) > 2000 {
-				chunk.Content = chunk.Content[:2000] + "…"
-			}
 			loc := chunk.SourceFile
 			if chunk.SourceLine > 0 {
 				loc += ":" + strconv.Itoa(chunk.SourceLine)
 			}
-			ok, err := s.runSingleAIRule(ctx, req.ProjectID, rule, chunk.Title, chunk.Content, loc)
-			if err != nil {
-				log.Printf("intel ai-rule %d chunk %s: %v", rule.ID, chunk.Title, err)
-				continue
-			}
-			if ok {
-				count++
-			}
+			jobs = append(jobs, job{
+				rule:    rule,
+				title:   chunk.Title,
+				loc:     loc,
+				content: truncateRunes(chunk.Content, 2000),
+			})
 		}
 	}
+	sem := make(chan struct{}, 4)
+	var mu sync.Mutex
+	count := 0
+	var wg sync.WaitGroup
+	for _, j := range jobs {
+		j := j
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			ok, err := s.runSingleAIRule(ctx, req.ProjectID, j.rule, j.title, j.content, j.loc)
+			if err != nil {
+				log.Printf("intel ai-rule %d chunk %s: %v", j.rule.ID, j.title, err)
+				return
+			}
+			if ok {
+				mu.Lock()
+				count++
+				mu.Unlock()
+			}
+		}()
+	}
+	wg.Wait()
 	writeJSON(w, http.StatusOK, map[string]any{"created": count, "rules": len(selected)})
 }
 

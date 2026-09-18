@@ -94,6 +94,42 @@ func (s *sqlStore) CreateIntelFindingIfAbsent(ctx context.Context, f *IntelFindi
 	return true, nil
 }
 
+// CloseStaleIntelFindings marks every open finding of a project+detector that
+// is NOT in keepKeys (cve_or_rule_id+location) as fixed, closing the loop after
+// a fresh scan: a rule that no longer fires (code fixed) must not linger as
+// "open" in the audit view. Findings the user explicitly waived/resolved are
+// left untouched. Returns how many findings were closed.
+func (s *sqlStore) CloseStaleIntelFindings(ctx context.Context, projectID int64, detector string, keepKeys map[string]bool) (int, error) {
+	rows, err := s.db.QueryContext(ctx, s.q(`
+		SELECT id, cve_or_rule_id, location FROM intel_findings
+		WHERE project_id = ? AND detector = ? AND status = ?`), projectID, detector, "open")
+	if err != nil {
+		return 0, err
+	}
+	defer rows.Close()
+	var stale []int64
+	for rows.Next() {
+		var id int64
+		var rule, loc string
+		if err := rows.Scan(&id, &rule, &loc); err != nil {
+			return 0, err
+		}
+		if !keepKeys[rule+"\x00"+loc] {
+			stale = append(stale, id)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+	for _, id := range stale {
+		if _, err := s.db.ExecContext(ctx, s.q(`
+			UPDATE intel_findings SET status = ? WHERE id = ?`), "fixed", id); err != nil {
+			return 0, err
+		}
+	}
+	return len(stale), nil
+}
+
 // ListIntelFindings returns findings for a project, optionally filtered by
 // status and detector ("" = all).
 func (s *sqlStore) ListIntelFindings(ctx context.Context, projectID int64, status, detector string) ([]*IntelFinding, error) {

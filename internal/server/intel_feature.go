@@ -62,6 +62,11 @@ func (s *Server) handleIntelFeatureTest(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	matched := feature.MatchEndpoints(eps, feat.Anchor)
+	// 手动功能点（无 anchor）或控制器改名导致 anchor 失配时，回退到功能点
+	// 的 EndsJSON（用户录入的 METHOD path 列表）匹配端点，避免单测静默返回空。
+	if len(matched) == 0 && feat.EndsJSON != "" {
+		matched = matchFeatureByEnds(eps, feat.EndsJSON)
+	}
 
 	results := make([]map[string]any, 0, len(matched))
 	for _, ep := range matched {
@@ -74,6 +79,36 @@ func (s *Server) handleIntelFeatureTest(w http.ResponseWriter, r *http.Request) 
 		"results":   results,
 		"count":     len(results),
 	})
+}
+
+// matchFeatureByEnds falls back to the feature's EndsJSON (a JSON array of
+// "METHOD path" strings as recorded for manual features) when anchor matching
+// yields nothing. It resolves each entry against the project's persisted
+// endpoints so the single-test flow can still probe them.
+func matchFeatureByEnds(eps []*store.IntelEndpoint, endsJSON string) []*store.IntelEndpoint {
+	var wants []string
+	if err := json.Unmarshal([]byte(endsJSON), &wants); err != nil {
+		return nil
+	}
+	out := make([]*store.IntelEndpoint, 0, len(wants))
+	for _, ep := range eps {
+		if ep == nil {
+			continue
+		}
+		key := ep.Method + " " + ep.Path
+		for _, w := range wants {
+			w = strings.TrimSpace(w)
+			if w == "" {
+				continue
+			}
+			// 精确匹配 METHOD path；也兼容只有 path（无方法）的录入。
+			if w == key || w == ep.Path {
+				out = append(out, ep)
+				break
+			}
+		}
+	}
+	return out
 }
 
 // testFeatureEndpoint issues one HTTP request for an endpoint (filling path and

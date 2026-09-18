@@ -367,6 +367,9 @@ type Store interface {
 	CreateIntelFindingIfAbsent(ctx context.Context, f *IntelFinding) (bool, error)
 	// ListIntelFindings returns findings for a project, filtered by status/detector.
 	ListIntelFindings(ctx context.Context, projectID int64, status, detector string) ([]*IntelFinding, error)
+	// CloseStaleIntelFindings closes open findings of project+detector that no
+	// longer appear in keepKeys, closing the loop after a fresh scan.
+	CloseStaleIntelFindings(ctx context.Context, projectID int64, detector string, keepKeys map[string]bool) (int, error)
 	// GetIntelFinding loads a single finding by id.
 	GetIntelFinding(ctx context.Context, id int64) (*IntelFinding, error)
 	// UpdateIntelFinding persists mutable finding fields.

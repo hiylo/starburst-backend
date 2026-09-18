@@ -957,3 +957,47 @@ func TestReplaceIntelModulesStableIDAndSummary(t *testing.T) {
 		t.Errorf("modules after removing b = %+v", mods)
 	}
 }
+
+// TestCloseStaleIntelFindings verifies the audit closed-loop: after a fresh
+// scan, open findings that no longer match keepKeys are marked fixed, freshly
+// present ones stay open, and waived/resolved findings are left untouched.
+func TestCloseStaleIntelFindings(t *testing.T) {
+	ctx := context.Background()
+	st := newTestStore(t)
+
+	// Seed three open findings: one that will remain, one that will close, and
+	// one that is waived and must stay as-is.
+	mk := func(rule, loc, status string) {
+		f := &IntelFinding{ProjectID: 7, Detector: "rule", Severity: "low", Category: "compliance",
+			CveOrRuleID: rule, Location: loc, Summary: "s", Status: status}
+		if _, err := st.CreateIntelFindingIfAbsent(ctx, f); err != nil {
+			t.Fatalf("seed finding %s: %v", rule, err)
+		}
+	}
+	mk("rule-still-there", "a.java:1", "open")
+	mk("rule-fixed", "b.java:2", "open")
+	mk("rule-waived", "c.java:3", "waived")
+
+	n, err := st.CloseStaleIntelFindings(ctx, 7, "rule", map[string]bool{"rule-still-there\x00a.java:1": true})
+	if err != nil {
+		t.Fatalf("close stale: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("closed %d findings, want 1", n)
+	}
+
+	byRule := map[string]*IntelFinding{}
+	list, _ := st.ListIntelFindings(ctx, 7, "", "")
+	for _, f := range list {
+		byRule[f.CveOrRuleID] = f
+	}
+	if byRule["rule-still-there"].Status != "open" {
+		t.Errorf("still-present finding closed: %q", byRule["rule-still-there"].Status)
+	}
+	if byRule["rule-fixed"].Status != "fixed" {
+		t.Errorf("stale finding not closed: %q", byRule["rule-fixed"].Status)
+	}
+	if byRule["rule-waived"].Status != "waived" {
+		t.Errorf("waived finding touched: %q", byRule["rule-waived"].Status)
+	}
+}

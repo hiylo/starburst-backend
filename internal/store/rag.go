@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"math"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -217,16 +218,10 @@ func (s *sqlStore) searchRagChunksSQLite(ctx context.Context, projectID, moduleI
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	// Sort by similarity descending (simple selection for small N).
-	for i := 0; i < len(all); i++ {
-		best := i
-		for j := i + 1; j < len(all); j++ {
-			if all[j].score > all[best].score {
-				best = j
-			}
-		}
-		all[i], all[best] = all[best], all[i]
-	}
+	// Sort by similarity descending. sort.Slice runs O(n·log n); a full sort is
+	// fine for typical chunk counts and far cheaper than the previous O(n²)
+	// selection sort for large projects.
+	sort.Slice(all, func(i, j int) bool { return all[i].score > all[j].score })
 	if len(all) > limit {
 		all = all[:limit]
 	}
