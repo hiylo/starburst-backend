@@ -25,9 +25,10 @@ func TestIntelPlanCommandSelection(t *testing.T) {
 	if build != "mvn clean install" {
 		t.Fatalf("whitelist build not honored: %q", build)
 	}
-	// go: default test is "go test -json ./...".
+	// go: default test is "go test -json -count=1 ./..." (count=1 禁用缓存，
+	// 否则命中缓存无逐用例 JSON 事件，解析为 0 用例)。
 	build, test = intelPlanCommandFor("", "go", "backend")
-	if build != "go build ./..." || test != "go test -json ./..." {
+	if build != "go build ./..." || test != "go test -json -count=1 ./..." {
 		t.Fatalf("go default: build=%q test=%q", build, test)
 	}
 	// npm has no whitelist → build "npm run build", test "npm test".

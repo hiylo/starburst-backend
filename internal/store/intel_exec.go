@@ -270,8 +270,8 @@ func (s *sqlStore) ListIntelTestRuns(ctx context.Context, projectID int64) ([]*T
 func (s *sqlStore) UpdateIntelTestRun(ctx context.Context, run *TestRun) error {
 	_, err := s.db.ExecContext(ctx, s.q(`
 		UPDATE test_runs SET status = ?, started_at = ?, finished_at = ?, log_path = ?,
-			progress = COALESCE(?, progress), output = COALESCE(?, output) WHERE id = ?`),
-		run.Status, run.StartedAt, run.FinishedAt, run.LogPath, run.Progress, run.Output, run.ID)
+			command = COALESCE(?, command), progress = COALESCE(?, progress), output = COALESCE(?, output) WHERE id = ?`),
+		run.Status, run.StartedAt, run.FinishedAt, run.LogPath, run.Command, run.Progress, run.Output, run.ID)
 	return err
 }
 

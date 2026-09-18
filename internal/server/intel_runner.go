@@ -110,7 +110,7 @@ func (s *Server) runIntelJob(projectID, moduleID, nodeID int64, force bool, run 
 	}
 	s.pushIntelRunEvent(run)
 
-	if err := s.runIntelTests(execCtx, projectID, moduleID, nodeID, force, run); err != nil {
+	if err := s.runIntelTests(execCtx, projectID, moduleID, nodeID, force, run, nil); err != nil {
 		if execCtx.Err() != nil {
 			s.failIntelRun(projectID, run, "执行超时或已取消："+execCtx.Err().Error())
 			return
@@ -277,7 +277,7 @@ func (s *Server) execIntelModule(ctx context.Context, projectID int64, m *store.
 	}
 	s.pushIntelRunEvent(mr)
 
-	if err := s.runIntelTests(mctx, projectID, m.ID, 0, force, mr); err != nil {
+	if err := s.runIntelTests(mctx, projectID, m.ID, 0, force, mr, nil); err != nil {
 		reason := err.Error()
 		if mctx.Err() != nil {
 			reason = "执行超时或已取消"

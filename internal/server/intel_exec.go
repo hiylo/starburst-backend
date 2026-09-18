@@ -327,7 +327,7 @@ func (s *Server) handleIntelRunByID(w http.ResponseWriter, r *http.Request) {
 // parses the framework report and persists the run + per-case results, turning
 // failures into intel_issues. When nodeID > 0 the command is routed over SSH to
 // a remote execution node instead of the local machine. It returns the run.
-func (s *Server) runIntelTests(ctx context.Context, projectID, moduleID, nodeID int64, force bool, run *store.TestRun) error {
+func (s *Server) runIntelTests(ctx context.Context, projectID, moduleID, nodeID int64, force bool, run *store.TestRun, overrideCmd []string) error {
 	p, err := s.store.GetIntelProject(ctx, projectID)
 	if err != nil {
 		return err
@@ -369,6 +369,20 @@ func (s *Server) runIntelTests(ctx context.Context, projectID, moduleID, nodeID 
 	// edited entries cannot inject shell metacharacters.
 	if wl := whitelistedTestCommand(p.CommandsJSON, module.BuildTool, module.KindType); wl != nil {
 		cmdArgs = wl
+	}
+	// 测试计划执行（POST /api/intel/plan）可覆盖命令：计划预览的命令必须先
+	// 经 argv 解析（无 shell）且无 shell 元字符，否则回退到默认/白名单命令。
+	if len(overrideCmd) > 0 {
+		safe := true
+		for _, tok := range overrideCmd {
+			if hasShellMeta(tok) {
+				safe = false
+				break
+			}
+		}
+		if safe {
+			cmdArgs = overrideCmd
+		}
 	}
 
 	run.ModuleID = module.ID
@@ -437,6 +451,15 @@ func (s *Server) runIntelTests(ctx context.Context, projectID, moduleID, nodeID 
 
 	run.Output = truncateOutput(output)
 	results := parseReport(reportKind, dir, output)
+	// 关键：parseReport 构造的结果不带 run/project/module 归属（默认 0），
+	// 写入前必须回填，否则 test_results 的 run_id/project_id/module_id 全是
+	// 0，运行详情页永远查不到本 run 的逐用例结果（既有 bug，真实用例被解析
+	// 出来后暴露）。
+	for _, res := range results {
+		res.RunID = run.ID
+		res.ProjectID = projectID
+		res.ModuleID = module.ID
+	}
 	flakyRetry(ctx, dir, reportKind, results)
 	// npm/other script runners produce no per-case report on stdout; synthesize a
 	// single whole-run result so the run has a definite pass/fail to display.

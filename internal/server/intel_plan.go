@@ -57,6 +57,13 @@ func intelPlanCommandFor(commandsJSON, buildTool, kindType string) (build, test 
 	if wl := whitelistedTestCommand(commandsJSON, buildTool, kindType); wl != nil {
 		test = strings.Join(wl, " ")
 	}
+	// Go 测试计划执行必须禁用缓存并强制 -json：`go test` 命中缓存时只输出
+	// "ok (cached)"，没有逐用例 JSON 事件；而无 -json 的裸命令（如默认白名单
+	// `go test ./...`）同样解析不出用例。计划执行要拿到真实逐用例结果，故 Go
+	// 命令若缺 -count=1 则回退到默认可解析命令；其他工具按白名单原样采用。
+	if buildTool == "go" && !strings.Contains(test, "-count=1") {
+		test = "go test -json -count=1 ./..."
+	}
 	switch buildTool {
 	case "go":
 		build = "go build ./..."
@@ -188,8 +195,28 @@ func (s *Server) handleIntelPlan(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	projectID, ok := s.intelQueryProject(w, r)
-	if !ok {
+	var projectID int64
+	if r.Method == http.MethodGet {
+		var ok bool
+		projectID, ok = s.intelQueryProject(w, r)
+		if !ok {
+			return
+		}
+	} else if r.Method == http.MethodPost {
+		var req struct {
+			ProjectID int64 `json:"projectId"`
+		}
+		if err := readJSONLimited(w, r, &req); err != nil {
+			writeErr(w, http.StatusBadRequest, "invalid request body")
+			return
+		}
+		if req.ProjectID <= 0 {
+			writeErr(w, http.StatusBadRequest, "projectId is required")
+			return
+		}
+		projectID = req.ProjectID
+	} else {
+		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
@@ -209,8 +236,6 @@ func (s *Server) handleIntelPlan(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"run": run, "plan": steps})
-	default:
-		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
 	}
 }
 
@@ -355,13 +380,14 @@ func (s *Server) execIntelPlanStep(ctx context.Context, projectID int64, step *I
 		}
 	}
 
-	// 测试阶段：复用现有单模块执行（解析报告、落结果、闭环 issue）。
+	// 测试阶段：复用现有单模块执行（解析报告、落结果、闭环 issue），并传入
+	// 计划预览选择的测试命令 argv（已做 shell 元字符校验，安全）。
 	mr.Command = step.TestCommand
 	mr.Progress = "测试中"
 	_ = s.store.UpdateIntelTestRun(mctx, mr)
 	s.pushIntelRunEvent(mr)
 
-	if err := s.runIntelTests(mctx, projectID, step.ModuleID, 0, true, mr); err != nil {
+	if err := s.runIntelTests(mctx, projectID, step.ModuleID, 0, true, mr, strings.Fields(step.TestCommand)); err != nil {
 		reason := err.Error()
 		if mctx.Err() != nil {
 			reason = "执行超时或已取消"
