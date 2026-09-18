@@ -129,6 +129,37 @@ func TestHealthEndpoint(t *testing.T) {
 	}
 }
 
+// TestSystemReportsVectorCapability verifies /api/system exposes the
+// vectorCapable capability the UI uses to show/hide 智能测试: on SQLite the
+// flag must be false (no pgvector), so 轻量化部署 hides the entry instead of
+// offering a half-broken feature.
+func TestSystemReportsVectorCapability(t *testing.T) {
+	s := newTestServer(t)
+	wh := loginWeb(t, s)
+
+	rec := s.do(t, http.MethodGet, "/api/system", "", wh)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("system status %d: %s", rec.Code, rec.Body.String())
+	}
+	var out struct {
+		DB            string `json:"db"`
+		PGVector      bool   `json:"pgvector"`
+		VectorCapable bool   `json:"vectorCapable"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("unmarshal: %v (%s)", err, rec.Body.String())
+	}
+	if out.DB != "sqlite" {
+		t.Fatalf("test server should use sqlite, got %q", out.DB)
+	}
+	if out.PGVector {
+		t.Error("sqlite must not report pgvector installed")
+	}
+	if out.VectorCapable {
+		t.Error("sqlite deployment must not be vectorCapable (no pgvector)")
+	}
+}
+
 func TestWebLoginFlow(t *testing.T) {
 	s := newTestServer(t)
 

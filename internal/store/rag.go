@@ -233,6 +233,22 @@ func (s *sqlStore) searchRagChunksSQLite(ctx context.Context, projectID, moduleI
 	return out, nil
 }
 
+// PGVectorInstalled reports whether the connected backend provides pgvector,
+// which the intel RAG/向量检索 requires. Only PostgreSQL with the `vector`
+// extension installed counts; SQLite (轻量化部署) does not provide pgvector and
+// therefore reports false so the UI hides vector-dependent intel features.
+func (s *sqlStore) PGVectorInstalled(ctx context.Context) (bool, error) {
+	if !isPostgres(s.driver) {
+		return false, nil
+	}
+	var n int
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM pg_extension WHERE extname = 'vector'`).Scan(&n)
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
 // CountProjectChunks returns the number of indexed chunks for a project.
 func (s *sqlStore) CountProjectChunks(ctx context.Context, projectID int64) (int64, error) {
 	var n int64

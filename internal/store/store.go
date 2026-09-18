@@ -51,6 +51,10 @@ type Store interface {
 	TouchToken(ctx context.Context, id string) error
 	// Ping verifies database connectivity.
 	Ping(ctx context.Context) error
+	// PGVectorInstalled reports whether the connected database provides the
+	// pgvector extension (PostgreSQL) or, on SQLite, whether a usable vector
+	// retrieval backend is present. The intel RAG/向量检索 requires it.
+	PGVectorInstalled(ctx context.Context) (bool, error)
 
 	// ---- Tasks (async orchestration queue) ----
 

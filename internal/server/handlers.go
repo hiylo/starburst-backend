@@ -76,12 +76,22 @@ func (s *Server) handleSystem(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 
 	version, _ := s.openCode.GetVersion(ctx)
+	// vectorCapable: 智能测试（含 RAG 向量检索）完整可用需要
+	// PostgreSQL(pgvector 扩展) + embedding 均已就绪。SQLite 轻量化部署不
+	// 满足即隐藏智能测试入口，而非给出残缺功能。
+	pgVec, pgErr := s.store.PGVectorInstalled(ctx)
+	vectorCapable := pgVec && s.embedding != nil && s.embedding.Enabled()
+	if pgErr != nil {
+		log.Printf("pgvector probe: %v", pgErr)
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"backend":         "starburst-backend",
 		"version":         config.Version,
 		"opencodeURL":     s.cfg.OpenCodeURL,
 		"opencodeVersion": version,
 		"db":              s.cfg.DBDriver,
+		"pgvector":        pgVec,
+		"vectorCapable":   vectorCapable,
 	})
 }
 

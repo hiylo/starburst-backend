@@ -214,6 +214,26 @@ function doLogout() {
   if (streamES) { streamES.close(); streamES = null; }
   renderAuth();
 }
+
+// 智能测试入口可见性由后端能力决定：SQLite 轻量化部署无 pgvector，不显示
+// 智能测试；PG(pgvector)+embedding 就绪时（vectorCapable=true）才显示。
+let vectorCapable = false;
+async function loadCapabilities() {
+  try {
+    const res = await fetch("/api/system", { headers: appHeaders() });
+    const data = await res.json();
+    vectorCapable = !!data.vectorCapable;
+  } catch (_) {
+    vectorCapable = false;
+  }
+  const intelBtn = document.querySelector('#nav [data-page="intel"]');
+  if (intelBtn) intelBtn.style.display = vectorCapable ? "" : "none";
+  // 若智能测试当前不可用但仍停留其页面，退回工作台。
+  if (!vectorCapable && TITLES[localStorage.getItem(PAGE_KEY)] === "intel") {
+    localStorage.setItem(PAGE_KEY, "workbench");
+  }
+}
+
 function renderAuth() {
   const logged = !!session;
   document.getElementById("loginPage").classList.toggle("hidden", logged);
@@ -230,9 +250,12 @@ function renderAuth() {
       if (p.id !== "loginPage") p.classList.add("hidden");
     });
   } else {
-    // 恢复上次所在页面（刷新不跳回首页）；无效/无记录则默认进 AI 工作台。
-    const last = localStorage.getItem(PAGE_KEY);
-    switchPage(TITLES[last] ? last : "workbench");
+    // 登录后先按后端能力显示/隐藏智能测试入口，再恢复上次所在页面（刷新
+    // 不跳回首页）；无效/无记录则默认进 AI 工作台。
+    loadCapabilities().then(() => {
+      const last = localStorage.getItem(PAGE_KEY);
+      switchPage(TITLES[last] ? last : "workbench");
+    });
   }
 }
 

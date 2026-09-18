@@ -32,6 +32,13 @@ set -euo pipefail
 PORT="${STARBURST_PORT:-18880}"
 DB="${STARBURST_DB:-sqlite}"
 PG_DSN="${STARBURST_PG_DSN:-}"
+# 未提供 --pg-dsn 时自动启动本机 pgvector Docker 容器（默认值以下）。
+PG_CONTAINER="${STARBURST_PG_CONTAINER:-starburst-pg}"
+PG_PORT="${STARBURST_PG_PORT:-55432}"
+PG_IMAGE="${STARBURST_PG_IMAGE:-pgvector/pgvector:pg16}"
+PG_USER="${STARBURST_PG_USER:-starburst}"
+PG_DBNAME="${STARBURST_PG_DBNAME:-starburst}"
+PG_PASSWORD="${STARBURST_PG_PASSWORD:-}" # 为空则随机生成
 ADMIN_PASSWORD="${STARBURST_ADMIN_PASSWORD:-}"
 DEFAULT_TOKEN="${STARBURST_DEFAULT_TOKEN:-}"
 WORKERS="${STARBURST_WORKERS:-4}"
@@ -48,9 +55,10 @@ while [[ $# -gt 0 ]]; do
     -h|--help)
       echo "用法: $0 [--port 18880] [--db sqlite|postgres] [--pg-dsn dsn] [--admin-password pw] [--default-token tok] \\"
       echo "       [--workers 4] [--task-retention 168h0m] [--prefix /] [--version 1.0.0] \\"
-      echo "       [--stt-url http://192.0.2.150:18090] [--stt-timeout 30s] [--stt-max-chunk-bytes 2097152]"
+      echo "       [--stt-url http://192.0.2.150:18090] [--stt-timeout 30s] [--stt-max-chunk-bytes 2097152] \\"
+      echo "       [--pg-container starburst-pg] [--pg-port 55432] [--pg-image pgvector/pgvector:pg16]"
       exit 0 ;;
-    --port|--db|--pg-dsn|--admin-password|--default-token|--workers|--task-retention|--prefix|--stt-url|--stt-timeout|--stt-max-chunk-bytes|--version)
+    --port|--db|--pg-dsn|--admin-password|--default-token|--workers|--task-retention|--prefix|--stt-url|--stt-timeout|--stt-max-chunk-bytes|--version|--pg-container|--pg-port|--pg-image|--pg-user|--pg-dbname|--pg-password)
       if [[ $# -lt 2 ]]; then
         echo "!! 参数 $opt 需要一个值" >&2
         exit 1
@@ -68,12 +76,23 @@ while [[ $# -gt 0 ]]; do
         --stt-timeout) STT_TIMEOUT="$2" ;;
         --stt-max-chunk-bytes) STT_MAX_CHUNK_BYTES="$2" ;;
         --version) VERSION="$2" ;;
+        --pg-container) PG_CONTAINER="$2" ;;
+        --pg-port) PG_PORT="$2" ;;
+        --pg-image) PG_IMAGE="$2" ;;
+        --pg-user) PG_USER="$2" ;;
+        --pg-dbname) PG_DBNAME="$2" ;;
+        --pg-password) PG_PASSWORD="$2" ;;
       esac
       shift 2
       ;;
     *) echo "未知参数: $opt" >&2; exit 1 ;;
   esac
 done
+
+# 自动部署型 PG 容器未显式提供密码时，生成一个随机强密码（仅本机可用）。
+if [[ -z "$PG_PASSWORD" ]]; then
+  PG_PASSWORD="$(head -c 24 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 24 || true)"
+fi
 
 # 沙箱模式：前缀不是 / 时不碰真实系统目录，也不启动服务。
 SYSTEMD=1
@@ -111,10 +130,6 @@ if ! [[ "$WORKERS" =~ ^[0-9]+$ ]] || [[ "$WORKERS" -lt 1 ]]; then
 fi
 if [[ "$DB" != "sqlite" && "$DB" != "postgres" ]]; then
   echo "!! --db 仅支持 sqlite 或 postgres: $DB" >&2
-  exit 1
-fi
-if [[ "$DB" == "postgres" && -z "$PG_DSN" ]]; then
-  echo "!! 选择 postgres 时必须提供 --pg-dsn" >&2
   exit 1
 fi
 if [[ -n "$STT_URL" && ! "$STT_URL" =~ ^https?://[A-Za-z0-9._-]+(:[0-9]+)?$ ]]; then
@@ -183,6 +198,52 @@ fi
 
 echo "==> 写入配置 $CONFIG_DIR"
 mkdir -p "$CONFIG_DIR" "$DATA_DIR" "$(dirname "$SERVICE_FILE")"
+
+# 选择 postgres 但未提供 --pg-dsn 时，自动启动本机 pgvector Docker 容器并
+# 生成连接串。这样智能测试（依赖 pgvector 向量检索）开箱即用；已提供 DSN
+# （如连现有 NAS/集群 PG）则直接用。
+if [[ "$DB" == "postgres" && -z "$PG_DSN" ]]; then
+  if ! command -v docker >/dev/null 2>&1; then
+    echo "!! 未提供 --pg-dsn 且未找到 docker，无法自动启动 pgvector 容器" >&2
+    echo "   请提供 --pg-dsn，或先安装 docker 后重跑" >&2
+    exit 1
+  fi
+  # 复用已存在的同名容器（幂等重装）：不重复创建/覆盖数据卷。
+  if [[ -n "$(docker ps -a --filter name="^/${PG_CONTAINER}$" --format '{{.Names}}')" ]]; then
+    echo "==> 复用已有 pgvector 容器 $PG_CONTAINER（未做数据迁移/重建）"
+  else
+    echo "==> 启动 pgvector Docker 容器 $PG_CONTAINER (:$PG_PORT) 镜像 $PG_IMAGE"
+    docker run -d --name "$PG_CONTAINER" --restart unless-stopped \
+      -e POSTGRES_USER="$PG_USER" \
+      -e POSTGRES_PASSWORD="$PG_PASSWORD" \
+      -e POSTGRES_DB="$PG_DBNAME" \
+      -p "$PG_PORT:5432" \
+      -v "$DATA_DIR/pgdata:/var/lib/postgresql/data" \
+      "$PG_IMAGE" >/dev/null || { echo "!! docker run 失败" >&2; exit 1; }
+    # 等待数据库就绪（最多 30s），然后确保 pgvector 扩展可用。
+    echo "==> 等待 pgvector 就绪…"
+    for _ in $(seq 1 30); do
+      if docker exec "$PG_CONTAINER" pg_isready -U "$PG_USER" -d "$PG_DBNAME" >/dev/null 2>&1; then
+        break
+      fi
+      sleep 1
+    done
+    docker exec "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DBNAME" \
+      -c "CREATE EXTENSION IF NOT EXISTS vector" >/dev/null 2>&1 \
+      || echo "  ! pgvector 扩展创建失败（可稍后手动 CREATE EXTENSION vector）"
+  fi
+  if [[ -z "$PG_PASSWORD" ]]; then
+    # 复用容器时密码未知：从容器环境变量读回；无法读取则提示手动提供。
+    PG_PASSWORD="$(docker exec "$PG_CONTAINER" printenv POSTGRES_PASSWORD 2>/dev/null | tr -d '\r' || true)"
+  fi
+  if [[ -z "$PG_PASSWORD" ]]; then
+    echo "!! 无法确定 $PG_CONTAINER 的 postgres 密码，请 --pg-password 或 --pg-dsn 显式指定" >&2
+    exit 1
+  fi
+  # 本机容器用 127.0.0.1 连接（不走局域网），避免走内网网段。
+  PG_DSN="postgres://${PG_USER}:${PG_PASSWORD}@127.0.0.1:${PG_PORT}/${PG_DBNAME}?sslmode=disable"
+  echo "==> 使用自动部署的 PG: ${PG_USER}@127.0.0.1:${PG_PORT}/${PG_DBNAME}"
+fi
 
 # 生成启动参数。SQLite 数据放 /var/lib, Postgres 用连接串。
 EXEC_ARGS=(--db "$DB" --workers "$WORKERS")
