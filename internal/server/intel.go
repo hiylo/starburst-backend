@@ -761,10 +761,11 @@ func (s *Server) getIntelProject(w http.ResponseWriter, r *http.Request, id int6
 	// 发现变化（代码改动）即后台触发全量分析，让契约/告警/画像自动跟上改动，
 	// 无需用户手动点分析。git 项目以 HEAD 为准（snapshotSHA 即 HEAD）；本地
 	// 非 git 项目用目录 hash（已含文件大小+mtime）。分析进行中（running）不
-	// 重复触发，且同项目 2 分钟防抖，避免页面轮询/连续打开把全量分析排队堆积。
+	// 重复触发；先判 SHA 变化、确认真正有变更才消耗防抖预算（否则普通的详情
+	// 查看会把预算耗尽），且同项目 2 分钟防抖避免排队堆积全量分析。
 	if p.AnalyzedAt != nil && p.AnalysisStatus != "running" && p.Source == "local" && p.LocalPath != "" {
-		if s.isIntelAutoAllowed(id) {
-			if cur, err := snapshotSHA(p.LocalPath); err == nil && cur != "" && cur != p.SnapshotSHA {
+		if cur, err := snapshotSHA(p.LocalPath); err == nil && cur != "" && cur != p.SnapshotSHA {
+			if s.isIntelAutoAllowed(id) {
 				log.Printf("intel project %d source changed (%s…), auto-triggering full analyze", id, cur[:min(8, len(cur))])
 				go s.autoAnalyzeIntel(id, false)
 			}
