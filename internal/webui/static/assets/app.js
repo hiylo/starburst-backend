@@ -4157,8 +4157,29 @@ async function runIntelTestsAll() {
   loadIntelRuns(id);
 }
 
+// runIntelPlan 生成并执行测试计划：后端按模块角色/最近失败/影响面规划顺序，
+// 每模块先构建后测试，串行执行。执行前弹出计划预览让用户确认。
+async function runIntelPlan() {
+  const id = intelCurrentProject;
+  if (!id) return;
+  const planRes = await api("/api/intel/plan?projectId=" + id, { headers: appHeaders() });
+  const planData = await planRes.json();
+  if (!planRes.ok) { toast("生成计划失败", (planData.error || "")); return; }
+  const plan = planData.plan || [];
+  if (!plan.length) { toast("暂无测试计划", "项目尚未分析或没有可执行模块", "warn"); return; }
+  const lines = plan.map((s, i) => `${i + 1}. [${s.kindRole || "?"}] ${escapeHtml(s.relPath)} → ${escapeHtml(s.testCommand) || "?"}`);
+  if (!confirm("按测试计划执行（先构建后测试，串行）：\n\n" + lines.join("\n") + "\n\n继续？")) return;
+  const st = document.getElementById("intelAnalyzeStatus");
+  if (st) st.textContent = "已排队，等待测试计划执行…";
+  const res = await api("/api/intel/plan", { method: "POST", headers: appHeaders(), body: JSON.stringify({ projectId: id }) });
+  const data = await res.json();
+  if (!res.ok) { if (st) st.textContent = ""; show(document.getElementById("intelMsg"), data.error || "计划执行失败"); return; }
+  if (st) st.textContent = "测试计划已入队（异步执行中）";
+  switchIntelTab("runs");
+  loadIntelRuns(id);
+}
+
 async function cancelIntelRun(runId) {
-  const res = await api("/api/intel/runs/" + runId + "/cancel", { method: "POST", headers: appHeaders() });
   const data = await res.json();
   if (!res.ok) { toast("取消失败", data.error || "该运行已结束或不可取消", "warn"); return; }
   toast("已请求取消", "测试运行正在终止", "info");
