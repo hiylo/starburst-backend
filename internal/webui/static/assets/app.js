@@ -2754,6 +2754,17 @@ document.addEventListener("DOMContentLoaded", () => {
   });
 });
 
+// intelStatusBadge renders the project analysis lifecycle status. Backend sets
+// analysisStatus = "running" during a background analyze, "ok" after success,
+// "failed" on error; ""/absent means never analyzed.
+function intelStatusBadge(p) {
+  const st = p.analysisStatus || "";
+  if (st === "running") return `<span class="intel-status running">分析中…</span>`;
+  if (st === "failed") return `<span class="intel-status failed">分析失败</span>`;
+  if (st === "ok" || p.analyzedAt) return `<span class="intel-status analyzed">已分析</span>`;
+  return `<span class="intel-status pending">待分析</span>`;
+}
+
 async function loadIntelProjects() {
   const res = await api("/api/intel/projects", { headers: appHeaders() });
   const data = await res.json();
@@ -2764,13 +2775,12 @@ async function loadIntelProjects() {
   let analyzed = 0;
   for (const p of list) {
     const loc = p.source === "git" ? p.gitUrl : p.localPath;
-    if (p.analyzedAt) analyzed++;
-    const isAnalyzed = !!p.analyzedAt;
+    if (p.analyzedAt || p.analysisStatus === "ok") analyzed++;
     tb.insertAdjacentHTML("beforeend", `<tr>
       <td class="clip" title="${escapeHtml(p.name)}"><strong>${escapeHtml(p.name)}</strong></td>
       <td><span class="badge">${escapeHtml(p.source)}</span></td>
       <td class="mono clip muted" title="${escapeHtml(loc)}">${escapeHtml(loc || "-")}</td>
-      <td><span class="intel-status ${isAnalyzed ? "analyzed" : "pending"}">${isAnalyzed ? "已分析" : "待分析"}</span></td>
+      <td>${intelStatusBadge(p)}</td>
       <td>
         <button class="ghost sm" data-id="${p.id}">详情</button>
         <button class="tertiary sm" data-del="${p.id}">删除</button>
@@ -3123,7 +3133,7 @@ async function loadIntelSummary(id) {
       <div class="row" style="justify-content:space-between">
         <strong style="font-size:13px">项目画像</strong>
         <div class="row" style="gap:6px">
-          <span class="intel-status ${p.analyzedAt ? "analyzed" : "pending"}">${p.analyzedAt ? "已分析" : "待分析"}</span>
+          ${intelStatusBadge(p)}
           <button class="ghost sm" onclick="editIntelProjectDescription()">编辑描述</button>
         </div>
       </div>

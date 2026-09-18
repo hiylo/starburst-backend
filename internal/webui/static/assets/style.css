@@ -978,6 +978,9 @@ td .actions { display: inline-flex; gap: 6px; }
 .badge.type-badge { background: var(--brand-gradient-soft); color: var(--ink); border-color: rgba(99,102,241,.25); }
 .intel-status { font-size: 11.5px; }
 .intel-status.analyzed { color: var(--success); }
+.intel-status.running { color: var(--brand); animation: pulse 1.4s ease-in-out infinite; }
+.intel-status.failed { color: var(--danger); font-weight: 600; }
+@keyframes pulse { 50% { opacity: .45; } }
 /* ============================== 知识库对话 ============================== */
 .intel-detail-layout {
   display: grid;

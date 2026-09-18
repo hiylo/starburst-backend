@@ -99,6 +99,10 @@ type IntelFeature struct {
 // ReplaceIntelTestCases deletes a module's test cases and re-inserts the given
 // set, so a scan reflects the current repository layout.
 func (s *sqlStore) ReplaceIntelTestCases(ctx context.Context, projectID int64, cases []*TestCase) error {
+	// 空列表保护：同 ReplaceIntelEntities——无结果保留旧快照，避免误清空。
+	if len(cases) == 0 {
+		return nil
+	}
 	if _, err := s.db.ExecContext(ctx, s.q(`DELETE FROM test_cases WHERE project_id = ?`), projectID); err != nil {
 		return err
 	}
@@ -403,6 +407,11 @@ func (s *sqlStore) UpdateIntelIssue(ctx context.Context, issue *IntelIssue) erro
 // 覆盖" holds at the id level too. Rows passed in with a non-zero id (e.g. the
 // manual rows re-sourced by persistFeatures) are updated in place by id.
 func (s *sqlStore) ReplaceIntelFeatures(ctx context.Context, projectID int64, feats []*IntelFeature) error {
+	// 空列表保护：同 ReplaceIntelEntities——无结果保留旧快照，避免误清空
+	// 功能点数据（已有 manual 行时，调用方总会带上，但保险起见仍判空）。
+	if len(feats) == 0 {
+		return nil
+	}
 	existing, err := s.ListIntelFeatures(ctx, projectID)
 	if err != nil {
 		return err

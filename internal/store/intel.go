@@ -23,8 +23,12 @@ type IntelProject struct {
 	CommandsJSON  string     `json:"commandsJson"`
 	EnvName       string     `json:"envName"`
 	AnalyzedAt    *time.Time `json:"analyzedAt"`
-	CreatedAt     time.Time  `json:"createdAt"`
-	UpdatedAt     time.Time  `json:"updatedAt"`
+	// AnalysisStatus is the background analyze lifecycle: "" never run, "running",
+	// "ok", "failed". It lets the UI show "分析失败/进行中" instead of guessing
+	// from a nil AnalyzedAt.
+	AnalysisStatus string     `json:"analysisStatus"`
+	CreatedAt      time.Time  `json:"createdAt"`
+	UpdatedAt      time.Time  `json:"updatedAt"`
 }
 
 // IntelModule is one sub-module of a monorepo/mixed-type repository.
@@ -85,19 +89,19 @@ func (s *sqlStore) CreateIntelProject(ctx context.Context, p *IntelProject) erro
 	if isPostgres(s.driver) {
 		return s.db.QueryRowContext(ctx, s.q(`
 			INSERT INTO projects (name, source, local_path, git_url, git_ref, description, last_tested_sha,
-				snapshot_sha, commands_json, env_name, analyzed_at, created_at, updated_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+				snapshot_sha, commands_json, env_name, analysis_status, analyzed_at, created_at, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
 			RETURNING id`),
 			p.Name, p.Source, p.LocalPath, p.GitURL, p.GitRef, p.Description, p.LastTestedSHA,
-			p.SnapshotSHA, p.CommandsJSON, p.EnvName, p.AnalyzedAt,
+			p.SnapshotSHA, p.CommandsJSON, p.EnvName, p.AnalysisStatus, p.AnalyzedAt,
 		).Scan(&p.ID)
 	}
 	res, err := s.db.ExecContext(ctx, s.q(`
 		INSERT INTO projects (name, source, local_path, git_url, git_ref, description, last_tested_sha,
-			snapshot_sha, commands_json, env_name, analyzed_at, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`),
+			snapshot_sha, commands_json, env_name, analysis_status, analyzed_at, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`),
 		p.Name, p.Source, p.LocalPath, p.GitURL, p.GitRef, p.Description, p.LastTestedSHA,
-		p.SnapshotSHA, p.CommandsJSON, p.EnvName, p.AnalyzedAt,
+		p.SnapshotSHA, p.CommandsJSON, p.EnvName, p.AnalysisStatus, p.AnalyzedAt,
 	)
 	if err != nil {
 		return err
@@ -114,7 +118,7 @@ func (s *sqlStore) CreateIntelProject(ctx context.Context, p *IntelProject) erro
 func (s *sqlStore) ListIntelProjects(ctx context.Context) ([]*IntelProject, error) {
 	rows, err := s.db.QueryContext(ctx, s.q(`
 		SELECT id, name, source, local_path, git_url, git_ref, description, last_tested_sha,
-			snapshot_sha, commands_json, env_name, analyzed_at, created_at, updated_at
+			snapshot_sha, commands_json, env_name, analysis_status, analyzed_at, created_at, updated_at
 		FROM projects ORDER BY created_at DESC`))
 	if err != nil {
 		return nil, err
@@ -135,7 +139,7 @@ func (s *sqlStore) ListIntelProjects(ctx context.Context) ([]*IntelProject, erro
 func (s *sqlStore) GetIntelProject(ctx context.Context, id int64) (*IntelProject, error) {
 	row := s.db.QueryRowContext(ctx, s.q(`
 		SELECT id, name, source, local_path, git_url, git_ref, description, last_tested_sha,
-			snapshot_sha, commands_json, env_name, analyzed_at, created_at, updated_at
+			snapshot_sha, commands_json, env_name, analysis_status, analyzed_at, created_at, updated_at
 		FROM projects WHERE id = ?`), id)
 	p, err := scanIntelProject(row)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -149,9 +153,18 @@ func (s *sqlStore) UpdateIntelProject(ctx context.Context, p *IntelProject) erro
 	_, err := s.db.ExecContext(ctx, s.q(`
 		UPDATE projects SET name = ?, source = ?, local_path = ?, git_url = ?, git_ref = ?,
 			description = ?, last_tested_sha = ?, snapshot_sha = ?, commands_json = ?, env_name = ?,
-			analyzed_at = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`),
+			analysis_status = ?, analyzed_at = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`),
 		p.Name, p.Source, p.LocalPath, p.GitURL, p.GitRef, p.Description, p.LastTestedSHA,
-		p.SnapshotSHA, p.CommandsJSON, p.EnvName, p.AnalyzedAt, p.ID)
+		p.SnapshotSHA, p.CommandsJSON, p.EnvName, p.AnalysisStatus, p.AnalyzedAt, p.ID)
+	return err
+}
+
+// MarkIntelAnalyzeStarted flags a project as analyzing so the UI can show the
+// in-progress state, and clears the stale analyzed timestamp.
+func (s *sqlStore) MarkIntelAnalyzeStarted(ctx context.Context, id int64) error {
+	_, err := s.db.ExecContext(ctx, s.q(`
+		UPDATE projects SET analysis_status = ?, analyzed_at = NULL,
+			updated_at = CURRENT_TIMESTAMP WHERE id = ?`), "running", id)
 	return err
 }
 
@@ -159,8 +172,16 @@ func (s *sqlStore) UpdateIntelProject(ctx context.Context, p *IntelProject) erro
 // a successful scan, and clears the pending "to re-analyze" state.
 func (s *sqlStore) MarkIntelProjectAnalyzed(ctx context.Context, id int64, snapshotSHA string) error {
 	_, err := s.db.ExecContext(ctx, s.q(`
-		UPDATE projects SET snapshot_sha = ?, analyzed_at = CURRENT_TIMESTAMP,
-			updated_at = CURRENT_TIMESTAMP WHERE id = ?`), snapshotSHA, id)
+		UPDATE projects SET snapshot_sha = ?, analysis_status = ?, analyzed_at = CURRENT_TIMESTAMP,
+			updated_at = CURRENT_TIMESTAMP WHERE id = ?`), snapshotSHA, "ok", id)
+	return err
+}
+
+// MarkIntelAnalyzeFailed records a failed background analysis so the UI can
+// distinguish "失败" from "从未分析". Keeps the previous snapshot data intact.
+func (s *sqlStore) MarkIntelAnalyzeFailed(ctx context.Context, id int64) error {
+	_, err := s.db.ExecContext(ctx, s.q(`
+		UPDATE projects SET analysis_status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`), "failed", id)
 	return err
 }
 
@@ -306,6 +327,11 @@ func (s *sqlStore) ListIntelModules(ctx context.Context, projectID int64) ([]*In
 // given set (a full rescan replaces the prior snapshot). Each entity carries
 // its own ModuleID.
 func (s *sqlStore) ReplaceIntelEntities(ctx context.Context, projectID int64, ents []*IntelEntity) error {
+	// 空列表保护：扫描阶段超时/失败会让调用方以空列表清库、把项目数据抹空。
+	// 无结果时保留旧快照（宁可数据略旧，不可误清空）；下一次成功扫描会覆盖。
+	if len(ents) == 0 {
+		return nil
+	}
 	if _, err := s.db.ExecContext(ctx, s.q(`
 		DELETE FROM intel_entities WHERE project_id = ?`), projectID); err != nil {
 		return err
@@ -376,6 +402,10 @@ func (s *sqlStore) AppendIntelEntities(ctx context.Context, projectID int64, ent
 // ReplaceIntelEndpoints deletes the project's endpoint contracts and re-inserts
 // the given set (a full rescan replaces the prior snapshot).
 func (s *sqlStore) ReplaceIntelEndpoints(ctx context.Context, projectID int64, eps []*IntelEndpoint) error {
+	// 空列表保护：同 ReplaceIntelEntities——无结果保留旧快照，避免误清空。
+	if len(eps) == 0 {
+		return nil
+	}
 	if _, err := s.db.ExecContext(ctx, s.q(`
 		DELETE FROM intel_endpoints WHERE project_id = ?`), projectID); err != nil {
 		return err
@@ -471,7 +501,7 @@ func scanIntelProject(row rowScanner) (*IntelProject, error) {
 	var analyzed *time.Time
 	err := row.Scan(&p.ID, &p.Name, &p.Source, &p.LocalPath, &p.GitURL, &p.GitRef,
 		&p.Description, &p.LastTestedSHA, &p.SnapshotSHA, &p.CommandsJSON, &p.EnvName,
-		&analyzed, &p.CreatedAt, &p.UpdatedAt)
+		&p.AnalysisStatus, &analyzed, &p.CreatedAt, &p.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}

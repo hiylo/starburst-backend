@@ -111,6 +111,9 @@ func (s *Server) handleIntelAnalyze(w http.ResponseWriter, r *http.Request) {
 	defer mu.Unlock()
 	if err := s.runIntelAnalyze(ctx, req.ProjectID); err != nil {
 		log.Printf("intel analyze project %d: %v", req.ProjectID, err)
+		if merr := s.store.MarkIntelAnalyzeFailed(ctx, req.ProjectID); merr != nil {
+			log.Printf("intel analyze fail marker project %d: %v", req.ProjectID, merr)
+		}
 		writeErr(w, http.StatusInternalServerError, "analyze failed: "+err.Error())
 		return
 	}
@@ -736,6 +739,9 @@ func (s *Server) createIntelProject(w http.ResponseWriter, r *http.Request) {
 		defer cancel()
 		if err := s.runIntelAnalyze(ctx, p.ID); err != nil {
 			log.Printf("intel auto-analyze project %d: %v", p.ID, err)
+			if merr := s.store.MarkIntelAnalyzeFailed(ctx, p.ID); merr != nil {
+				log.Printf("intel analyze fail marker project %d: %v", p.ID, merr)
+			}
 			return
 		}
 		go s.reindexAfterAnalyze(p.ID)
@@ -1060,6 +1066,9 @@ func (s *Server) autoAnalyzeIntel(projectID int64, incremental bool) {
 	}
 	if err != nil {
 		log.Printf("intel auto-analyze project %d (incremental=%v): %v", projectID, incremental, err)
+		if merr := s.store.MarkIntelAnalyzeFailed(ctx, projectID); merr != nil {
+			log.Printf("intel analyze fail marker project %d: %v", projectID, merr)
+		}
 		return
 	}
 	go s.reindexAfterAnalyze(projectID)
@@ -1080,6 +1089,9 @@ func (s *Server) runIntelAnalyze(ctx context.Context, projectID int64) error {
 	p, err := s.store.GetIntelProject(ctx, projectID)
 	if err != nil {
 		return err
+	}
+	if err := s.store.MarkIntelAnalyzeStarted(ctx, projectID); err != nil {
+		log.Printf("intel analyze start marker project %d: %v", projectID, err)
 	}
 	detected, err := s.detectIntelModules(ctx, p)
 	if err != nil {
@@ -1183,6 +1195,9 @@ func (s *Server) runIntelAnalyzeIncremental(ctx context.Context, projectID int64
 	p, err := s.store.GetIntelProject(ctx, projectID)
 	if err != nil {
 		return err
+	}
+	if err := s.store.MarkIntelAnalyzeStarted(ctx, projectID); err != nil {
+		log.Printf("intel analyze start marker project %d: %v", projectID, err)
 	}
 	detected, err := s.detectIntelModules(ctx, p)
 	if err != nil {

@@ -81,3 +81,91 @@ func TestReplaceIntelFeaturesKeepsStableIDs(t *testing.T) {
 		t.Errorf("manual summary not preserved: %q", third[0].Summary)
 	}
 }
+
+// TestReplaceIntelEntitiesEmptyKeepsSnapshot verifies the empty-list guard on
+// the core Replace* methods: when a scan yields no results (timeout/failure),
+// the previous snapshot is preserved instead of the project data being wiped.
+func TestReplaceIntelEntitiesEmptyKeepsSnapshot(t *testing.T) {
+	ctx := context.Background()
+	st := newTestStore(t)
+
+	if err := st.ReplaceIntelEntities(ctx, 1, []*IntelEntity{
+		{ModuleID: 1, Entity: "User", TableName: "users", ColumnName: "id", IsPrimary: true},
+	}); err != nil {
+		t.Fatalf("seed entities: %v", err)
+	}
+	if err := st.ReplaceIntelEndpoints(ctx, 1, []*IntelEndpoint{
+		{ModuleID: 1, Method: "GET", Path: "/api/users"},
+	}); err != nil {
+		t.Fatalf("seed endpoints: %v", err)
+	}
+
+	// Empty replaces must NOT wipe existing data.
+	if err := st.ReplaceIntelEntities(ctx, 1, nil); err != nil {
+		t.Fatalf("empty replace entities: %v", err)
+	}
+	if err := st.ReplaceIntelEndpoints(ctx, 1, nil); err != nil {
+		t.Fatalf("empty replace endpoints: %v", err)
+	}
+	ents, err := st.ListIntelEntities(ctx, 1, 0)
+	if err != nil || len(ents) != 1 {
+		t.Fatalf("entities after empty replace = %d (want 1 preserved), err=%v", len(ents), err)
+	}
+	eps, err := st.ListIntelEndpoints(ctx, 1, 0)
+	if err != nil || len(eps) != 1 {
+		t.Fatalf("endpoints after empty replace = %d (want 1 preserved), err=%v", len(eps), err)
+	}
+
+	// A non-empty replace still replaces as before.
+	if err := st.ReplaceIntelEntities(ctx, 1, []*IntelEntity{
+		{ModuleID: 1, Entity: "Order", TableName: "orders", ColumnName: "id", IsPrimary: true},
+	}); err != nil {
+		t.Fatalf("non-empty replace: %v", err)
+	}
+	ents, _ = st.ListIntelEntities(ctx, 1, 0)
+	if len(ents) != 1 || ents[0].Entity != "Order" {
+		t.Fatalf("non-empty replace did not swap data: %+v", ents)
+	}
+}
+
+// TestIntelAnalysisStatusLifecycle verifies the running → ok/failed lifecycle
+// markers persist and are returned by the project queries.
+func TestIntelAnalysisStatusLifecycle(t *testing.T) {
+	ctx := context.Background()
+	st := newTestStore(t)
+
+	p := &IntelProject{Name: "status-lifecycle", Source: "local", LocalPath: "/tmp/x"}
+	if err := st.CreateIntelProject(ctx, p); err != nil || p.ID == 0 {
+		t.Fatalf("create project: %v id=%d", err, p.ID)
+	}
+
+	// 初始为空。
+	got, err := st.GetIntelProject(ctx, p.ID)
+	if err != nil || got.AnalysisStatus != "" {
+		t.Fatalf("initial status = %q err=%v", got.AnalysisStatus, err)
+	}
+
+	if err := st.MarkIntelAnalyzeStarted(ctx, p.ID); err != nil {
+		t.Fatalf("mark started: %v", err)
+	}
+	got, _ = st.GetIntelProject(ctx, p.ID)
+	if got.AnalysisStatus != "running" {
+		t.Fatalf("after start status = %q, want running", got.AnalysisStatus)
+	}
+
+	if err := st.MarkIntelAnalyzeFailed(ctx, p.ID); err != nil {
+		t.Fatalf("mark failed: %v", err)
+	}
+	got, _ = st.GetIntelProject(ctx, p.ID)
+	if got.AnalysisStatus != "failed" {
+		t.Fatalf("after fail status = %q, want failed", got.AnalysisStatus)
+	}
+
+	if err := st.MarkIntelProjectAnalyzed(ctx, p.ID, "abc123"); err != nil {
+		t.Fatalf("mark analyzed: %v", err)
+	}
+	got, _ = st.GetIntelProject(ctx, p.ID)
+	if got.AnalysisStatus != "ok" || got.SnapshotSHA != "abc123" || got.AnalyzedAt == nil {
+		t.Fatalf("after ok status = %q sha=%q analyzedAt=%v", got.AnalysisStatus, got.SnapshotSHA, got.AnalyzedAt)
+	}
+}

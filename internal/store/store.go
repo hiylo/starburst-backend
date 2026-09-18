@@ -248,6 +248,10 @@ type Store interface {
 	UpdateIntelProject(ctx context.Context, p *IntelProject) error
 	// MarkIntelProjectAnalyzed records the snapshot sha and analyzed timestamp.
 	MarkIntelProjectAnalyzed(ctx context.Context, id int64, snapshotSHA string) error
+	// MarkIntelAnalyzeStarted flags a project as analyzing (status "running").
+	MarkIntelAnalyzeStarted(ctx context.Context, id int64) error
+	// MarkIntelAnalyzeFailed records a failed background analysis ("failed").
+	MarkIntelAnalyzeFailed(ctx context.Context, id int64) error
 	// DeleteIntelProject removes a project and all its intel data.
 	DeleteIntelProject(ctx context.Context, id int64) error
 	// ReplaceIntelModules replaces the project's module list (full rescan).

@@ -124,6 +124,7 @@ var migrations = []migration{
 	{name: "projects_description", apply: migrationProjectsDescription},
 	{name: "intel_project_sources", apply: migrationIntelProjectSources},
 	{name: "test_runs_progress", apply: migrationTestRunsProgress},
+	{name: "intel_analysis_status", apply: migrationIntelAnalysisStatus},
 }
 
 // migrationIntel creates the Test Intelligence subsystem tables: flat project
@@ -1230,6 +1231,17 @@ func migrationTestRunsProgress(ctx context.Context, driver string, db *sql.DB) e
 		}
 	}
 	return nil
+}
+
+// migrationIntelAnalysisStatus tracks the background intel analyze outcome so
+// the UI can distinguish "分析进行中 / 分析成功 / 分析失败" instead of guessing
+// from an empty analyzed_at. Values: "" (never), "running", "ok", "failed".
+func migrationIntelAnalysisStatus(ctx context.Context, driver string, db *sql.DB) error {
+	_, err := db.ExecContext(ctx, `ALTER TABLE projects ADD COLUMN analysis_status TEXT NOT NULL DEFAULT ''`)
+	if err != nil && strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+		return nil // 已存在（并发迁移重入）
+	}
+	return err
 }
 
 // migrationIntelProjectSources adds the per-end associated source repos of an
