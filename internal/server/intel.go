@@ -757,6 +757,19 @@ func (s *Server) getIntelProject(w http.ResponseWriter, r *http.Request, id int6
 		writeErr(w, http.StatusNotFound, "project not found")
 		return
 	}
+	// 源码变更自动分析：对已分析过的本地项目，对比当前 snapshotSHA 与记录值，
+	// 发现变化（代码改动）即后台触发全量分析，让契约/告警/画像自动跟上改动，
+	// 无需用户手动点分析。git 项目以 HEAD 为准（snapshotSHA 即 HEAD）；本地
+	// 非 git 项目用目录 hash（已含文件大小+mtime）。分析进行中（running）不
+	// 重复触发，且同项目 2 分钟防抖，避免页面轮询/连续打开把全量分析排队堆积。
+	if p.AnalyzedAt != nil && p.AnalysisStatus != "running" && p.Source == "local" && p.LocalPath != "" {
+		if s.isIntelAutoAllowed(id) {
+			if cur, err := snapshotSHA(p.LocalPath); err == nil && cur != "" && cur != p.SnapshotSHA {
+				log.Printf("intel project %d source changed (%s…), auto-triggering full analyze", id, cur[:min(8, len(cur))])
+				go s.autoAnalyzeIntel(id, false)
+			}
+		}
+	}
 	mods, err := s.store.ListIntelModules(ctx, id)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "load modules failed")
@@ -1043,6 +1056,23 @@ func (s *Server) detectIntelModules(ctx context.Context, p *store.IntelProject) 
 		out.scans = append(out.scans, intelModuleScan{m: m, dir: dir, root: scanRoot, rel: rel})
 	}
 	return out, nil
+}
+
+// isIntelAutoAllowed debounces the source-change auto-analyze trigger: a
+// project is allowed at most once every intelAutoInterval, preventing a page
+// poll / rapid detail opens from queueing several full analyzes back to back.
+const intelAutoInterval = 2 * time.Minute
+
+func (s *Server) isIntelAutoAllowed(projectID int64) bool {
+	s.intelAutoMu.Lock()
+	defer s.intelAutoMu.Unlock()
+	last, ok := s.intelAutoLast[projectID]
+	now := time.Now()
+	if ok && now.Sub(last) < intelAutoInterval {
+		return false
+	}
+	s.intelAutoLast[projectID] = now
+	return true
 }
 
 // autoAnalyzeIntel runs a full or incremental analysis for a project outside

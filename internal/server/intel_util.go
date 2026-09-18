@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -40,7 +41,11 @@ func intelResolveRepoPath(root, repoRel string) (string, error) {
 }
 
 // simpleTreeHash hashes a deterministic projection of the directory tree
-// (relative paths + sizes) so staleness checks work without git.
+// (relative paths + size + modtime) so staleness checks work without git. Size
+// and mtime are included so a file's content change invalidates the hash; a
+// path-only hash would miss local edits (the snapshot would never be stale).
+// modtime granularity means two edits within the same nanosecond and same size
+// could theoretically be missed, which is acceptable for staleness detection.
 func simpleTreeHash(root string) (string, error) {
 	h := sha256.New()
 	files := make([]string, 0)
@@ -56,7 +61,7 @@ func simpleTreeHash(root string) (string, error) {
 		if err != nil {
 			return nil
 		}
-		files = append(files, rel)
+		files = append(files, rel+"\x00"+strconv.FormatInt(info.Size(), 10)+"\x00"+strconv.FormatInt(info.ModTime().UnixNano(), 10))
 		return nil
 	})
 	sort.Strings(files)

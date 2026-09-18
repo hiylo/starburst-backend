@@ -50,6 +50,9 @@ type Server struct {
 	// intelAnalyzeMu 串行化同一项目的分析（全量/增量），避免创建与保存流程
 	// 触发重入时并发扫描同一仓库。
 	intelAnalyzeMu sync.Map // int64 projectID → *sync.Mutex
+	// intelAutoMu 保护 intelAutoLast：GET 详情触发源码变更自动分析时的防抖。
+	intelAutoMu   sync.Mutex
+	intelAutoLast map[int64]time.Time
 	// intelExecMu 串行化同一项目的测试执行（单项目内一次只跑一个 run），
 	// 避免多个测试进程同时写同一模块的构建产物。
 	intelExecMu sync.Map // int64 projectID → *sync.Mutex
@@ -93,6 +96,7 @@ func New(cfg *config.Config, st store.Store, am *auth.Manager, oc *opencode.Clie
 		auditCh:      make(chan *store.AuditEntry, 512),
 		intelExecSem: make(chan struct{}, intelExecConcurrency),
 		intelCancels: make(map[int64]context.CancelFunc),
+		intelAutoLast: make(map[int64]time.Time),
 	}
 }
 
