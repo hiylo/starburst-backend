@@ -6,6 +6,9 @@
 package testassets
 
 import (
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -123,9 +126,12 @@ func classifyFile(fullPath, relSlash, moduleRelPath string, isPlaywright, isVite
 		return []Asset{newAsset(moduleRelPath, "unit", "pytest", "", "", relSlash, nil)}
 	}
 
-	// Go: *_test.go → go-test.
-	if strings.HasSuffix(base, "_test.go") {
-		return []Asset{newAsset(moduleRelPath, "unit", "go-test", "", "", relSlash, nil)}
+	// Go: *_test.go → go-test, one Asset per top-level function whose name starts
+// with Test/Benchmark/Example (class = base name without _test.go, so the
+// runner can backfill last_status per case). Files with no such top-level
+// funcs still yield one file-level Asset so the file is not lost.
+if strings.HasSuffix(base, "_test.go") {
+		return classifyGo(fullPath, moduleRelPath, relSlash)
 	}
 
 	// Android instrumentation: src/androidTest/** → android-ui (instrumentation).
@@ -159,6 +165,46 @@ func classifyFile(fullPath, relSlash, moduleRelPath string, isPlaywright, isVite
 	}
 
 	return nil
+}
+
+// classifyGo parses a *_test.go file and returns one Asset per top-level test
+// function (Test*/Benchmark*/Example*), so per-case status backfill matches the
+// runner's per-case results. The file base name (without _test.go) is used as
+// the class so results keyed "Class.method" resolve deterministically. When the
+// file declares no top-level test funcs (helpers only), a single file-level
+// Asset is emitted to keep the file visible in the asset list.
+func classifyGo(fullPath, moduleRelPath, relSlash string) []Asset {
+	base := baseName(relSlash)
+	class := strings.TrimSuffix(base, "_test.go")
+	data, err := os.ReadFile(fullPath)
+	if err != nil {
+		return []Asset{newAsset(moduleRelPath, "unit", "go-test", class, "", relSlash, nil)}
+	}
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, fullPath, data, 0)
+	if err != nil {
+		return []Asset{newAsset(moduleRelPath, "unit", "go-test", class, "", relSlash, nil)}
+	}
+	names := make([]string, 0)
+	for _, decl := range f.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if !ok || fn.Recv != nil {
+			continue
+		}
+		n := fn.Name.Name
+		if strings.HasPrefix(n, "Test") || strings.HasPrefix(n, "Benchmark") || strings.HasPrefix(n, "Example") {
+			names = append(names, n)
+		}
+	}
+	sort.Strings(names)
+	if len(names) == 0 {
+		return []Asset{newAsset(moduleRelPath, "unit", "go-test", class, "", relSlash, nil)}
+	}
+	out := make([]Asset, 0, len(names))
+	for _, n := range names {
+		out = append(out, newAsset(moduleRelPath, "unit", "go-test", class, n, relSlash, nil))
+	}
+	return out
 }
 
 // classifyJava parses a JUnit test class: one Asset per @Test method (or a

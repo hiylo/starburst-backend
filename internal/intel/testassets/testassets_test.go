@@ -44,6 +44,11 @@ public class OrderIT {
     }
 }`,
 		"pkg/user_test.go": "package pkg",
+		"pkg/cart_test.go": `package pkg
+
+func TestCartAdd(t *testing.T) {}
+func BenchmarkCart(t *testing.B) {}
+func helper() {}`,
 		"src/util.spec.ts": `describe("util", () => {});`,
 		"e2e/home.spec.ts": `test("home", async () => {});`,
 		"app/src/androidTest/java/ExampleInstrumentedTest.kt": "class ExampleInstrumentedTest",
@@ -85,7 +90,11 @@ func TestDiscoverClassifies(t *testing.T) {
 		{"src/test/java/demo/UserServiceTest.java#testFind", "", "unit", "junit", "UserServiceTest", "testFind", nil},
 		{"src/test/java/demo/UserServiceTest.java#testCreate", "", "unit", "junit", "UserServiceTest", "testCreate", nil},
 		{"src/test/java/demo/OrderIT.java#testOrder", "", "integration", "junit", "OrderIT", "testOrder", []string{"integration"}},
-		{"pkg/user_test.go", "", "unit", "go-test", "", "", nil},
+		// 无顶层 Test 函数的 *_test.go 仍是文件级资产（class=文件名去 _test.go）。
+		{"pkg/user_test.go", "", "unit", "go-test", "user", "", nil},
+		// 有 Test*/Benchmark* 的 *_test.go 按函数拆成独立资产；helper 不产出。
+		{"pkg/cart_test.go#TestCartAdd", "", "unit", "go-test", "cart", "TestCartAdd", nil},
+		{"pkg/cart_test.go#BenchmarkCart", "", "unit", "go-test", "cart", "BenchmarkCart", nil},
 		{"src/util.spec.ts", "", "unit", "jest", "", "", nil},
 		{"e2e/home.spec.ts", "", "e2e-ui", "playwright", "", "", nil},
 		{"app/src/androidTest/java/ExampleInstrumentedTest.kt", "", "android-ui", "gradle", "ExampleInstrumentedTest", "", []string{"instrumentation"}},

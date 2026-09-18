@@ -208,7 +208,8 @@ func ScanModule(root, relPath string) (*scanSummary, error) {
 	}
 	pom, _ := filepath.Glob(filepath.Join(dir, "pom.xml"))
 	gradle, _ := filepath.Glob(filepath.Join(dir, "build.gradle*"))
-	if len(pom) == 0 && len(gradle) == 0 {
+	goMod, _ := filepath.Glob(filepath.Join(dir, "go.mod"))
+	if len(pom) == 0 && len(gradle) == 0 && len(goMod) == 0 {
 		return &scanSummary{}, nil
 	}
 	files := make([]string, 0)
@@ -227,6 +228,27 @@ func ScanModule(root, relPath string) (*scanSummary, error) {
 		}
 		return nil
 	})
+	if len(goMod) > 0 {
+		// Go 模块：契约视图来自导出函数/方法与标准库 HTTP 路由注册。
+		goFiles := make([]string, 0)
+		_ = filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+			if err != nil {
+				return nil
+			}
+			if info.IsDir() {
+				if skipDirRel(path, dir) {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+			if strings.HasSuffix(path, ".go") {
+				goFiles = append(goFiles, path)
+			}
+			return nil
+		})
+		ents, eps := scanGoFiles(goFiles)
+		return &scanSummary{Entities: ents, Endpoints: eps}, nil
+	}
 	if len(files) == 0 {
 		return &scanSummary{}, nil
 	}
