@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"log"
@@ -69,12 +70,34 @@ func (s *Server) StartEventCollector(ctx context.Context) {
 			if !ok {
 				return nil
 			}
-			if isHighFrequencyEvent(eventType) {
-				if sessionID != "" && isMessageActivityEvent(eventType) {
-					s.sessionActivity.Store(sessionID, time.Now())
-				}
-				return nil
+if isHighFrequencyEvent(eventType) {
+			if sessionID != "" && isMessageActivityEvent(eventType) {
+				s.sessionActivity.Store(sessionID, time.Now())
 			}
+			// message.part.updated 本按高频丢弃（文本/推理 part 每 token 一次）；
+			// 但「工具」与「文件」part 的状态变化是低频、有动作语义的（运行/完成/失败
+			// 某工具、产出某文件），值得入库供实时动态栏展示。用有界前缀子串检测
+			// 避免为整段流式文本做 O(n²) 扫描：只查前 1KB，任何 part 的 type 都在
+			// 事件体开头，命中即完整解析落库。注意 lightParseEvent 无法从 v1.18
+			// wrapper 里取到 sessionID（它在 payload.properties 里），这里用完整
+			// 解析后的 se.SessionID 判空。
+			if eventType == "message.part.updated" {
+				data := ev.Data
+				if len(data) > 1024 {
+					data = data[:1024]
+				}
+				if bytes.Contains(data, []byte(`"type":"tool"`)) || bytes.Contains(data, []byte(`"type":"file"`)) {
+					if se, ok := parseSessionEvent(ev); ok && se.SessionID != "" {
+						select {
+						case queue <- se:
+							s.pushSessionEvent(se)
+						default:
+						}
+					}
+				}
+			}
+			return nil
+		}
 			se, ok := parseSessionEvent(ev)
 			if !ok {
 				return nil

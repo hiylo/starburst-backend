@@ -90,7 +90,7 @@
           <div class="wb-stat"><div class="n" id="wbCountT">0</div><div class="l"><span class="dot dot-t"></span>会话总数</div></div>
           <div class="wb-stat"><div class="n" id="wbCountE">0</div><div class="l"><span class="dot dot-e"></span>实时动态</div></div>
         </div>
-        <div class="wb-grid">
+        <div class="wb-grid" id="wbGrid">
           <div class="wb-col wb-col-sessions">
             <div class="wb-col-head">会话 <span class="cnt" id="wbListHint"></span>
               <button class="ghost sm" id="wbNewBtn" title="新建会话（选择工作目录）" onclick="wbToggleNew()">＋ 新建</button>
@@ -107,6 +107,7 @@
             </div>
             <input type="text" id="wbFilter" class="wb-search" placeholder="搜索会话标题 / 目录…">
             <div class="wb-filters" id="wbFilters"></div>
+            <div class="wb-tagfilters" id="wbTagFilters"></div>
             <div class="wb-body">
               <div class="wb-list" id="wbList"><div class="wb-placeholder">加载中…</div></div>
             </div>
@@ -119,8 +120,10 @@
             </div>
             <div id="wbPanel" class="wb-panel hidden"></div>
           </div>
-          <div class="wb-col wb-col-events">
+          <div class="wb-col wb-col-events" id="wbColEvents">
+            <div class="wb-events-handle" id="wbEventsHandle" title="拖动调整实时动态宽度"></div>
             <div class="wb-col-head">实时动态 <span class="cnt" id="wbEventCount"></span>
+              <button class="ghost sm" id="wbEventsToggle" title="收起 / 展开实时动态">» 收起</button>
               <button class="ghost sm" onclick="wbClearEvents()">清空</button>
             </div>
             <div class="wb-body">
@@ -128,6 +131,7 @@
             </div>
           </div>
         </div>
+        <button id="wbEventsExpand" class="wb-events-expand" type="button" title="展开实时动态">«</button>
       </div>
 
       <!-- 任务 -->

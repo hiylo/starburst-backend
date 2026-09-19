@@ -275,8 +275,10 @@ func (s *Server) Start(ctx context.Context) error {
 		Addr:              s.cfg.ListenAddr,
 		Handler:           s.routesMux(),
 		ReadHeaderTimeout: 10 * time.Second,
-		ReadTimeout:       60 * time.Second,
-		IdleTimeout:       60 * time.Second,
+		// 慢 VPN 上上传大附件（base64 内嵌可达 13MB）可能超过 60s，放宽整包读取时限；
+		// 响应侧不受 ReadTimeout 影响（SSE 长连靠 IdleTimeout 与客户端断连取消）。
+		ReadTimeout: 300 * time.Second,
+		IdleTimeout: 60 * time.Second,
 	}
 	errCh := make(chan error, 1)
 	go func() {
@@ -298,7 +300,8 @@ func (s *Server) Start(ctx context.Context) error {
 func (s *Server) routesMux() http.Handler {
 	mux := http.NewServeMux()
 	s.Routes(mux)
-	return s.logMiddleware(mux)
+	// gzip 在内层（先压缩再打日志/审计），SSE 由中间件原样透传。
+	return s.logMiddleware(gzipMiddleware(mux))
 }
 
 // ---- middlewares ----

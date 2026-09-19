@@ -20,8 +20,30 @@ const OLD_PAGE = 30;           // 「加载更早」每次增量
 const TOOL_OUT_CLIP = 3000;    // 工具输出折叠阈值（对齐 App ChatToolCards）
 const NEAR_BOTTOM = 90;        // 距底多少像素内算「贴着最新」
 const DRAFT_PREFIX = "ocb_chat_draft_";
+const ATT_DRAFT_PREFIX = "ocb_chat_draft_atts_";
 const ATTACH_MAX_BYTES = 10 * 1024 * 1024;
 const ATTACH_TEXT_MAX = 2 * 1024 * 1024;
+
+/* ---------------- 会话 / Prompt 模板（对齐 App ChatTemplateDialogs） ---------------- */
+const TPL_KEY = "ocb_chat_templates";
+const TPL_EXPAND_KEY = "ocb_chat_tpl_expanded";
+// 内置模板：与 App builtinPromptTemplates 同款（标题 + 预设 prompt，不可编辑/删除，始终置顶）。
+const BUILTIN_TPL = [
+  { name: "代码审查", prompt: "请对当前项目的代码做一次全面的代码审查，重点关注：潜在 bug、安全问题、性能瓶颈、代码风格一致性。请指出具体的文件和位置，并给出可执行的修复建议。" },
+  { name: "生成测试", prompt: "请为项目中的核心功能生成单元测试，覆盖主要的正常流程和边界情况，遵循项目现有的测试框架和风格。" },
+  { name: "解释代码", prompt: "请解释当前项目的核心架构和关键代码逻辑，帮助我快速理解项目。如有相关文件，请结合具体代码说明。" },
+  { name: "修复 Bug", prompt: "请帮我排查并修复项目中的 bug。先定位问题的根因，再给出修复方案和具体的代码修改。" },
+  { name: "继续任务", prompt: "请继续之前中断或失败的任务。检查当前状态和已完成的部分，从断点处继续处理，不要重复已完成的工作。" },
+];
+function loadTpls() {
+  try { return Array.isArray(JSON.parse(localStorage.getItem(TPL_KEY))) ? JSON.parse(localStorage.getItem(TPL_KEY)) : []; } catch (_) { return []; }
+}
+function saveTpls(list) {
+  try { localStorage.setItem(TPL_KEY, JSON.stringify(list)); } catch (_) {}
+}
+function tplId() {
+  return "tpl_" + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+}
 
 /* ---------------- 通用小工具 ---------------- */
 
@@ -166,6 +188,16 @@ const ICONS = {
   mic: '<rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 11a7 7 0 0014 0M12 18v4"/>',
   down: '<path d="M12 5v14M19 12l-7 7-7-7"/>',
   bolt: '<path d="M13 2L4 14h7l-1 8 9-12h-7z"/>',
+  template: '<rect x="4" y="3" width="16" height="18" rx="2"/><path d="M9 8h6M9 12h6M9 16h4"/>',
+  star: '<path d="M12 2l3.09 6.26 6.91 1-5 4.87 1.18 6.88L12 17.77l-6.18 3.24L7 14.13l-5-4.87 6.91-1z"/>',
+  x: '<path d="M18 6L6 18M6 6l12 12"/>',
+  chevron_up: '<path d="M18 15l-6-6-6 6"/>',
+  chevron_down: '<path d="M6 9l6 6 6-6"/>',
+  info: '<circle cx="12" cy="12" r="9"/><path d="M12 8h.01M12 12v4"/>',
+  copy: '<rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/>',
+  quote: '<path d="M8 7a3 3 0 00-3 3v3h4v4H4v-7a5 5 0 015-5zm9 0a3 3 0 00-3 3v3h4v4h-5v-7a5 5 0 015-5z"/>',
+  refresh: '<path d="M21 12a9 9 0 11-2.64-6.36L21 8"/><path d="M21 3v5h-5"/>',
+  undo: '<path d="M9 14L4 9l5-5"/><path d="M4 9h10a6 6 0 016 6v1"/>',
 };
 function icon(name, size) {
   const s = size || 13;
@@ -403,15 +435,37 @@ function renderTurn(turn, ctx) {
     ? `<div class="ct-error"><b>${esc(turn.error.name || "错误")}</b><div>${esc(
         String((turn.error.data && (turn.error.data.message || turn.error.data)) || turn.error.message || "").slice(0, 400))}</div></div>`
     : "";
+  // 空回复占位：assistant 轮没有任何 parts 且无错误时（如仅回传了 token/模型信息），
+  // 给个弱提示，避免用户看到「只有一个空白的 AI 气泡」。
+  const emptyReply = turn.role === "assistant" && !turn.error && !(turn.parts && turn.parts.length) && !turn.pending
+    ? `<div class="ct-empty-reply">（AI 未生成文本）</div>` : "";
   return `<div class="cmsg ${turn.role}${turn.pending ? " pending" : ""}${turn.failed ? " failed" : ""}" data-turn="${esc(turn.id)}">
     <div class="cbub">
       <div class="cwho">${turn.role === "assistant" ? "AI" : "我"}${turn.agent ? `<span class="chip">${esc(turn.agent)}</span>` : ""}${
         turn.pending ? '<span class="cstate">发送中</span>' : ""}${turn.failed ? '<span class="cstate err">发送失败</span>' : ""}</div>
       ${renderTodoCard(turn, ctx.key)}
-      ${partsHtml}${errHtml}
-      ${renderTurnMeta(turn)}${renderTurnActions(turn)}
+      ${partsHtml}${errHtml}${emptyReply}
+      ${turn.role === "user" ? renderUserMetaActions(turn) : (renderTurnMeta(turn) + renderTurnActions(turn))}
     </div>
   </div>`;
+}
+// 用户消息脚注：时间与操作（复制/编辑重发/引用）合并为一行，省垂直空间。
+function renderUserMetaActions(turn) {
+  const hasText = !!turnText(turn);
+  const bits = [];
+  const t = fmtTime(turn.ts);
+  if (t) bits.push(`<span class="m time">${t}</span>`);
+  if (hasText) {
+    bits.push(messageAct("copy", "复制", turn.id));
+    bits.push(messageAct("edit", "编辑重发", turn.id));
+    bits.push(messageAct("quote", "引用", turn.id));
+  }
+  if (!bits.length) return "";
+  return `<div class="cmeta cmeta-user">${bits.join('<span class="sep">·</span>')}</div>`;
+}
+function messageAct(act, title, tid) {
+  const ic = { copy: "copy", edit: "edit", quote: "quote" }[act] || "bolt";
+  return `<button class="iact-inline" type="button" data-act="${act}" data-tid="${esc(tid)}" title="${title}" aria-label="${title}">${icon(ic, 11)}</button>`;
 }
 // 计划（todo）卡片：进度条 + n/m，默认展开（对齐 App TodoListCard）。
 function renderTodoCard(turn, key) {
@@ -452,16 +506,16 @@ function renderTurnActions(turn) {
   const hasText = !!turnText(turn);
   if (turn.role === "user") {
     return `<div class="cacts">${hasText ? `
-      <button class="ghost xs" type="button" data-act="copy" data-tid="${esc(turn.id)}">复制</button>
-      <button class="ghost xs" type="button" data-act="edit" data-tid="${esc(turn.id)}">编辑重发</button>
-      <button class="ghost xs" type="button" data-act="quote" data-tid="${esc(turn.id)}">引用</button>` : ""}
+      <button class="ghost xs iact" type="button" data-act="copy" data-tid="${esc(turn.id)}" title="复制" aria-label="复制这个提问">${icon("copy", 12)}</button>
+      <button class="ghost xs iact" type="button" data-act="edit" data-tid="${esc(turn.id)}" title="编辑重发" aria-label="编辑重发">${icon("edit", 12)}</button>
+      <button class="ghost xs iact" type="button" data-act="quote" data-tid="${esc(turn.id)}" title="引用" aria-label="引用到输入框">${icon("quote", 12)}</button>` : ""}
     </div>`;
   }
   return `<div class="cacts">${hasText ? `
-      <button class="ghost xs" type="button" data-act="copy" data-tid="${esc(turn.id)}">复制</button>
-      <button class="ghost xs" type="button" data-act="quote" data-tid="${esc(turn.id)}">引用</button>` : ""}
-      <button class="ghost xs" type="button" data-act="regen" data-tid="${esc(turn.id)}">重新生成</button>
-      <button class="ghost xs" type="button" data-act="revert" data-tid="${esc(turn.id)}">回退到此处</button>
+      <button class="ghost xs iact" type="button" data-act="copy" data-tid="${esc(turn.id)}" title="复制" aria-label="复制这段回复">${icon("copy", 12)}</button>
+      <button class="ghost xs iact" type="button" data-act="quote" data-tid="${esc(turn.id)}" title="引用" aria-label="引用到输入框">${icon("quote", 12)}</button>` : ""}
+      <button class="ghost xs iact" type="button" data-act="regen" data-tid="${esc(turn.id)}" title="重新生成" aria-label="重新生成这段回复">${icon("refresh", 12)}</button>
+      <button class="ghost xs iact" type="button" data-act="revert" data-tid="${esc(turn.id)}" title="回退到此处" aria-label="回退到此处，丢弃其后内容">${icon("undo", 12)}</button>
     </div>`;
 }
 
@@ -481,9 +535,10 @@ ChatView.prototype.reset = function () {
   this.ctx = null; this.host = null;
   this.turns = []; this.byMsg = new Map(); this.partIx = new Map();
   this.cursor = null; this.loading = false; this.sessionId = null;
+  this.revertTo = null;
   this.liveId = null; this.working = "";
   this.stick = true; this.unread = 0;
-  this.attachments = []; this.popup = null; this.voice = null; this.voiceBase = "";
+  this.attachments = []; this.attDrafts = {}; this.popup = null; this.voice = null; this.voiceBase = "";
   this._deltaBuf = null; this._deltaTimer = null; this._flushTimer = null;
 };
 
@@ -496,12 +551,14 @@ ChatView.prototype.mount = function (host, ctx) {
     <div class="chat-working hidden" data-role="working"></div>
     <div class="chat-compose" data-role="compose">
       <div class="cc-pop hidden" data-role="pop"></div>
+      <div class="cc-tpl hidden" data-role="tpl"></div>
       <div class="cc-atts hidden" data-role="atts"></div>
       <div class="cc-row">
-        <button class="cc-btn" type="button" data-cc="attach" title="添加附件">${icon("paperclip", 16)}</button>
-        <textarea class="cc-input" data-role="input" rows="1" spellcheck="false" placeholder="给该会话发送指令…（Enter 发送 · Shift+Enter 换行 · @ 引用文件 · / 命令）"></textarea>
-        <button class="cc-btn" type="button" data-cc="voice" title="语音输入">${icon("mic", 16)}</button>
-        <button class="cc-send" type="button" data-cc="send" title="发送">${icon("send", 16)}</button>
+        <button class="cc-btn" type="button" data-cc="tpl" title="会话模板" aria-label="会话模板">${icon("template", 16)}</button>
+        <button class="cc-btn" type="button" data-cc="attach" title="添加附件" aria-label="添加附件">${icon("paperclip", 16)}</button>
+        <textarea class="cc-input" data-role="input" rows="1" spellcheck="false" placeholder="给该会话发送指令…（Enter 发送 · Shift+Enter 换行 · @ 引用文件 · / 命令 · 模板）" aria-label="消息输入框"></textarea>
+        <button class="cc-btn" type="button" data-cc="voice" title="语音输入" aria-label="语音输入">${icon("mic", 16)}</button>
+        <button class="cc-send" type="button" data-cc="send" title="发送" aria-label="发送">${icon("send", 16)}</button>
       </div>
       <div class="cc-bar">
         <select class="cc-sel" data-role="agent" title="Agent"></select>
@@ -537,11 +594,18 @@ ChatView.prototype.open = async function (sessionId) {
   if (!c || !c.api || !sessionId) return;
   // 切会话时丢弃进行中的录音：识别结果不该落到新会话的输入框里。
   if (this.voice) { if (this.voice.cancel) this.voice.cancel(); this.voice = null; this.voiceBase = ""; }
+  this.hidePopup();
+  const tplBox = this.el("tpl");
+  if (tplBox) tplBox.classList.add("hidden");
+  // 切走前把当前会话未发送的附件固化进内存草稿（文本草稿已随输入实时落库）。
+  if (this.sessionId && this.sessionId !== sessionId) this.saveAtts();
   this.sessionId = sessionId;
   this.turns = []; this.byMsg.clear(); this.partIx.clear();
   this.cursor = null; this.liveId = null; this.working = ""; this.unread = 0;
-  this.stick = true; this.attachments = [];
-  this.hidePopup(); this.renderAtts();
+  this.revertTo = null;
+  this.stick = true;
+  this.hidePopup();
+  this.restoreAtts();
   this.el("list").innerHTML = `<div class="wb-placeholder">加载对话…</div>`;
   this.el("working").classList.add("hidden");
   this.restoreDraft();
@@ -567,6 +631,9 @@ ChatView.prototype.fetchPage = async function (limit, older) {
     const data = await res.json();
     const raw = Array.isArray(data) ? data : (data.messages || []);
     const page = normalizeTurns(raw);
+    // 会话处在「已回退」状态时（session.revert.messageID），上游 /message 仍会返回
+    // 全部历史；按回退点裁剪，避免把已撤销的内容重新拉回来（对齐 App 的做法）。
+    if (this.revertTo) clipToRevert(page, this.revertTo);
     if (older) {
       const seen = new Set(page.map(t => t.id));
       const mine = this.turns.filter(t => !seen.has(t.id));
@@ -578,7 +645,23 @@ ChatView.prototype.fetchPage = async function (limit, older) {
       const pending = this.turns.filter(t => t.pending);
       const known = new Set();
       for (const t of page) { known.add(t.id); for (const m of t.msgIds) known.add(m); }
-      this.turns = page.concat(pending.filter(t => !known.has(t.id) && !t.echoOf));
+      let keep = pending.filter(t => !known.has(t.id) && !t.echoOf);
+      // 乐观气泡与快照里已落库的用户消息按可见文本去重：上游不保证回显我们下发的
+      // messageID（服务端自建 id），且 SSE 可能在 POST 返回前就投递 session.idle
+      // 触发本快照——此时 echo 仍处于 pending，若不清掉就会和快照里的同一条用户
+      // 消息各渲染一个气泡（「发一条出两条」）。
+      if (keep.some(t => t.role === "user")) {
+        const serverUser = new Set();
+        for (const t of page) if (t.role === "user") serverUser.add(normalizedText(turnText(t)));
+        keep = keep.filter(t => {
+          if (t.role !== "user") return true;
+          const txt = normalizedText(turnText(t));
+          // 仅对「有非空文本」的乐观气泡做文本对齐去重：空文本（纯附件/图片）消息
+          // 身份不可靠，宁可保留也不误删。
+          return !txt || !serverUser.has(txt);
+        });
+      }
+      this.turns = page.concat(keep);
       this.cursor = next || (raw.length >= limit ? msgIdOf(raw[0]) : null);
       this.reindex(); this.render(); this.scrollToBottom(true);
     }
@@ -586,6 +669,21 @@ ChatView.prototype.fetchPage = async function (limit, older) {
     if (this.sessionId === sid) this.loading = false;
   }
 };
+// 一条用户消息的规范化文本（去空白），用于乐观气泡与服务端消息的身份对齐。
+function normalizedText(s) {
+  return String(s || "").replace(/\s+/g, " ").trim();
+}
+// 按回退点裁剪轮次：保留「包含回退点消息」的那一轮及之前的轮次，其后全部丢弃。
+function clipToRevert(turns, revertMessageId) {
+  if (!revertMessageId) return;
+  for (let i = 0; i < turns.length; i++) {
+    const t = turns[i];
+    if (t.id === revertMessageId || (t.msgIds || []).includes(revertMessageId)) {
+      turns.splice(i + 1, turns.length - i - 1);
+      return;
+    }
+  }
+}
 ChatView.prototype.reindex = function () {
   this.byMsg.clear(); this.partIx.clear();
   for (const t of this.turns) {
@@ -603,11 +701,11 @@ ChatView.prototype.render = function () {
   if (!this.host) return;
   const list = this.el("list");
   if (!this.turns.length) {
-    list.innerHTML = `<div class="wb-placeholder">还没有对话<br><span class="muted" style="font-size:12px">在下方输入指令开始</span></div>`;
+    list.innerHTML = `<div class="wb-placeholder">还没有对话<br><span class="muted" style="font-size:12px">在消息输入区开始</span></div>`;
     this.renderWorking(); return;
   }
   const head = `<div class="c-load${this.cursor ? "" : " hidden"}"><button class="ghost sm" type="button" data-act="older">加载更早的消息</button></div>`;
-  list.innerHTML = head + this.turns.map(t => renderTurn(t, { key: this.sessionId, liveId: this.liveId })).join("");
+  list.innerHTML = head + renderTimeline(this.turns, { key: this.sessionId, liveId: this.liveId });
   this.renderWorking();
 };
 ChatView.prototype.renderWorking = function () {
@@ -625,6 +723,41 @@ ChatView.prototype.rerenderTurn = function (turn) {
 };
 function cssEscape(s) {
   return global.CSS && CSS.escape ? CSS.escape(String(s)) : String(s).replace(/[^a-zA-Z0-9_-]/g, ch => "\\" + ch);
+}
+
+/* ---- 日期分组时间线（对齐 App ChatTimeline 的 DateDivider） ---- */
+function dayKey(ts) {
+  if (!ts) return null;
+  const d = new Date(ts);
+  return d.getFullYear() + "-" + (d.getMonth() + 1) + "-" + d.getDate();
+}
+function sameDay(a, b) {
+  return a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
+}
+function dayLabel(ts) {
+  const d = new Date(ts), now = new Date();
+  if (sameDay(d, now)) return "今天";
+  const y = new Date(now); y.setDate(now.getDate() - 1);
+  if (sameDay(d, y)) return "昨天";
+  const pad = n => String(n).padStart(2, "0");
+  const today = new Date(now);
+  today.setHours(0, 0, 0, 0);
+  const day = new Date(d); day.setHours(0, 0, 0, 0);
+  const delta = Math.round((today - day) / 86400000);
+  if (delta < 7) return `${["周一", "周二", "周三", "周四", "周五", "周六", "周日"][d.getDay() === 0 ? 6 : d.getDay() - 1]}`;
+  if (d.getFullYear() === now.getFullYear()) return pad(d.getMonth() + 1) + "-" + pad(d.getDate());
+  return d.getFullYear() + "-" + pad(d.getMonth() + 1) + "-" + pad(d.getDate());
+}
+// 在轮次之间插入「今天 / 昨天 / 周几 / 日期」分组条；乐观消息 ts 为当前时间，落到最新日期组。
+function renderTimeline(turns, ctx) {
+  let html = "", lastKey = null;
+  for (const t of turns) {
+    const k = dayKey(t.ts);
+    if (k && k !== lastKey) html += `<div class="chat-day"><span>${esc(dayLabel(t.ts))}</span></div>`;
+    if (k) lastKey = k;
+    html += renderTurn(t, ctx);
+  }
+  return html;
 }
 
 /* ============================================================================
@@ -681,6 +814,9 @@ ChatView.prototype.applyDelta = function (props) {
   const known = partId ? this.partIx.get(partId) : null;
   const turn = known ? known.turn : this.ensureTurn(messageId, "assistant");
   if (!turn) return;
+  // 用户自己的消息不回放流式增量：乐观气泡已完整显示原文，上游回放会把同一段
+  // 文本再叠一遍（一条变两条）。等 fetchPage 用服务端权威版本收敛即可。
+  if (turn.role === "user") return;
   let part = known ? known.part : null;
   if (!part) {
     part = { id: partId || uid("p"), type: field === "reasoning" ? "reasoning" : "text", text: "" };
@@ -719,6 +855,10 @@ ChatView.prototype.upsertPart = function (part, messageId) {
   if (!part || !part.id) return;
   const known = this.partIx.get(part.id);
   const turn = known ? known.turn : this.ensureTurn(messageId || part.messageID, "assistant");
+  if (!turn) return;
+  // 用户自己发出的消息：内容已由乐观气泡原样展示，服务端回放该消息的 parts 时
+  // 只会把同一段内容再 append 一份（一条变两条）。跳过回放，等 fetchPage 收敛。
+  if (turn.role === "user") return;
   if (known) Object.assign(known.part, part);
   else {
     turn.parts.push(part);
@@ -874,10 +1014,14 @@ ChatView.prototype.onClick = function (e) {
   }
   const pop = t.closest("[data-pop]");
   if (pop) { this.popup.index = Number(pop.dataset.pop); this.popupPick(); return; }
+  const tpl = t.closest("[data-tpl-act]");
+  if (tpl) { this.onTplAction(tpl.dataset.tplAct, tpl); return; }
   const rm = t.closest("[data-rm-att]");
-  if (rm) { this.attachments.splice(Number(rm.dataset.rmAtt), 1); this.renderAtts(); return; }
+  if (rm) { this.attachments.splice(Number(rm.dataset.rmAtt), 1); this.renderAtts(); this.saveAtts(); return; }
   const cc = t.closest("[data-cc]");
   if (cc) { this.onToolbutton(cc.dataset.cc); return; }
+  const ctx = t.closest('[data-role="ctx"]');
+  if (ctx) { this.showContextUsage(); return; }
   if (t.closest('[data-role="fab"]')) { this.stick = true; this.scrollToBottom(true); return; }
   const act = t.closest("[data-act]");
   if (act) { this.onTurnAction(act.dataset.act, act); return; }
@@ -889,7 +1033,8 @@ ChatView.prototype.onClick = function (e) {
   if (child && child.dataset.openChild && c.openSession) c.openSession(child.dataset.openChild);
 };
 ChatView.prototype.onToolbutton = function (which) {
-  if (which === "attach") this.el("file").click();
+  if (which === "tpl") this.toggleTpl();
+  else if (which === "attach") this.el("file").click();
   else if (which === "voice") this.toggleVoice();
   else if (which === "send") this.onSendKey();
 };
@@ -903,11 +1048,13 @@ ChatView.prototype.onTurnAction = function (act, btn) {
   if (act === "quote") { this.insertPrompt("> " + text.split("\n").join("\n> ") + "\n\n"); return; }
   if (act === "edit") { this.insertPrompt(text); return; }
   if (act === "regen") {
+    if (c.isBusy && c.isBusy()) { if (c.toast) c.toast("会话处理中", "先等处理完成（或点发送区停止），再执行该操作", "warn"); return; }
     if (c.confirm && !c.confirm("重新生成", "回退到本轮之前并重发上一条指令，该轮之后的内容会被丢弃。")) return;
     if (c.regenerate) c.regenerate(turn);
     return;
   }
   if (act === "revert") {
+    if (c.isBusy && c.isBusy()) { if (c.toast) c.toast("会话处理中", "先等处理完成（或点发送区停止），再执行该操作", "warn"); return; }
     if (c.confirm && !c.confirm("回退到此处", "撤销该消息之后的内容（可通过「更多 ▾ → 重做」恢复）。")) return;
     if (c.revert) c.revert(turn);
   }
@@ -940,6 +1087,8 @@ ChatView.prototype.onInput = function () {
   ta.style.height = Math.min(ta.scrollHeight, 200) + "px";
   this.saveDraft();
   this.syncSendIcon();
+  // 开始输入说明模板已选定/不再需要，收起模板面板避免遮挡消息区
+  this.el("tpl").classList.add("hidden");
   this.detectTrigger(ta.value, ta.selectionStart);
 };
 // 发送 / 停止语义与 App ComposerAction 一致：处理中且输入框为空 → 停止；
@@ -957,11 +1106,13 @@ ChatView.prototype.syncSendIcon = function () {
   if (!btn) return;
   const busy = !!(this.ctx && this.ctx.isBusy && this.ctx.isBusy());
   const hasDraft = !!(this.text().trim() || this.attachments.length);
+  // 处理中且输入框为空 → 按钮变成「停止」；有草稿 → 仍是「发送」（允许排队追加指令）。
   const stopping = busy && !hasDraft;
   btn.innerHTML = icon(stopping ? "stop" : "send", 16);
-  btn.title = stopping ? "停止处理" : "发送";
+  btn.title = stopping ? "停止处理" : (btn.disabled ? "输入内容后可发送" : "发送");
   btn.classList.toggle("stopping", stopping);
-  btn.disabled = !!(this.ctx.isSending && this.ctx.isSending());
+  // 输入框空且会话空闲 → 禁用（无可发内容）；忙碌时空输入=停止按钮、有草稿=继续发送，均保持可用。
+  btn.disabled = !hasDraft && !busy;
 };
 ChatView.prototype.onPaste = function (e) {
   const items = e.clipboardData && e.clipboardData.items;
@@ -1042,7 +1193,158 @@ ChatView.prototype.popupPick = function () {
   this.onInput();
 };
 
+/* ---- 会话模板选择器 / 管理（对齐 App ChatTemplateDialogs） ---- */
+ChatView.prototype.toggleTpl = function () {
+  const box = this.el("tpl");
+  if (!box) return;
+  box.classList.toggle("hidden");
+  if (!box.classList.contains("hidden")) { this.tplEditing = null; this.renderTplPanel(); }
+  else { this.hidePopup(); }
+};
+ChatView.prototype.onTplAction = function (act, btn) {
+  const c = this.ctx;
+  if (act === "close") { this.el("tpl").classList.add("hidden"); return; }
+  if (act === "add") { this.tplEditing = { mode: "add" }; this.renderTplPanel(); return; }
+  if (act === "edit") {
+    this.tplEditing = { mode: "edit", id: btn.dataset.tplId };
+    this.renderTplPanel(); return;
+  }
+  if (act === "back" || act === "cancel") { this.tplEditing = null; this.renderTplPanel(); return; }
+  if (act === "save") {
+    const name = String(this.el("tpl").querySelector('[data-tpl-field="name"]').value || "").trim();
+    const prompt = String(this.el("tpl").querySelector('[data-tpl-field="prompt"]').value || "").trim();
+    if (!name || !prompt) { if (c.toast) c.toast("无法保存", "名称与内容都不能为空", "warn"); return; }
+    const list = loadTpls();
+    if (this.tplEditing && this.tplEditing.mode === "edit") {
+      const t = list.find(x => x.id === this.tplEditing.id);
+      if (t) { t.name = name; t.prompt = prompt; }
+    } else {
+      list.push({ id: tplId(), name, prompt });
+    }
+    saveTpls(list);
+    this.tplEditing = null;
+    this.renderTplPanel();
+    return;
+  }
+  if (act === "delete") {
+    const id = btn.dataset.tplId;
+    if (c.confirm && !c.confirm("删除模板", "删除后不可恢复。")) return;
+    saveTpls(loadTpls().filter(t => t.id !== id));
+    this.renderTplPanel();
+    return;
+  }
+  if (act === "move") {
+    const id = btn.dataset.tplId, dir = Number(btn.dataset.tplDir) || 0;
+    const list = loadTpls();
+    const ix = list.findIndex(t => t.id === id);
+    const nx = ix + dir;
+    if (ix < 0 || nx < 0 || nx >= list.length) return;
+    const [it] = list.splice(ix, 1);
+    list.splice(nx, 0, it);
+    saveTpls(list);
+    this.renderTplPanel();
+    return;
+  }
+  if (act === "use") {
+    const prompt = btn.dataset.tplVal || "";
+    this.el("tpl").classList.add("hidden");
+    this.tplEditing = null;
+    if (prompt) this.insertPrompt(prompt);
+    return;
+  }
+  if (act === "expand") {
+    const key = btn.dataset.tplKey;
+    const s = this.tplExpanded || (this.tplExpanded = new Set());
+    if (s.has(key)) s.delete(key); else s.add(key);
+    try { localStorage.setItem(TPL_EXPAND_KEY, JSON.stringify([...s])); } catch (_) {}
+    this.renderTplPanel();
+    return;
+  }
+};
+ChatView.prototype.renderTplPanel = function () {
+  const box = this.el("tpl");
+  if (!box) return;
+  const c = this.ctx;
+  if (this.tplEditing) {
+    const editing = this.tplEditing;
+    let name = "", prompt = "";
+    if (editing.mode === "edit") {
+      const t = loadTpls().find(x => x.id === editing.id);
+      if (t) { name = t.name; prompt = t.prompt; }
+    }
+    box.innerHTML = `
+      <div class="tpl-head"><span class="tpl-title">${editing.mode === "add" ? "新建模板" : "编辑模板"}</span>
+        <div><button class="ghost xs" type="button" data-tpl-act="back">← 返回</button></div></div>
+      <div class="tpl-edit">
+        <input data-tpl-field="name" placeholder="模板名称" value="${esc(name)}">
+        <textarea data-tpl-field="prompt" placeholder="模板内容（Prompt）" rows="4">${esc(prompt)}</textarea>
+        <div class="tpl-edit-actions">
+          <button class="sm" type="button" data-tpl-act="save">保存</button>
+          <button class="ghost sm" type="button" data-tpl-act="cancel">取消</button>
+        </div>
+      </div>`;
+    const inp = box.querySelector('[data-tpl-field="name"]');
+    if (inp) inp.focus();
+    return;
+  }
+  const user = loadTpls();
+  if (!this.tplExpanded) {
+    try { this.tplExpanded = new Set(JSON.parse(localStorage.getItem(TPL_EXPAND_KEY) || "[]")); } catch (_) { this.tplExpanded = new Set(); }
+  }
+  const row = (t, builtin, i, n) => {
+    const key = builtin ? "builtin:" + t.name : t.id;
+    const exp = this.tplExpanded.has(key);
+    const acts = builtin ? `<button class="ghost xs" type="button" data-tpl-act="expand" data-tpl-key="${esc(key)}" title="${exp ? "收起" : "展开内容"}">${icon(exp ? "chevron_up" : "chevron_down", 12)}</button>`
+      : `<button class="ghost xs" type="button" data-tpl-act="expand" data-tpl-key="${esc(key)}" title="${exp ? "收起" : "展开内容"}">${icon(exp ? "chevron_up" : "chevron_down", 12)}</button>
+         <button class="ghost xs" type="button" data-tpl-act="move" data-tpl-id="${esc(t.id)}" data-tpl-dir="-1" title="上移" ${i === 0 ? "disabled" : ""}>↑</button>
+         <button class="ghost xs" type="button" data-tpl-act="move" data-tpl-id="${esc(t.id)}" data-tpl-dir="1" title="下移" ${i === n - 1 ? "disabled" : ""}>↓</button>
+         <button class="ghost xs" type="button" data-tpl-act="edit" data-tpl-id="${esc(t.id)}" title="编辑">编辑</button>
+         <button class="ghost xs danger" type="button" data-tpl-act="delete" data-tpl-id="${esc(t.id)}" title="删除">删除</button>`;
+    return `<div class="tpl-item${builtin ? " builtin" : ""}">
+      <button class="tpl-use" type="button" data-tpl-act="use" data-tpl-val="${esc(t.prompt)}"><span class="tpl-name">${esc(t.name)}</span><span class="tpl-tag">${builtin ? "内置" : ""}</span></button>
+      <span class="tpl-acts">${acts}</span>
+      ${exp ? `<div class="tpl-prompt">${esc(clipText(t.prompt, 600).text)}</div>` : ""}
+    </div>`;
+  };
+  const builtinHtml = BUILTIN_TPL.map((t, i) => row(t, true, i, BUILTIN_TPL.length)).join("");
+  const userHtml = user.map((t, i) => row(t, false, i, user.length)).join("");
+  box.innerHTML = `
+    <div class="tpl-head"><span class="tpl-title">会话模板</span>
+      <div><button class="ghost xs" type="button" data-tpl-act="add">＋ 新建</button>
+        <button class="ghost xs" type="button" data-tpl-act="close" title="关闭">${icon("x", 12)}</button></div></div>
+    <div class="tpl-scroll">
+      <div class="tpl-group">内置</div>${builtinHtml || ""}
+      <div class="tpl-group">我的模板</div>
+      ${userHtml || `<div class="tpl-empty">还没有自定义模板，点「＋ 新建」添加</div>`}
+    </div>`;
+};
+
 /* ---- 附件 ---- */
+// 保存当前会话的未发送附件：先落内存（切会话立刻有），小体积再落 localStorage（跨刷新）。
+// 附件是 base64 data URL，很容易超 localStorage 配额，超过 3MB 就只留内存。
+ChatView.prototype.saveAtts = function () {
+  if (!this.sessionId) return;
+  this.attDrafts[this.sessionId] = this.attachments.slice();
+  const total = this.attachments.reduce((n, a) => n + (a.size || 0), 0);
+  try {
+    if (total > 3 * 1024 * 1024 || !this.attachments.length) localStorage.removeItem(ATT_DRAFT_PREFIX + this.sessionId);
+    else localStorage.setItem(ATT_DRAFT_PREFIX + this.sessionId, JSON.stringify(this.attachments));
+  } catch (_) { /* 配额满则放弃持久化，只保留内存草稿 */ }
+};
+// 恢复指定会话的未发送附件（内存优先，localStorage 兜底）。
+ChatView.prototype.restoreAtts = function () {
+  if (!this.sessionId) { this.attachments = []; return; }
+  const mem = this.attDrafts[this.sessionId];
+  if (Array.isArray(mem)) { this.attachments = mem.slice(); }
+  else {
+    let stored = null;
+    try { const raw = localStorage.getItem(ATT_DRAFT_PREFIX + this.sessionId); stored = raw ? JSON.parse(raw) : null; } catch (_) {}
+    if (Array.isArray(stored)) this.attachments = stored;
+    else this.attachments = [];
+    if (stored) this.attDrafts[this.sessionId] = stored.slice();
+  }
+  this.renderAtts();
+};
 ChatView.prototype.addFiles = function (files) {
   const c = this.ctx;
   for (const f of Array.from(files || [])) {
@@ -1059,6 +1361,7 @@ ChatView.prototype.addFiles = function (files) {
     reader.onload = () => {
       this.attachments.push({ name: f.name, mime: f.type || "application/octet-stream", size: f.size, url: String(reader.result || "") });
       this.renderAtts();
+      this.saveAtts();
     };
     reader.onerror = () => { if (c.toast) c.toast("读取失败", f.name, "crit"); };
     reader.readAsDataURL(f);
@@ -1111,23 +1414,33 @@ function buildPartsFromText(raw, attachments) {
 ChatView.prototype.buildParts = function () { return buildPartsFromText(this.text().trim(), this.attachments); };
 ChatView.prototype.send = async function () {
   const c = this.ctx;
-  if (!c || !this.sessionId || (c.isSending && c.isSending())) return;
+  if (!c || !this.sessionId) return;
+  if (c.isSending && c.isSending()) {
+    // 上一条请求仍在途：不重复发，但给出明确反馈，避免「按了 Enter 没反应/内容没清」。
+    if (c.toast) c.toast("正在发送", "上一条指令仍在发送，请稍候再试", "info");
+    return;
+  }
   const parts = this.buildParts();
   if (!parts.length) return;
   const ta = this.el("input");
   const keep = ta.value;
+  const keepAtts = this.attachments.slice();
+  this.el("tpl").classList.add("hidden");
   ta.value = ""; ta.style.height = "auto";
-  this.attachments = []; this.renderAtts(); this.clearDraft();
+  this.attachments = []; this.renderAtts(); this.clearDraft(); this.saveAtts();
   const ok = await this.sendParts(parts, this.selections());
   if (!ok) {
     // 明确失败：把草稿还给用户（安卓同处理），乐观气泡在 sendParts 内已撤回。
-    ta.value = keep; this.saveDraft(); this.syncSendIcon();
+    ta.value = keep; this.attachments = keepAtts; this.renderAtts();
+    this.saveDraft(); this.saveAtts(); this.syncSendIcon();
   }
 };
 // 发送一组 parts：先落乐观气泡，再按 /命令 或 prompt_async 分派；失败返回 false。
 ChatView.prototype.sendParts = async function (parts, sel) {
   const c = this.ctx;
   sel = sel || {};
+  // 发新指令 = 离开回退状态：上游会在写入新消息时裁掉被回退的尾部。
+  this.revertTo = null;
   // 上游契约：messageID（大写 ID）+ model{providerID,modelID} + variant 顶层字段，
   // 与安卓 PromptRequest 完全一致；写错键名会让服务端自建 id、乐观消息无法认领。
   const body = { messageID: nextMessageId(), parts };
@@ -1233,28 +1546,92 @@ ChatView.prototype.refreshSelectors = function () {
   this.syncSendIcon();
 };
 // 上下文占用与花费（App 的 context ring 同款信息，这里用文字 + 进度条表达）。
+// 整条可点：点开详情弹窗（对齐 App ContextUsageDialog）。无数据时也给出可点的
+// 「详情」入口，保证会话统计面板可被发现。
 ChatView.prototype.renderCtxBar = function () {
   const c = this.ctx, box = this.el("ctx");
   if (!box) return;
-  let inTok = 0, cost = 0;
-  for (const t of this.turns) {
-    if (t.role !== "assistant") continue;
-    const tk = t.tokens || {};
-    inTok += (tk.input || 0) + ((tk.cache || {}).read || 0) + (tk.output || 0);
-    cost += t.cost || 0;
-  }
+  const st = this.contextStats();
   const budget = (c.contextBudget && c.contextBudget()) || 0;
   const bits = [];
-  if (inTok) bits.push(`<span>${fmtTok(inTok)} tok</span>`);
-  if (cost) bits.push(`<span>${esc(fmtCost(cost))}</span>`);
-  if (budget && inTok) {
-    const pct = Math.min(100, Math.round(inTok / budget * 100));
-    box.innerHTML = `<span class="ctx-bar"><i style="width:${pct}%"></i></span><span class="ctx-n">${pct}%</span>`
-      + (bits.length ? `<span class="ctx-sub">${bits.join(" · ")}</span>` : "");
-    box.title = `上下文占用约 ${pct}%（预算 ${fmtTok(budget)}）`;
+  if (st.used) bits.push(`<span>${fmtTok(st.used)} tok</span>`);
+  if (st.cost) bits.push(`<span>${esc(fmtCost(st.cost))}</span>`);
+  let body;
+  if (budget && st.used) {
+    const pct = Math.min(100, Math.round(st.used / budget * 100));
+    body = `<button type="button" class="ctx-click"><span class="ctx-bar"><i style="width:${pct}%"></i></span><span class="ctx-n">${pct}%</span>`
+      + (bits.length ? `<span class="ctx-sub">${bits.join(" · ")}</span>` : "")
+      + `<span class="ctx-caret">${icon("info", 11)}</span></button>`;
+    box.title = `上下文占用约 ${pct}%（预算 ${fmtTok(budget)}）— 点击查看详情`;
+  } else if (st.used) {
+    body = `<button type="button" class="ctx-click"><span class="ctx-sub">${bits.join(" · ")}</span><span class="ctx-caret">${icon("info", 11)}</span></button>`;
+    box.title = "查看本会话 token 用量详情";
   } else {
-    box.innerHTML = bits.length ? `<span class="ctx-sub">${bits.join(" · ")}</span>` : "";
+    body = `<button type="button" class="ctx-click"><span class="ctx-sub" style="opacity:.55">详情</span><span class="ctx-caret">${icon("info", 11)}</span></button>`;
+    box.title = "查看本会话统计（token / 花费 / 模型）";
   }
+  box.innerHTML = body;
+};
+// 聚合当前会话的 token / 花费 / 消息统计（上下文详情弹窗的数据源）。
+ChatView.prototype.contextStats = function () {
+  let used = 0, out = 0, reason = 0, cache = 0, cost = 0;
+  let user = 0, assistant = 0;
+  let firstTs = 0, endTs = 0;
+  for (const t of this.turns) {
+    if (t.role === "user") user++; else assistant++;
+    if (t.ts && (!firstTs || t.ts < firstTs)) firstTs = t.ts;
+    if (t.doneTs && t.doneTs > endTs) endTs = t.doneTs;
+    const tk = t.tokens || {};
+    const c = (tk.cache || {}).read || 0;
+    used += (tk.input || 0) + c + (tk.output || 0);
+    out += tk.output || 0;
+    reason += tk.reasoning || 0;
+    cache += c;
+    cost += t.cost || 0;
+  }
+  const inOnly = used - out - cache;
+  const s = (this.ctx && this.ctx.session && this.ctx.session()) || {};
+  return { used, out, inOnly, reason, cache, cost, user, assistant, firstTs, endTs,
+    model: this.turns.length ? (this.turns[this.turns.length - 1].model || "") : modelOf(s.model),
+    agent: s.agent || "", sessionId: this.sessionId, created: (s.time && s.time.created) || firstTs };
+};
+function modelOf(m) {
+  if (!m) return "";
+  if (typeof m === "object") return m.id || m.modelID || "";
+  return String(m);
+}
+// 上下文占用详情弹窗：预算进度、token 分项、花费、消息数、会话元信息（对齐 App ContextUsageDialog）。
+ChatView.prototype.showContextUsage = function () {
+  const c = this.ctx, st = this.contextStats();
+  const budget = (c.contextBudget && c.contextBudget()) || 0;
+  const pct = budget && st.used ? Math.min(100, Math.round(st.used / budget * 100)) : 0;
+  const rows = [];
+  rows.push(["模型", esc(st.model || "—")]);
+  if (st.agent) rows.push(["Agent", esc(st.agent)]);
+  if (st.sessionId) rows.push(["会话 ID", esc(String(st.sessionId).slice(0, 26))]);
+  if (st.created) rows.push(["创建时间", esc(fmtTime(st.created))]);
+  const dur = st.firstTs && st.endTs ? fmtDur(st.endTs - st.firstTs) : "";
+  if (dur) rows.push(["总历时", esc(dur)]);
+  let html = `
+    <div class="ctx-dlg">
+      ${budget ? `<div class="ctx-dlg-progress">
+        <div class="ctx-dlg-row"><span>上下文占用</span><b>${pct}%</b></div>
+        <div class="ctx-dlg-bar"><i style="width:${pct}%"></i></div>
+        <div class="ctx-dlg-hint">已用 ${fmtTok(st.used)} / 预算 ${fmtTok(budget)}，剩余 ${fmtTok(Math.max(0, budget - st.used))}</div>
+      </div>` : st.used ? `<div class="ctx-dlg-hint">本会话累计 ${fmtTok(st.used)} token（未配置模型上下文预算，无法计算百分比）</div>` : ""}
+      <div class="ctx-dlg-grid">
+        <div class="ctx-dlg-cell"><b>${fmtTok(st.used)}</b><span>总 token</span></div>
+        <div class="ctx-dlg-cell"><b>${fmtTok(st.inOnly)}</b><span>输入</span></div>
+        <div class="ctx-dlg-cell"><b>${fmtTok(st.out)}</b><span>输出</span></div>
+        <div class="ctx-dlg-cell"><b>${fmtTok(st.reason)}</b><span>推理</span></div>
+        <div class="ctx-dlg-cell"><b>${fmtTok(st.cache)}</b><span>缓存读取</span></div>
+        <div class="ctx-dlg-cell"><b>${esc(fmtCost(st.cost)) || "—"}</b><span>花费</span></div>
+      </div>
+      <div class="ctx-dlg-row"><span>消息</span><b>${st.user + st.assistant} 条 <span class="muted">(用户 ${st.user} / AI ${st.assistant})</span></b></div>
+      <div class="ctx-dlg-meta">${rows.map(r => `<span>${r[0]}：${r[1]}</span>`).join("")}</div>
+    </div>`;
+  if (global.wbModalOpen) global.wbModalOpen("上下文占用详情", html);
+  else if (this.ctx && this.ctx.toast) this.ctx.toast("上下文占用", `${fmtTok(st.used)} token · 已用 ${pct}%`, "info");
 };
 
 /* ---- 语音输入（后端 /api/stt 流式识别） ---- */

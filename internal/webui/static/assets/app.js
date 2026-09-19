@@ -96,6 +96,107 @@ function escapeHtml(s) {
   return String(s ?? "").replace(/[&<>"']/g, c =>
     ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
+/* ---------------- 代码语法高亮（零依赖，正则分词） ---------------- */
+const HL_KEYWORDS = {
+  c: ("if else for while do switch case default break continue return func function var let const class interface " +
+    "type struct enum import from export extends implements new delete typeof instanceof this super static async " +
+    "await yield try catch finally throw get set public private protected package require select defer chan map " +
+    "range go int int8 int16 int32 int64 uint float float32 float64 double string bool boolean byte rune nil null " +
+    "void true false").split(/\s+/),
+  py: ("and as assert async await break class continue def del elif else except finally for from global if import " +
+    "in is lambda nonlocal not or pass raise return try while with yield True False None self").split(/\s+/),
+  sh: ("if then else elif fi for while until do done case esac function in return local export unset readonly " +
+    "declare echo printf cd ls mkdir rm cp mv cat grep sed awk test true false source sudo curl wget git docker go").split(/\s+/),
+  sql: ("select from where insert into values update set delete create table index view drop alter add column " +
+    "primary key foreign references join left right inner outer on group by order having limit offset and or not " +
+    "null default unique constraint cascade begin commit rollback as union all distinct exists case when then end " +
+    "cast coalesce count sum avg min max").split(/\s+/),
+};
+const HL_RE_CACHE = {};
+// 构建语言相关的分词正则：组1注释 / 组2字符串 / 组3数字 / 组4关键字 / 组5函数调用。
+function buildHlRe(lang) {
+  if (HL_RE_CACHE[lang]) return HL_RE_CACHE[lang];
+  const kw = HL_KEYWORDS[lang] || HL_KEYWORDS.c;
+  const sorted = kw.slice().sort((a, b) => b.length - a.length).join("|");
+  let cm;
+  if (lang === "py" || lang === "sh") cm = "#[^\\n]*";
+  else if (lang === "sql") cm = "\\/\\*[\\s\\S]*?\\*\\/|--[^\\n]*";
+  else cm = "\\/\\*[\\s\\S]*?\\*\\/|\\/\\/[^\\n]*";
+  const str = "\"(?:[^\"\\\\\\n]|\\\\.)*\"|'(?:[^'\\\\\\n]|\\\\.)*'|`(?:[^`\\\\]|\\\\.)*`";
+  const re = new RegExp(
+    "(" + cm + ")|(" + str + ")|(\\b\\d+(?:\\.\\d+)?(?:[eE][+-]?\\d+)?\\b)|(\\b(?:" + sorted + ")\\b)|([A-Za-z_]\\w*(?=\\s*\\())",
+    "g"
+  );
+  HL_RE_CACHE[lang] = re;
+  return re;
+}
+function hlCode(src, lang) {
+  if (!src || typeof src !== "string") return escapeHtml(src || "");
+  let l = String(lang || "").toLowerCase().split(/[^a-z0-9]+/)[0] || "";
+  if (["js", "ts", "jsx", "tsx", "java", "go", "kt", "kts", "rs", "c", "cpp", "cxx", "h", "hpp", "swift", "php", "scala", "cs", "dart", "zig"].includes(l)) l = "c";
+  else if (["py", "python"].includes(l)) l = "py";
+  else if (["sh", "bash", "zsh", "shell", "fish", "pwsh"].includes(l)) l = "sh";
+  else if (l === "sql") l = "sql";
+  else return escapeHtml(src);
+  const re = buildHlRe(l);
+  let out = "", last = 0, m;
+  re.lastIndex = 0;
+  while ((m = re.exec(src))) {
+    if (m.index > last) out += escapeHtml(src.slice(last, m.index));
+    const cls = m[1] ? "cm" : m[2] ? "st" : m[3] ? "nu" : m[4] ? "kw" : "fn";
+    out += `<span class="tok ${cls}">${escapeHtml(m[0])}</span>`;
+    last = re.lastIndex;
+  }
+  if (last < src.length) out += escapeHtml(src.slice(last));
+  return out;
+}
+// 代码块外壳：语言标签 + 行数 + 复制按钮；超过 24 行折叠成 <details>。
+const MD_CODE_FOLD = 24;
+function renderCodeBlock(code, lang) {
+  const langLabel = String(lang || "").toLowerCase() || "text";
+  const n = (code.match(/\n/g) || []).length + 1;
+  const pre = `<pre class="md-code"><code>${hlCode(code, lang)}</code></pre>`;
+  if (n > MD_CODE_FOLD) {
+    return `<div class="md-code-wrap"><details class="md-code-details"><summary>
+      <span class="md-code-lang">${escapeHtml(langLabel)}</span><span class="md-code-lines">${n} 行 · 点击展开</span>
+      <button type="button" class="md-code-copy" data-md-copy="${escapeHtml(code)}">复制</button>
+      </summary>${pre}</details></div>`;
+  }
+  return `<div class="md-code-wrap"><div class="md-code-head">
+    <span class="md-code-lang">${escapeHtml(langLabel)}</span><span class="md-code-lines">${n} 行</span>
+    <button type="button" class="md-code-copy" data-md-copy="${escapeHtml(code)}">复制</button>
+  </div>${pre}</div>`;
+}
+// 列表（含嵌套与任务清单）。items: {depth, ordered, task, content}。
+function buildNestedList(items, inlineFn) {
+  let html = "";
+  const stack = [];   // {tag, depth}：已打开列表
+  for (const it of items) {
+    const tag = it.ordered ? "ol" : "ul";
+    // 先关掉比当前层级更深的列表
+    while (stack.length && stack[stack.length - 1].depth > it.depth) html += `</${stack.pop().tag}>`;
+    const top = stack[stack.length - 1];
+    if (top && top.depth === it.depth && top.tag === tag) {
+      // 同层同类型：并入当前列表
+    } else {
+      // 同层换类型（关旧开新）或更深层级（开新嵌套列表）或空栈（开新列表）
+      if (top && top.depth === it.depth) html += `</${stack.pop().tag}>`;
+      html += `<${tag}>`;
+      stack.push({ tag, depth: it.depth });
+    }
+    if (it.task === null) html += `<li>${inlineFn(it.content)}</li>`;
+    else html += `<li class="task"><input type="checkbox" disabled${it.task ? " checked" : ""}><span>${inlineFn(it.content)}</span></li>`;
+  }
+  while (stack.length) html += `</${stack.pop().tag}>`;
+  return html;
+}
+function isListLine(l) {
+  return /^\s*[-*+]\s+/.test(l) || /^\s*\d+[.)]\s+/.test(l);
+}
+function isTaskContent(content) {
+  const m = /^\[([ xX])\]\s+/.exec(content);
+  return m ? { done: m[1].toLowerCase() === "x", rest: content.slice(m[0].length) } : null;
+}
 // 轻量 Markdown 渲染：先整体转义防 XSS，再按块处理标题/代码/列表/表格/引用/分隔线，
 // 行内处理加粗/斜体/删除线/行内代码/链接/自动链接。结果均为安全 HTML。
 function mdRender(src) {
@@ -127,7 +228,7 @@ function mdRender(src) {
       i++;
       while (i < lines.length && !/^\s*```\s*$/.test(lines[i])) buf.push(lines[i++]);
       i++;
-      html += `<pre class="md-code${lang ? " lang-" + esc(lang) : ""}"><code>${esc(buf.join("\n"))}</code></pre>\n`;
+      html += renderCodeBlock(buf.join("\n"), lang);
       continue;
     }
     // 标题
@@ -156,31 +257,58 @@ function mdRender(src) {
       html += `<div class="md-table-wrap"><table><thead><tr>${header.map(h => `<th>${inline(h)}</th>`).join("")}</tr></thead><tbody>${rows.map(r => `<tr>${r.map(c => `<td>${inline(c)}</td>`).join("")}</tr>`).join("")}</tbody></table></div>\n`;
       continue;
     }
-    // 无序列表
-    if (/^\s*[-*+]\s+/.test(line)) {
-      const items = [];
-      while (i < lines.length && /^\s*[-*+]\s+/.test(lines[i])) items.push(lines[i++].replace(/^\s*[-*+]\s+/, ""));
-      html += `<ul>${items.map(it => `<li>${inline(it)}</li>`).join("")}</ul>\n`;
-      continue;
-    }
-    // 有序列表
-    if (/^\s*\d+[.)]\s+/.test(line)) {
-      const items = [];
-      while (i < lines.length && /^\s*\d+[.)]\s+/.test(lines[i])) items.push(lines[i++].replace(/^\s*\d+[.)]\s+/, ""));
-      html += `<ol>${items.map(it => `<li>${inline(it)}</li>`).join("")}</ol>\n`;
+    // 有序 / 无序列表（含嵌套缩进与任务清单 [ ] / [x]）
+    if (isListLine(line)) {
+      const collected = [];
+      while (i < lines.length && isListLine(lines[i])) collected.push(lines[i++]);
+      const base = /^\s*/.exec(collected[0])[0].length;
+      const items = collected.map(l => {
+        const ind = /^\s*/.exec(l)[0].length;
+        const depth = Math.max(0, Math.min(8, Math.round((ind - base) / 2)));
+        const t = l.trim();
+        const marker = /^([-*+]|\d+[.)])\s+/.exec(t);
+        if (!marker) return { depth, ordered: false, task: null, content: "" };
+        let content = t.slice(marker[0].length);
+        let task = null;
+        const tk = isTaskContent(content);
+        if (tk) { task = tk.done; content = tk.rest; }
+        return { depth, ordered: /^\d+[.)]$/.test(marker[1]), task, content };
+      });
+      html += buildNestedList(items, inline);
       continue;
     }
     if (!line.trim()) { i++; continue; }
     // 普通段落（多行合并，换行转 <br>）
     const buf = [];
-    while (i < lines.length && lines[i].trim() && !/^\s*[-*+]\s+/.test(lines[i]) && !/^\s*\d+[.)]\s+/.test(lines[i]) && !/^\s*```/.test(lines[i]) && !/^\s*>/.test(lines[i]) && !/^#{1,6}\s/.test(lines[i]) && !isHr(lines[i])) {
+    while (i < lines.length && lines[i].trim() && !isListLine(lines[i]) && !/^\s*```/.test(lines[i]) && !/^\s*>/.test(lines[i]) && !/^#{1,6}\s/.test(lines[i]) && !isHr(lines[i])) {
       buf.push(lines[i++]);
     }
     html += `<p>${inline(buf.join("\n")).replace(/\n/g, "<br>")}</p>\n`;
   }
   return html;
 }
+// 复制按钮全局委托：mdRender 产物出现在工作台对话与知识库问答两处，统一走 document。
+document.addEventListener("click", (e) => {
+  const btn = e.target.closest("[data-md-copy]");
+  if (!btn) return;
+  e.preventDefault();
+  e.stopPropagation();
+  const text = btn.dataset.mdCopy || "";
+  (navigator.clipboard ? navigator.clipboard.writeText(text).catch(() => {}) : Promise.resolve())
+    .finally(() => {
+      const old = btn.textContent;
+      btn.textContent = "已复制";
+      setTimeout(() => { btn.textContent = old; }, 1200);
+    });
+});
 function fmtDate(v) { return v ? new Date(v).toLocaleString() : "-"; }
+// 事件摘要里 token 数的紧凑格式（1.2k / 1.34M）。
+function fmtTok(n) {
+  n = Number(n) || 0;
+  if (n < 1000) return String(n);
+  if (n < 1000000) return (n / 1000).toFixed(n < 10000 ? 1 : 0) + "k";
+  return (n / 1000000).toFixed(2) + "M";
+}
 
 async function api(path, opts) {
   opts = opts || {};
@@ -223,7 +351,8 @@ function switchPage(name) {
   // 对话区的 SSE 通道只在停在工作台时保持（见 wbSyncStream）。
   wbSyncStream();
   if (name === "workbench") {
-    loadWorkbench(); loadWbEvents(); renderWbFilters(); ensureWbProviders();
+    wbLoadLocal();
+    loadWorkbench(); loadWbEvents(); renderWbFilters(); wbRenderTagFilters(); ensureWbProviders();
     // 回到工作台补一次服务端快照：离开期间 token 级增量不再回放，靠整轮拉取收敛。
     if (wbChat) wbChat.reload();
   }
@@ -1190,7 +1319,10 @@ function updateTaskAI(id, text, isFailure) {
  * AI 工作台（大屏 3 栏）：左 会话列表 + 中 决策面板 + 右 实时动态
  * 增强：状态筛选 Tab、会话模型/Agent 信息、提问徽标、气泡式最近对话、Enter 快捷回复
  * ========================================================================== */
-const WB_HIGH_FREQ = new Set(["heartbeat", "server.heartbeat", "sync", "server.connected", "message.part.delta", "message.part.updated", "message.part.removed", "message.updated", "session.updated"]);
+// 动态栏跳过的纯噪音事件：心跳 / 同步快照 / 逐 token 增量 / 会话时间戳刷新。
+// message.updated 与 message.part.updated（工具/文件 part，后端已过滤入库）是有
+// 动作语义的，必须保留；message.part.delta / removed 仍是逐 token 噪音。
+const WB_HIGH_FREQ = new Set(["heartbeat", "server.heartbeat", "sync", "server.connected", "message.part.delta", "message.part.removed", "session.updated"]);
 const WB_MAX_EVENTS = 50;
 let wbSessions = [];
 let wbStatuses = {};
@@ -1204,6 +1336,22 @@ let wbSending = false;
 let wbLoading = false;
 let wbLastListLoad = 0;
 let wbFilterOption = "all";
+// 会话书签（收藏）与标签分组（localStorage 本地持久化，对齐 App 书签/标签能力）。
+let wbStars = new Set();
+let wbSessTags = {};
+// 标签筛选：null = 全部；"star" = 书签会话；"tag:<name>" = 按标签。
+let wbTagFilter = null;
+function wbLoadLocal() {
+  try { wbStars = new Set(JSON.parse(localStorage.getItem("ocb_session_stars") || "[]")); } catch (_) { wbStars = new Set(); }
+  try { const t = JSON.parse(localStorage.getItem("ocb_session_tags") || "{}"); wbSessTags = (t && typeof t === "object") ? t : {}; } catch (_) { wbSessTags = {}; }
+}
+function wbSaveStars() { try { localStorage.setItem("ocb_session_stars", JSON.stringify([...wbStars])); } catch (_) {} }
+function wbSaveTags() { try { localStorage.setItem("ocb_session_tags", JSON.stringify(wbSessTags)); } catch (_) {} }
+function wbAllTags() {
+  const m = new Map();
+  for (const sid of Object.keys(wbSessTags)) for (const t of (wbSessTags[sid] || [])) m.set(t, (m.get(t) || 0) + 1);
+  return [...m.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+}
 // 决策面板是否处于「改名」编辑态。
 let wbRenaming = false;
 // 会话是否正在压缩（压缩为同步长耗时操作，期间禁用操作按钮）。
@@ -1344,7 +1492,7 @@ function wbChatCtx() {
     modelOptions: () => wbModelOptions(),
     contextBudget: () => wbContextBudget(),
     send: (body) => wbSendPrompt(body),
-    sent: () => { wbStatuses[sid()] = { type: "busy" }; wbScheduleRenderList(); },
+    sent: () => { wbStatuses[sid()] = { type: "busy" }; wbScheduleRenderList(); if (wbChat) wbChat.syncSendIcon(); },
     abort: () => wbAbortWbSession(sid()),
     command: (name, args) => wbRunWbCommand(sid(), name, args),
     revert: (turn) => wbRevertTo(turn),
@@ -1359,6 +1507,8 @@ function wbChatCtx() {
       if (!id) return;
       wbStatuses[id] = { type: st === "retry" ? "retry" : (st === "busy" ? "busy" : "idle") };
       wbScheduleRenderList();
+      // 忙碌/空闲切换后同步发送/停止按钮图标与禁用态。
+      if (wbChat && wbChat.sessionId === id) wbChat.syncSendIcon();
     },
   };
 }
@@ -1518,11 +1668,12 @@ async function wbRecognize(onText) {
 // 拉取可切换的 provider + 模型列表（懒加载并缓存；失败只尝试一次，避免每次刷新重复打接口）。
 async function ensureWbProviders(force) {
   if (wbProviders && !force) return wbProviders;
-  if (!force && wbProvidersState !== "idle") return wbProviders;
+  // 已加载 / 正在加载时不重复请求；失败态允许重试（每次 refreshWbPanel 轮询都会重试）。
+  if (!force && (wbProvidersState === "loading" || wbProvidersState === "loaded")) return wbProviders;
   wbProvidersState = "loading";
   try {
     const res = await api("/api/opencode/config/providers", { headers: appHeaders() });
-    if (!res.ok) { wbProvidersState = "failed"; return wbProviders; }
+    if (!res.ok) { wbProvidersState = "failed"; if (wbChat) wbChat.renderSelectors(); return wbProviders; }
     const d = await res.json();
     const list = (d.providers || []).map(p => ({
       id: p.id,
@@ -1542,6 +1693,10 @@ async function ensureWbProviders(force) {
   } catch (_) {
     wbProvidersState = "failed";
     return wbProviders;
+  } finally {
+    // 加载完成（无论成败）都重绘一次模型下拉：会话可能在加载完成前就打开了，
+    // 否则下拉会一直停在「加载模型列表…」。
+    if (wbChat) wbChat.renderSelectors();
   }
 }
 // 当前会话生效的模型选择值（providerID␁modelID␁variant），供下拉回填比对。
@@ -1555,7 +1710,8 @@ function wbSessionModelValue() {
 function wbModelOptions() {
   const list = wbProviders;
   // disabled 且无 selected 时浏览器会把下拉渲染成空白，用户看不到「正在加载」提示。
-  if (!list) return `<option value="" disabled selected>加载模型列表…</option>`;
+  if (!list) return `<option value="" disabled selected>${
+    wbProvidersState === "failed" ? "模型列表加载失败，自动重试中…" : "加载模型列表…"}</option>`;
   const want = wbSessionModelValue();
   let html = "";
   let found = false;
@@ -1689,6 +1845,69 @@ function renderWbFilters() {
   };
 }
 
+// 书签 / 标签筛选 Tab：全部 / ⭐书签 / 各标签（点标签直接跳转到该分组）。
+function wbRenderTagFilters() {
+  const box = document.getElementById("wbTagFilters");
+  if (!box) return;
+  const chips = [["", "全部"]];
+  if (wbStars.size) chips.push(["star", `⭐ 书签 ${wbStars.size}`]);
+  const allTags = wbAllTags();
+  for (const [t, n] of allTags) chips.push(["tag:" + t, `#${t} ${n}`]);
+  box.innerHTML = chips.map(([k, l]) =>
+    `<button class="wb-tagfilter ${wbTagFilter === k ? "active" : ""}" data-tf="${escapeHtml(k)}">${escapeHtml(l)}</button>`).join("");
+  box.onclick = (e) => {
+    const btn = e.target.closest("button[data-tf]");
+    if (!btn) return;
+    wbTagFilter = btn.dataset.tf || null;
+    wbRenderTagFilters();
+    renderWbList();
+  };
+}
+// 会话标签编辑弹窗（对齐 App 书签 ManageTagsDialog）：输入新标签回车/按钮添加，点标签移除。
+function wbEditSessionTags(sid) {
+  const s = wbSessions.find(x => x.id === sid) || {};
+  const title = (s.title || s.slug || sid).toString();
+  const tags = wbSessTags[sid] || [];
+  const tagRow = (t) => `<span class="wb-edit-tag" data-rm-sess-tag="${escapeHtml(sid)}|${escapeHtml(t)}">#${escapeHtml(t)} ×</span>`;
+  wbModalOpen(`会话标签 · ${title}`,
+    `<div class="wb-tag-edit">
+      <div class="muted" style="font-size:12px;margin-bottom:8px">给会话打标签，可用于列表分组筛选；点击标签可移除。</div>
+      <div class="wb-edit-tags" id="wbEditTags">${tags.length ? tags.map(tagRow).join("") : `<span class="muted" style="font-size:12px">暂无标签</span>`}</div>
+      <div class="row" style="gap:6px;margin-top:10px">
+        <input type="text" id="wbTagInput" placeholder="输入标签后回车，如：发布" style="flex:1" onkeydown="if(event.key==='Enter'){wbAddSessionTag('${escapeHtml(sid)}');}">
+        <button class="ghost" onclick="wbAddSessionTag('${escapeHtml(sid)}')">添加</button>
+      </div>
+    </div>`);
+  const body = document.getElementById("wbModalBody");
+  body.onclick = (e) => {
+    const rm = e.target.closest("[data-rm-sess-tag]");
+    if (!rm) return;
+    const [rid, rtag] = rm.dataset.rmSessTag.split("|");
+    wbSessTags[rid] = (wbSessTags[rid] || []).filter(t => t !== rtag);
+    if (!wbSessTags[rid].length) delete wbSessTags[rid];
+    wbSaveTags();
+    wbRenderTagFilters();
+    wbScheduleRenderList();
+    wbEditSessionTags(rid);
+  };
+  const inp = document.getElementById("wbTagInput");
+  if (inp) inp.focus();
+}
+function wbAddSessionTag(sid) {
+  const inp = document.getElementById("wbTagInput");
+  // 只保留中文/字母/数字/下划线/连字符/点/空格，去除会破坏 data 属性与 URL 的字符。
+  let tag = (inp && inp.value || "").trim().replace(/^#/, "").replace(/[^\w\u4e00-\u9fa5\-. ]+/g, "-").replace(/-+/g, "-").trim();
+  if (!tag) return;
+  const cur = wbSessTags[sid] || [];
+  if (!cur.includes(tag)) cur.push(tag);
+  wbSessTags[sid] = cur;
+  if (inp) inp.value = "";
+  wbSaveTags();
+  wbRenderTagFilters();
+  wbScheduleRenderList();
+  wbEditSessionTags(sid);
+}
+
 function refreshWbStats() {
   const items = wbItems.length ? wbItems : buildWbItems();
   let q = 0, b = 0, i = 0;
@@ -1755,9 +1974,16 @@ function wbItemHtml(it) {
   const wrap = (q ? `<span class="qbadge">提问 ${q}</span>` : "") +
     (pc ? `<span class="qbadge" title="待授权操作">授权 ${pc}</span>` : "");
   const newDot = wbNewSet.has(id) ? `<span class="newdot" title="有新消息"></span>` : "";
+  const starred = wbStars.has(id);
+  const tags = (wbSessTags[id] || []);
+  const tagsHtml = tags.length
+    ? `<div class="wb-tags">${tags.map(t => `<span class="wb-tag" data-tag-jump="${escapeHtml(t)}">#${escapeHtml(t)}</span>`).join("")}
+        <button class="wb-tag-add" type="button" data-tag-edit="${escapeHtml(id)}" title="管理标签">＋</button></div>`
+    : `<div class="wb-tags"><button class="wb-tag-add" type="button" data-tag-edit="${escapeHtml(id)}" title="添加标签">＋标签</button></div>`;
   return `<div class="wb-item ${active}" data-sid="${escapeHtml(id)}">
-    <div class="t"><span class="dot ${escapeHtml(it.status)}"></span><span class="ttl">${escapeHtml(title)}</span>${newDot}${wrap}</div>
+    <div class="t"><button class="wb-star${starred ? " on" : ""}" type="button" data-star="${escapeHtml(id)}" title="${starred ? "取消收藏" : "收藏会话"}" aria-label="收藏">${starred ? "★" : "☆"}</button><span class="dot ${escapeHtml(it.status)}"></span><span class="ttl">${escapeHtml(title)}</span>${newDot}${wrap}</div>
     <div class="dir">${escapeHtml(dir) || "-"}</div>
+    ${tagsHtml}
     ${metaParts.length ? `<div class="meta">${metaParts.join(" · ")}</div>` : ""}
   </div>`;
 }
@@ -1768,10 +1994,10 @@ function renderWbList() {
   const box = document.getElementById("wbList");
   const kw = (document.getElementById("wbFilter").value || "").trim().toLowerCase();
   const filter = wbFilterOption;
-  // 内容指纹：状态/排序/关键字/选中项都没变就不重建 DOM，避免滚动条跳动；
+  // 内容指纹：状态/排序/关键字/标签筛选/选中项都没变就不重建 DOM，避免滚动条跳动；
   // 选中项必须参与比对，否则点选其他会话时高亮不会更新。
-  const sig = filter + "\u0001" + kw + "\u0001" + (wbSelected || "") + "\u0001" + wbItems.map(it =>
-    it.session.id + ":" + it.status + ":" + (it.pending || []).length + ":" + (it.permissions || []).length + ":" + (it.session.time && it.session.time.updated || 0) + ":M" + modelId(it.session.model) + ":U" + (wbNewSet.has(it.session.id) ? 1 : 0)
+  const sig = filter + "\u0001" + kw + "\u0001" + (wbTagFilter || "") + "\u0001" + (wbSelected || "") + "\u0001" + wbItems.map(it =>
+    it.session.id + ":" + it.status + ":" + (it.pending || []).length + ":" + (it.permissions || []).length + ":" + (it.session.time && it.session.time.updated || 0) + ":M" + modelId(it.session.model) + ":U" + (wbNewSet.has(it.session.id) ? 1 : 0) + ":S" + (wbStars.has(it.session.id) ? 1 : 0) + ":T" + (wbSessTags[it.session.id] || []).join(",")
   ).join(",");
   if (sig === wbListSig) return;
   wbListSig = sig;
@@ -1781,6 +2007,8 @@ function renderWbList() {
     if (filter === "question" && wbRank(it.status) !== 0) return false;
     if (filter === "busy" && wbRank(it.status) !== 1) return false;
     if (filter === "idle" && wbRank(it.status) !== 2) return false;
+    if (wbTagFilter === "star" && !wbStars.has(it.session.id)) return false;
+    if (wbTagFilter && wbTagFilter.indexOf("tag:") === 0 && !(wbSessTags[it.session.id] || []).includes(wbTagFilter.slice(4))) return false;
     return true;
   });
   if (kw) {
@@ -1807,6 +2035,19 @@ function renderWbList() {
   scroller.scrollTop = prevScroll;
   document.getElementById("wbListHint").textContent = `共 ${shown} 个`;
   box.onclick = (e) => {
+    const star = e.target.closest("[data-star]");
+    if (star) {
+      const sid = star.dataset.star;
+      if (wbStars.has(sid)) wbStars.delete(sid); else wbStars.add(sid);
+      wbSaveStars();
+      wbRenderTagFilters();
+      wbScheduleRenderList();
+      return;
+    }
+    const te = e.target.closest("[data-tag-edit]");
+    if (te) { wbEditSessionTags(te.dataset.tagEdit); return; }
+    const tj = e.target.closest("[data-tag-jump]");
+    if (tj) { wbTagFilter = "tag:" + tj.dataset.tagJump; wbRenderTagFilters(); renderWbList(); return; }
     const el = e.target.closest(".wb-item");
     if (el) openWbPanel(el.dataset.sid);
   };
@@ -1894,25 +2135,90 @@ function wbFallbackEvent(type) {
   if (type.startsWith("message.") || type.includes("assistant")) return "AI 回复";
   if (type.startsWith("user.") || type.includes("prompt")) return "用户指令";
   if (type.startsWith("project.")) return "项目事件";
-  if (type.includes("status") || type.includes("updated") || type.includes("created")) return "状态更新";
+  if (type.startsWith("session.created")) return "新建会话";
+  if (type.includes("status")) return "状态更新";
   return "事件更新";
+}
+// 从 part 提取「具体动作」：工具/文件/推理/文本（message.part.updated / created 入库时用）。
+function describePart(part) {
+  if (!part || typeof part !== "object") return "";
+  const t = part.type || "";
+  const text = String(part.text || "").trim();
+  if (t === "tool") {
+    const st = part.state || {};
+    const stt = String(st.status || st.type || "").toLowerCase();
+    const budge = stt === "error" || stt === "failed" ? "工具失败" : stt === "completed" || stt === "success" ? "工具完成" : "运行工具";
+    const target = (st.title && String(st.title).trim()) || (st.input && (st.input.command || st.input.filePath || st.input.path || st.input.url || st.input.query)) || part.tool || "工具";
+    const targetText = String(target).replace(/\s+/g, " ").slice(0, 80);
+    return `${budge}：${targetText}`;
+  }
+  if (t === "file") return "文件：" + String(part.filename || part.url || "").slice(0, 80);
+  if (t === "reasoning") return text ? "推理：" + text.slice(0, 80) : "开始推理";
+  if (text) return text.slice(0, 80);
+  return "";
+}
+// 从 message.updated / message.complete 的 info 提取「模型/agent/token/结束原因」动作描述。
+function finishLabel(f) {
+  const m = { "tool-calls": "工具调用", "error": "出错", "reasoning": "推理完成", "length": "达到长度上限", "stop": "正常结束", "content-filter": "内容过滤", "aborted": "已中止" };
+  return m[String(f || "").toLowerCase()] || String(f || "");
+}
+function describeMessage(info, type, fmtTok) {
+  const role = info && info.role;
+  const model = info.modelID || (info.model && (info.model.modelID || info.model.id)) || "";
+  const agent = info.agent ? " · " + info.agent : "";
+  if (role === "assistant") {
+    const base = "AI 回复" + (model ? "（" + model + "）" : "") + agent;
+    const tk = info.tokens;
+    let tok = "";
+    if (tk) {
+      const total = (tk.input || 0) + (tk.output || 0) + (tk.reasoning || 0);
+      tok = " · " + fmtTok(total) + " tok";
+      if (tk.reasoning) tok += "（推理 " + fmtTok(tk.reasoning) + "）";
+    }
+    const finish = info.finish ? " · " + finishLabel(info.finish) : "";
+    return type === "message.complete" ? base + tok + finish + " 完成" : base + tok + finish;
+  }
+  return "用户提问" + agent;
+}
+// 从 session.diff 提取文件变更摘要：文件名 + 增删行数。
+function describeDiff(diff) {
+  if (!Array.isArray(diff) || !diff.length) return "";
+  let add = 0, del = 0;
+  const names = [];
+  for (const d of diff) {
+    add += d.additions || 0;
+    del += d.deletions || 0;
+    const n = d.file || d.path || "";
+    if (n) names.push(String(n).split("/").pop());
+  }
+  const list = names.slice(0, 3).join("、") + (names.length > 3 ? " 等" : "");
+  return `文件变更：${list} +${add} −${del}`;
 }
 // 从原始事件 payload 提取展示信息，兼容 v1.18 wrapper（{"payload":{...}}）与非 wrapper 形态。
 function wbPayloadMeta(payload, eventType) {
   let obj = payload;
   if (!obj || typeof obj !== "object") obj = {};
   let inner = obj.properties || obj.data || (obj.payload && (obj.payload.properties || obj.payload.data)) || {};
+  const core = (obj.payload && obj.payload.properties) ? obj.payload.properties : inner;
   let type = obj.type || (obj.payload && obj.payload.type) || eventType || "";
-  const sessionObj = inner.session || obj.session;
+  const sessionObj = core.session || obj.session;
+  const info = core.info || inner.info || obj.info;
   const title = (sessionObj && sessionObj.title) || "";
-  const file = wbFilePath(obj, inner);
+  const file = wbFilePath(obj, core) || wbFilePath(obj, inner);
   const directory = obj.directory || (sessionObj && sessionObj.directory) || (file ? file.substring(0, file.lastIndexOf("/")) : "");
   let summary = "";
-  if (type === "session.status" || type === "session.updated") {
-    const st = inner.status;
+  // 具体动作优先：part（工具/文件/推理/文本）
+  const part = core.part || inner.part || obj.part;
+  if (part && part.type) summary = describePart(part);
+  if (!summary && (type === "message.updated" || type === "message.complete") && info && info.role) summary = describeMessage(info, type, fmtTok);
+  if (!summary && type === "session.diff") summary = describeDiff(core.diff);
+  if (!summary && (type === "session.status" || type === "session.idle")) {
+    const st = core.status;
     const stt = st && typeof st === "object" ? st.type : st;
-    summary = stt === "busy" ? "开始处理" : stt === "idle" ? "处理完成" : stt === "retry" ? "重试中" : stt === "error" ? "出错" : "";
+    summary = stt === "idle" || type === "session.idle" ? "处理完成" : stt === "busy" ? "开始处理" : stt === "retry" ? "重试中" : stt === "error" ? "出错" : (stt || "");
   }
+  if (!summary && type === "session.created") summary = "新建会话";
+  if (!summary && type === "message.complete") summary = "本轮回复完成";
   if (!summary) {
     const qa = obj.questions || inner.questions || [];
     if (qa.length && qa[0] && qa[0].question) summary = "等待回答：" + String(qa[0].question).trim().slice(0, 60);
@@ -1927,7 +2233,7 @@ function wbPayloadMeta(payload, eventType) {
   }
   if (!summary) {
     const tool = inner.tool || obj.tool;
-    if (tool && tool.type) summary = "正在执行工具：" + tool.type;
+    if (tool && (tool.type || tool.name)) summary = "正在执行工具：" + String(tool.type || tool.name).trim();
   }
   if (!summary && file) summary = "修改文件：" + file.split("/").pop();
   if (!summary) {
@@ -1937,11 +2243,16 @@ function wbPayloadMeta(payload, eventType) {
     }
   }
   if (!summary) {
-    const part = inner.part || obj.part;
     if (part && part.text) summary = String(part.text).trim().replace(/\s+/g, " ").slice(0, 50);
   }
   if (!summary) summary = wbFallbackEvent(type);
-  return { title, directory, file, summary, type };
+  // 工具调用的稳定标识（callID），用于把「运行中→完成/失败」的多条状态收敛成同一条动态。
+  const toolKey = part && part.type === "tool"
+    ? String(part.callID || (part.tool + "|" + ((part.state && (part.state.title || (part.state.input && part.state.input.command))) || "")))
+    : "";
+  // 同一消息的 message.updated 会推多条（创建 + 各里程碑），按 message id 收敛成一条（最新覆盖）。
+  const msgKey = (type === "message.updated" || type === "message.complete") && info && info.id ? String(info.id) : "";
+  return { title, directory, file, summary, type, toolKey, msgKey };
 }
 function wbEventItem(ev) {
   const meta = wbPayloadMeta(ev.payload, ev.eventType);
@@ -1955,6 +2266,8 @@ function wbEventItem(ev) {
     directory: (s && s.directory) || meta.directory || "",
     summary: meta.summary,
     ts,
+    toolKey: meta.toolKey || "",
+    msgKey: meta.msgKey || "",
   };
 }
 // 时间格式化：当天显示 HH:mm:ss，跨天显示 MM-DD HH:mm。
@@ -1967,22 +2280,38 @@ function wbTimeFormat(ts) {
     ? d.toLocaleTimeString("zh-CN", { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" })
     : d.toLocaleString("zh-CN", { hour12: false, month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
 }
-// 事件点颜色：错误红 / 完成绿 / 提问黄 / 默认紫罗兰。
+// 事件点颜色：错误红 / 完成绿 / 提问黄 / 文件变更与工具青 / 默认紫罗兰。
 function wbEventDot(ev) {
   const t = ev.eventType || "";
   if (t.includes("error") || t.includes("failed")) return "busy";
   if (t === "message.complete" || t.includes("idle") || t.includes("finish")) return "idle";
   if (t.startsWith("question.") || t.startsWith("permission.")) return "question";
+  if (t === "session.diff" || t.startsWith("file.") || t.startsWith("tool") || t === "message.part.created" || t === "message.part.updated") return "busy";
+  if (t.startsWith("message.")) return "idle";
   return "idle";
 }
+// 噪声事件：同步快照 / 心跳 / 会话时间戳刷新 / 空 diff 摘要——不产生「具体动作」，动态栏直接跳过。
+const WB_NOISE_EVENTS = new Set(["sync", "server.heartbeat", "session.updated", "session.diff", "heartbeat"]);
 // 把一条有意义的事件追加进动态历史（不按会话折叠，最多保留最近 WB_MAX_EVENTS 条）。
 // 轮询带事件 id 用 id 去重；页面首次加载的历史事件按时间排，让动态栏更丰富。
 function wbAppendEvent(ev) {
   if (!ev || !ev.sessionId) return;
+  if (WB_NOISE_EVENTS.has(ev.eventType)) return;
   const item = wbEventItem(ev);
   const dot = wbEventDot(ev);
   const key = (ev.id !== undefined && ev.id !== null) ? "id:" + ev.id : "raw:" + ev.eventType + ":" + ev.sessionId + ":" + item.ts;
   if (wbEvents.some(x => x.key === key)) return;
+  // 同一个工具调用（callID）会连发多条 part.updated（运行中→完成/失败），
+  // 或同一消息连发多条 message.updated——都收敛成同一条动态，用最新状态覆盖。
+  const collapseKey = item.toolKey || item.msgKey;
+  if (collapseKey) {
+    const ix = wbEvents.findIndex(x => x.sessionId === item.sessionId && (x.toolKey === collapseKey || x.msgKey === collapseKey));
+    if (ix >= 0) {
+      wbEvents[ix] = { ...wbEvents[ix], ...item, dot, key, ts: item.ts };
+      wbEvents.sort((a, b) => (b.ts || 0) - (a.ts || 0));
+      return;
+    }
+  }
   wbEvents.push({ ...item, dot, key });
   wbEvents.sort((a, b) => (b.ts || 0) - (a.ts || 0));
   if (wbEvents.length > WB_MAX_EVENTS) wbEvents = wbEvents.slice(0, WB_MAX_EVENTS);
@@ -2210,7 +2539,8 @@ async function refreshWbPanel(id, force) {
     wbRestorePanel(snap);
     if (wbChat) wbChat.renderSelectors();
     // 模型下拉首次打开时后台加载 provider 列表，加载完仅重绘一次（保留输入）。
-    if (wbProvidersState === "idle") ensureWbProviders().then(() => { if (wbChat) wbChat.renderSelectors(); });
+    // idle / failed 都触发：失败会自动重试，成功则回填下拉选项。
+    if (wbProvidersState === "idle" || wbProvidersState === "failed") ensureWbProviders().then(() => { if (wbChat) wbChat.renderSelectors(); });
   } finally {
     if (wbPanelFetching === id) wbPanelFetching = null;
   }
@@ -2248,12 +2578,16 @@ function renderWbPanel() {
   shell.innerHTML = `
     <div class="wb-panel-head">
       <span class="dot ${escapeHtml(status)}" style="margin-top:7px"></span>
-      <div class="t">${escapeHtml(title)}
+      <div class="t">
+        <span class="ttl">${escapeHtml(title)}</span>
+        <span class="badge ${statusBadgeCls}">${wbStatusLabel(status)}</span>
         ${(s.time && s.time.created) ? `<div class="meta">创建 ${escapeHtml(new Date(s.time.created).toLocaleString())}</div>` : ""}
       </div>
-      <div style="display:flex;flex-direction:column;gap:6px;align-items:flex-end;flex-shrink:0">
-        <span class="badge ${statusBadgeCls}">${wbStatusLabel(status)}</span>
+      <div class="wb-head-actions">
         <div style="display:flex;gap:6px;align-items:center">
+          <button class="ghost sm" data-wb-action="star" title="收藏 / 取消收藏会话">${wbStars.has(d.id) ? "★ 已收藏" : "☆ 收藏"}</button>
+          <button class="ghost sm" data-wb-action="diff" title="查看会话内文件更改">更改</button>
+          <button class="ghost sm" data-wb-action="timeline" title="会话时间线">时间线</button>
           <button class="ghost sm" data-wb-rename="1" title="修改会话标题">改名</button>
           <button class="ghost sm" data-wb-compact="1" title="压缩会话：把历史对话汇总为摘要以释放上下文（耗时较长）" ${wbCompacting ? "disabled" : ""}>${wbCompacting ? "压缩中…" : "压缩"}</button>
           <button class="danger sm" data-wb-del="${escapeHtml(d.id)}">删除</button>
@@ -2261,9 +2595,11 @@ function renderWbPanel() {
             <button class="ghost sm" data-wb-morebtn="1" title="更多操作（同 App 聊天详情菜单）">更多 ▾</button>
             <div class="wb-more-menu hidden" data-wb-more-menu>
               <button data-wb-action="reload">重新加载</button>
+              <button data-wb-action="star">${wbStars.has(d.id) ? "取消收藏" : "收藏会话"}</button>
+              <button data-wb-action="sess-tag">设置标签</button>
               <button data-wb-action="fork">Fork 会话</button>
               <button data-wb-action="undo" ${isBusyForAct ? "disabled" : ""}>撤销上一条</button>
-              <button data-wb-action="redo" ${isBusyForAct ? "" : "disabled"}>重做</button>
+              <button data-wb-action="redo" ${isBusyForAct ? "disabled" : ""}>重做</button>
               <button data-wb-action="review">运行代码审查</button>
               <button data-wb-action="diff">查看更改（diff）</button>
               <button data-wb-action="timeline">会话时间线</button>
@@ -2514,17 +2850,44 @@ async function wbRejectQ(reqId) {
   }
 }
 // 发送对话消息（prompt_async）。返回 true/false 供 ChatView 决定是否撤回乐观气泡。
+// 发送指令的超时（ms）：prompt_async 正常是快速 204；若上游长时间不返回，不能一直
+// 占着 wbSending 把输入框和发送按钮卡死——超时按「已提交」处理（fire-and-forget，
+// 消息大概率已入队，靠 SSE 回执收敛），而不是还原输入框造成「按了 Enter 内容还在」。
+const SEND_TIMEOUT_MS = 15000;
 async function wbSendPrompt(body) {
   const id = wbSelected;
-  if (!id || wbSending) return false;
+  if (!id) return false;
+  // 上一条仍在途时不重复发：保留输入框内容（send() 不会清空），避免双发。
+  if (wbSending) return false;
   wbSending = true;
   const dir = wbCurrentDir();
   const headers = appHeaders();
   if (dir) headers["x-starburst-directory"] = dir;
   try {
-    const res = await api(`/api/opencode/session/${encodeURIComponent(id)}/prompt_async`,
-      { method: "POST", headers, body: JSON.stringify(body) });
-    if (!res.ok) { toast("发送失败", "指令未送达 (" + res.status + ")", "crit"); return false; }
+    const ctl = new AbortController();
+    const timer = setTimeout(() => ctl.abort(), SEND_TIMEOUT_MS);
+    let res = null, timedOut = false;
+    try {
+      res = await api(`/api/opencode/session/${encodeURIComponent(id)}/prompt_async`,
+        { method: "POST", headers, body: JSON.stringify(body), signal: ctl.signal });
+    } catch (e) {
+      if (e && e.name === "AbortError") timedOut = true;
+      else throw e;
+    } finally {
+      clearTimeout(timer);
+    }
+    if (timedOut) {
+      // 超时：不再还原输入框（消息大概率已入队），保留乐观气泡，靠 SSE 收敛。
+      toast("已提交", "指令已发送，若长时间无响应请检查会话状态", "info");
+      wbDismissPendingQuestions(id);
+      wbStatuses[id] = { type: "busy" };
+      renderWbList();
+      return true;
+    }
+    if (!res || !res.ok) {
+      toast("发送失败", `指令未送达 (${res ? res.status : "网络错误"})，内容已保留在输入框可重试`, "crit");
+      return false;
+    }
     // 新指令覆盖上一轮未答的提问：服务端驳回 + 本地移除（与 App 行为一致），
     // 否则切进会话还会看到已经作废的问题卡片。
     wbDismissPendingQuestions(id);
@@ -2534,7 +2897,7 @@ async function wbSendPrompt(body) {
     renderWbList();
     return true;
   } catch (e) {
-    if (e.message !== "unauthorized") toast("发送失败", e.message || "未知错误", "crit");
+    if (e.message !== "unauthorized") toast("发送失败", (e.message || "未知错误") + "，内容已保留在输入框可重试", "crit");
     return false;
   } finally {
     wbSending = false;
@@ -2555,16 +2918,31 @@ function wbDismissPendingQuestions(id) {
   if (wbPanelData && wbPanelData.id === id) { wbPanelData.pending = []; wbRerenderPanel(); }
 }
 // 回退到某一轮：POST /session/{id}/revert { messageID }（App revertSession 同契约）。
+// 上游对处理中的会话（agent 还在跑工具 / 生成）直接回 409 SessionBusyError，
+// 这里先试一次；409 则轮询等待空闲自动重试（最多 ~30s），期间 toast 提示。
+async function wbRevertMessage(id, mid, dir) {
+  const doRev = () => api(`/api/opencode/session/${encodeURIComponent(id)}/revert`,
+    { method: "POST", headers: wbDirHeaders(dir), body: JSON.stringify({ messageID: mid }) }).catch(() => null);
+  let res = await doRev();
+  if (res && res.status === 409) {
+    toast("会话处理中", "等待空闲后自动重试…", "info", 2500);
+    for (let i = 0; i < 15 && wbSelected === id; i++) {
+      await new Promise(r => setTimeout(r, 2000));
+      res = await doRev();
+      if (!res || res.status !== 409) break;
+    }
+  }
+  return res;
+}
 async function wbRevertTo(turn) {
   const id = wbSelected;
   const mid = turn && (turn.id || (turn.msgIds || [])[0]);
   if (!id || !mid) return;
   const dir = wbCurrentDir();
-  const res = await api(`/api/opencode/session/${encodeURIComponent(id)}/revert`,
-    { method: "POST", headers: wbDirHeaders(dir), body: JSON.stringify({ messageID: mid }) }).catch(() => null);
-  if (!res || !res.ok) { toast("回退失败", `revert (${res ? res.status : "网络错误"})`, "crit"); return; }
+  const res = await wbRevertMessage(id, mid, dir);
+  if (!res || !res.ok) { toast("回退失败", `revert (${res ? res.status : "网络错误"})，请先停止处理或稍后再试`, "crit"); return; }
   toast("已回退", "该消息之后的内容已撤销，可用「更多 ▾ → 重做」恢复", "info");
-  if (wbChat) wbChat.dropAfter(mid);
+  if (wbChat) { wbChat.dropAfter(mid); wbChat.revertTo = mid; }
   loadWorkbench();
 }
 // 重新生成：回退到本轮对应的用户指令，再用同样的 parts 重发一次。
@@ -2579,9 +2957,9 @@ async function wbRegenerate(turn) {
   }
   if (!userTurn) { toast("无法重新生成", "未找到该轮对应的指令", "warn"); return; }
   const dir = wbCurrentDir();
-  const res = await api(`/api/opencode/session/${encodeURIComponent(id)}/revert`,
-    { method: "POST", headers: wbDirHeaders(dir), body: JSON.stringify({ messageID: userTurn.id }) }).catch(() => null);
-  if (!res || !res.ok) { toast("重新生成失败", `revert (${res ? res.status : "网络错误"})`, "crit"); return; }
+  const res = await wbRevertMessage(id, userTurn.id, dir);
+  if (!res || !res.ok) { toast("重新生成失败", `revert (${res ? res.status : "网络错误"})，请先停止处理或稍后再试`, "crit"); return; }
+  wbChat.revertTo = userTurn.id;
   wbChat.dropAfter(userTurn.id);
   wbChat.resendTurn(userTurn.id);
 }
@@ -2693,6 +3071,16 @@ async function wbMoreMenuAction(action) {
   const id = wbSelected;
   if (!id) return;
   wbMoreMenuClose();
+  if (action === "star") {
+    if (wbStars.has(id)) wbStars.delete(id); else wbStars.add(id);
+    wbSaveStars();
+    wbRenderTagFilters();
+    wbScheduleRenderList();
+    renderWbPanel();
+    toast(wbStars.has(id) ? "已收藏" : "已取消收藏", (wbSessions.find(x => x.id === id) || {}).title || id, "info");
+    return;
+  }
+  if (action === "sess-tag") { wbEditSessionTags(id); return; }
   if (action === "reload") { if (wbChat) wbChat.reload(); refreshWbPanel(id, true); toast("已重新加载", "会话信息已刷新", "info"); return; }
   if (action === "fork") { await wbForkSession(id); return; }
   if (action === "undo") { await wbUndoWbSession(id); return; }
@@ -2734,7 +3122,7 @@ async function wbUndoWbSession(id) {
   const res = await api(`/api/opencode/session/${encodeURIComponent(id)}/revert`, { method: "POST", headers: wbDirHeaders(dir), body: JSON.stringify({ messageID: mid }) });
   if (!res.ok) { toast("撤销失败", "revert (" + res.status + ")", "crit"); return; }
   toast("已撤销", "已回退到上一条消息", "info");
-  if (wbChat) wbChat.reload();
+  if (wbChat) { wbChat.revertTo = mid; wbChat.reload(); }
   loadWorkbench();
 }
 async function wbRedoWbSession(id) {
@@ -2742,7 +3130,7 @@ async function wbRedoWbSession(id) {
   const res = await api(`/api/opencode/session/${encodeURIComponent(id)}/unrevert`, { method: "POST", headers: wbDirHeaders(dir) });
   if (!res.ok) { toast("重做失败", "unrevert (" + res.status + ")", "crit"); return; }
   toast("已重做", "已恢复上一条撤销", "info");
-  if (wbChat) wbChat.reload();
+  if (wbChat) { wbChat.revertTo = null; wbChat.reload(); }
   loadWorkbench();
 }
 // 运行服务器端命令（如 /review），与 App executeCommand 契约一致。
@@ -2755,7 +3143,7 @@ async function wbRunWbCommand(id, command, args) {
   toast(`已运行 /${command}`, "命令已下发到会话", "info");
   wbStatuses[id] = { type: "busy" };
   renderWbList();
-  if (wbChat) wbChat.setWorking("命令执行中…");
+  if (wbChat) { wbChat.setWorking("命令执行中…"); wbChat.syncSendIcon(); }
   return true;
 }
 async function wbAbortWbSession(id) {
@@ -2766,7 +3154,7 @@ async function wbAbortWbSession(id) {
   toast("已停止", "已发送停止信号", "info");
   wbStatuses[id] = { type: "idle" };
   renderWbList();
-  if (wbChat && wbChat.sessionId === id) wbChat.setWorking("");
+  if (wbChat && wbChat.sessionId === id) { wbChat.setWorking(""); wbChat.syncSendIcon(); }
   refreshWbPanel(id, true);
 }
 async function wbShareWbSession(id) {
@@ -2877,11 +3265,14 @@ async function wbShowWbDiff(id) {
       const dels = df.deletions || 0;
       const before = df.before || "";
       const after = df.after || "";
+      const status = (df.status || "modified").toLowerCase();
+      const statusCls = status === "added" ? "df-added" : status === "deleted" ? "df-deleted" : "df-modified";
+      const statusLabel = status === "added" ? "新增" : status === "deleted" ? "删除" : "修改";
       return `<details class="wb-diff-item" ${i === 0 ? "open" : ""}>
-        <summary><b>${escapeHtml(file)}</b><span class="meta"><span class="add">+${adds}</span> <span class="del">-${dels}</span> <span class="badge">${escapeHtml(df.status || "modified")}</span></span></summary>
+        <summary><b>${escapeHtml(file)}</b><span class="meta"><span class="add">+${adds}</span> <span class="del">-${dels}</span> <span class="badge ${statusCls}">${escapeHtml(statusLabel)}</span></span></summary>
         <div class="wb-diff-body">
-          <div class="col before"><h5>改动前</h5><pre>${escapeHtml(before) || "-"}</pre></div>
-          <div class="col after"><h5>改动后</h5><pre>${escapeHtml(after) || "-"}</pre></div>
+          ${before ? `<div class="col before"><h5>改动前 <span class="del">-${dels}</span></h5><pre>${escapeHtml(before)}</pre></div>` : ""}
+          ${after ? `<div class="col after"><h5>改动后 <span class="add">+${adds}</span></h5><pre>${escapeHtml(after)}</pre></div>` : ""}
         </div>
       </details>`;
     }).join("");
@@ -2924,6 +3315,14 @@ function wbTimelineFromMessages(msgs) {
         entries.push({ icon: "question", st: "提问", title: "待决问题", summary: p.question || "", ts: created, key: "q" + created + "_" + (miscSeq++) });
       } else if (type === "subtask" || type === "agent") {
         entries.push({ icon: "info", st: "子任务", title: type === "subtask" ? (p.description || p.prompt || "") : (p.name || "agent"), summary: "", ts: created, key: "sub" + created + "_" + (miscSeq++) });
+      } else if (type === "todo" || type === "plan") {
+        const todos = Array.isArray(p.todos) ? p.todos : (Array.isArray(p.items) ? p.items : []);
+        const done = todos.filter(t => t.status === "completed" || t.status === "done" || t.completed).length;
+        entries.push({
+          icon: "info", st: "计划", title: "执行计划 · " + done + "/" + todos.length,
+          summary: todos.map(t => (t.content || t.title || t.text || "")).filter(Boolean).join("；").slice(0, 180),
+          ts: created, key: "todo" + created + "_" + (miscSeq++),
+        });
       }
     }
   }
@@ -2963,7 +3362,9 @@ async function wbShowWbTimeline(id) {
 }
 function wbModalOpen(title, html) {
   document.getElementById("wbModalTitle").textContent = title;
-  document.getElementById("wbModalBody").innerHTML = html;
+  const body = document.getElementById("wbModalBody");
+  body.onclick = null;   // 清掉上一个弹窗内容挂的委托（如标签编辑），避免串台
+  body.innerHTML = html;
   const card = document.querySelector("#wbModal .modal-card");
   if (window.innerWidth <= 768) card && card.classList.add("wb-modal-scroll");
   else card && card.classList.remove("wb-modal-scroll");
@@ -4757,5 +5158,62 @@ function safeParseJSON(s) { try { return JSON.parse(s); } catch (_) { return nul
 /* ---------- 启动 ---------- */
 document.getElementById("appToken").value = localStorage.getItem(APP_TOKEN_KEY) || "";
 initThemePicker();
+
+/* ---------- 实时动态列：宽度可拖拽 + 收起/展开 ---------- */
+let wbEventsOpen = true;
+let wbEventsW = 360;
+function wbApplyEventsState() {
+  const grid = document.getElementById("wbGrid");
+  if (grid) {
+    grid.style.setProperty("--wb-events-w", wbEventsW + "px");
+    grid.classList.toggle("ev-collapsed", !wbEventsOpen);
+  }
+  const exp = document.getElementById("wbEventsExpand");
+  if (exp) exp.style.display = wbEventsOpen ? "none" : "flex";
+  const tg = document.getElementById("wbEventsToggle");
+  if (tg) { tg.textContent = wbEventsOpen ? "» 收起" : "« 展开"; tg.title = wbEventsOpen ? "收起实时动态" : "展开实时动态"; }
+}
+function wbSetEventsOpen(open) {
+  wbEventsOpen = !!open;
+  try { localStorage.setItem("ocb_wb_events_open", wbEventsOpen ? "1" : "0"); } catch (_) {}
+  wbApplyEventsState();
+}
+function wbInitEventsPanel() {
+  try { wbEventsOpen = localStorage.getItem("ocb_wb_events_open") !== "0"; } catch (_) {}
+  try { wbEventsW = Math.min(640, Math.max(200, Number(localStorage.getItem("ocb_wb_events_w")) || 360)); } catch (_) {}
+  const tg = document.getElementById("wbEventsToggle");
+  if (tg) tg.onclick = () => wbSetEventsOpen(!wbEventsOpen);
+  const exp = document.getElementById("wbEventsExpand");
+  if (exp) exp.onclick = () => wbSetEventsOpen(true);
+  wbApplyEventsState();
+  const h = document.getElementById("wbEventsHandle");
+  const grid = document.getElementById("wbGrid");
+  if (h && grid) {
+    let dragging = false;
+    h.addEventListener("mousedown", (e) => {
+      dragging = true;
+      document.body.style.cursor = "col-resize";
+      document.body.style.userSelect = "none";
+      e.preventDefault();
+    });
+    document.addEventListener("mousemove", (e) => {
+      if (!dragging) return;
+      const g = document.getElementById("wbGrid");
+      if (!g) return;
+      const rect = g.getBoundingClientRect();
+      const w = Math.min(640, Math.max(200, Math.round(rect.right - e.clientX - 6)));
+      wbEventsW = w;
+      g.style.setProperty("--wb-events-w", w + "px");
+    });
+    document.addEventListener("mouseup", () => {
+      if (!dragging) return;
+      dragging = false;
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+      try { localStorage.setItem("ocb_wb_events_w", String(wbEventsW)); } catch (_) {}
+    });
+  }
+}
+wbInitEventsPanel();
 renderAuth();
 connectTaskWS();

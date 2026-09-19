@@ -1,6 +1,8 @@
 package server
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"io"
@@ -225,6 +227,18 @@ func (s *Server) handleOpenCodeProxy(w http.ResponseWriter, r *http.Request) {
 		hdr[k] = append([]string(nil), vv...)
 	}
 
+	// provider 目录回传的是明文密钥：命中凭据路径的响应必须整体缓冲、抹掉凭据字段
+	// 再回程，此时上游给的 Content-Length / Content-Encoding 已失效。
+	// sanitize 需在发上游请求前判定，以便按需改请求头（见下）。
+	sanitize := providerCredentialPath(upstreamPath)
+	if sanitize {
+		// 浏览器默认带 Accept-Encoding: gzip，上游会据此返回 gzip 压缩正文
+		// （首字节 0x1f = gzip 魔数），缓冲解析必失败（502）。剥离该头让上游回
+		// identity 编码，整段 JSON 可直接解析抹凭据；回程的 Content-Encoding 本来
+		// 就会丢弃，不影响客户端。
+		hdr.Del("Accept-Encoding")
+	}
+
 	// Cancel the upstream connection when the client disconnects.
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
@@ -247,11 +261,11 @@ func (s *Server) handleOpenCodeProxy(w http.ResponseWriter, r *http.Request) {
 
 	contentType := resp.Header.Get("Content-Type")
 	isSSE := strings.Contains(contentType, "text/event-stream")
-	// provider 目录回传的是明文密钥：命中凭据路径的响应必须整体缓冲、抹掉凭据字段
-	// 再回程，此时上游给的 Content-Length / Content-Encoding 已失效。
-	// 这里不看 Content-Type 是否为 JSON——上游若漏带或换带别的类型，按类型放行
-	// 就等于把密钥原文透出去；缓冲后解析失败一律 502（失败关闭）。
-	sanitize := !isSSE && providerCredentialPath(upstreamPath)
+	// 上面已按凭据路径提前判定 sanitize 并在请求头剥离 Accept-Encoding；
+	// SSE 路径不可能命中 /config、/provider，这里只是收敛语义。
+	if isSSE {
+		sanitize = false
+	}
 
 	// Relay the upstream response headers verbatim (dropping hop-by-hop).
 	for k, vv := range resp.Header {
@@ -300,6 +314,17 @@ func relaySanitizedJSON(w http.ResponseWriter, resp *http.Response, path string)
 		log.Printf("opencode proxy %s: read credential payload: %v", path, err)
 		writeErr(w, http.StatusBadGateway, "upstream opencode request failed")
 		return
+	}
+	// 防御性：正常情况下代理已对凭据路径剥离 Accept-Encoding（上游返回 identity），
+	// 但若上游无视请求头仍回 gzip（或未来走别的通道），直接解析会撞上 gzip 魔数
+	// 0x1f 而失败。这里按 Content-Encoding 就地解压，保证解析的是明文 JSON。
+	if strings.Contains(strings.ToLower(resp.Header.Get("Content-Encoding")), "gzip") {
+		if gz, gerr := gzip.NewReader(bytes.NewReader(blob)); gerr == nil {
+			if ub, uerr := io.ReadAll(io.LimitReader(gz, maxSanitizedBodyBytes+1)); uerr == nil {
+				blob = ub
+			}
+			_ = gz.Close()
+		}
 	}
 	if int64(len(blob)) > maxSanitizedBodyBytes {
 		log.Printf("opencode proxy %s: credential payload over %d bytes, refusing to relay", path, maxSanitizedBodyBytes)
