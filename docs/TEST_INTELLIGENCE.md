@@ -15,6 +15,11 @@
 >   点击「应用」才写入被测项目（唯一写路径，可审计）。
 > - 遵循 `/workspaces/AGENTS.md`：**关键事实（表、字段、必填、数值）必须由确定性代码提取，
 >   LLM 只做解释、补全与归因**；知识全部带 provenance（来源文件:行号），可审计。
+>
+> **阅读须知**：本文是**设计文档**，描述目标形态而非当前实现。文中标有 **「⚠️ 实现现状」**
+> 的引用块是与代码核对后的更正，凡与正文冲突以标注为准；全部偏差汇总见 **§11**，需要架构组
+> 评审的技术栈偏离（Go 而非 Spring、pgvector/HNSW、SQLite/PG 双方言、正则式静态抽取）见
+> [`docs/TECH_DEVIATION.md`](TECH_DEVIATION.md)。设计内容本身**不因其未实现而删除**。
 
 ## 1. 背景与目标
 
@@ -132,6 +137,16 @@ tasks / webui。
     原缓存目录及已 clone 仓库保留不动（原路径数据继续可用）；② 重建：先删除原缓存目录下
     全部已 clone 仓库（破坏性操作，二次确认 + 审计留痕）再按新路径重新 clone；重建后相关
          项目自动标为待重新分析。
+
+    > **⚠️ 实现现状：两阶段重建未落地**。`internal/server/server.go` 注册的 **98 条路由**里
+    > 找不到对应 handler——§5 设计的 `POST /api/intel/settings/probe-repos`（预检）与
+    > `POST /api/intel/settings/repos-rebuild`（确认+删除+重建）**都不存在**，也没有**任何针对
+    > repos_dir 变更**的清理代码（唯一的删除动作在 `ensureGitClone`：origin URL 变了就
+    > `os.RemoveAll` 单个项目的 clone 再重拉，与缓存根目录无关）。现状：`intel.repos_dir` 只是一
+    > 个普通 `settings` KV，改了值后旧目录下已 clone 的仓库**原地不动**，新 clone 才落到新路径。
+    > 另：本条所称"默认 `~/.local/share/starburst-backend/intel-repos`"也不成立——代码里**没有
+    > 默认值**，`projectRoot` 读不到该 setting 时直接返回
+    > `intel.repos_dir not configured for git projects`。
   - **Git 克隆认证与 ref 语义**：Git URL 项目 clone 需要认证时（如私有 GitLab），在项目或
     全局设置配置 **HTTP token / SSH 私钥**（加密落库，仅在 clone/pull 时注入）；`git_ref` 为
     钉住的分支或 tag（默认远端默认分支），**ref 变化 → 该仓库回退全量重扫**；检测到
@@ -235,6 +250,22 @@ tasks / webui。
   `npx playwright test <file>`、Android `./gradlew test`/`connectedDebugAndroidTest`、Go
   `go test ./...`。捕获退出码 + 解析报告（surefire `TEST-*.xml` / playwright json / go test -json）
   → 逐用例结果回写。全程异步、可批量、可取消，进度/结果走 WS 推送。
+
+> **⚠️ 实现现状（本节"由 `tasks` 新增 kind"未落地）**
+> 代码里**没有** `kind=test-run` 这种 task kind：`internal/store/task.go` 的 `Task` 结构体**无
+> `Kind` 字段**（只有 prompt/dependsOn/priority/workflowId/retry 相关列）。测试执行走
+> `internal/server/intel_runner.go` 的**自有派发通道**：`enqueueIntelRun` → goroutine →
+> 全局信号量 `intelExecSem`（`const intelExecConcurrency = 2`）+ 每项目互斥
+> `intelExecMutex` + 取消表 `intelCancels`，结果落在独立的 `test_runs`/`test_results` 行，进度经
+> `intel.run.event`（`pushIntelRunEvent`）推送。**后果见 §7 的同名标注**（拿不到重试/依赖/优先级/
+> worker 池/崩溃恢复/janitor）。os/exec 跑命令 + 命令白名单约束 + 异步/可取消 + WS 推送**已实现**。
+> - **但报告解析只接通两种 kind**：`parseReport`（`internal/server/intel_exec.go`）仅分派
+>   `go`（`go test -json`）与 `surefire`（`target/surefire-reports/TEST-*.xml`，Maven/Gradle 共用）。
+>   **Playwright JSON 解析器虽已实现且有单测（`internal/intel/report` 的
+>   `ParsePlaywrightJSON`）却没有任何调用方**，故本节与 §8 M3 承诺的"playwright 报告解析"
+>   在当前代码里**取不到逐用例结果**；`npm` 报告类型不解析，只合成"整轮一条"通过/失败。
+>   本节列出的 iOS XCTest、Python pytest 报告解析亦**未实现**。
+
 - **Flaky 治理**：同一用例连续 N 次（默认 3，可配）出现"同一版本先失败、重跑转绿"→ 自动判定
   flaky：标记 `flaky_quarantined`、**从"受影响范围/增量回归"自动剔除**，不再拖累整轮结果；页面
   单独告警区展示被隔离用例与历史 `flaky_count`；用户可**手动解除隔离**或**标记为真实 bug**入
@@ -287,6 +318,23 @@ Android SDK/Node/Gradle/Go…）、**Android 设备 / 远程执行节点**（真
     `gradlew`/`mvn` 等），**流式回传输出**、拉回报告/产物（scp），结果按既有管道解析落库。
   - **生命周期**：节点可达性检查（SSH 连通+能力自检），离线标灰提示；绑定/节点选择存 DB，
     除非手动更改否则不变。
+
+> **⚠️ 实现现状（远程执行与上述四点均有出入，头号能力"去 macOS 跑 xcodebuild"实际不可用）**
+> - **未使用 `golang.org/x/crypto/ssh`**：全仓**没有任何 `crypto/ssh` import**，`x/crypto` 依赖仅被
+>   `internal/auth/auth.go` 用于 bcrypt。真实实现是 `internal/server/intel_exec.go` 组 argv 后调
+>   `envagent.RunSSH`（`internal/intel/envagent/envagent.go`），后者 `exec.CommandContext(ctx, "ssh", …)`
+>   起**系统 `ssh` 二进制**（`BatchMode=yes`、`ConnectTimeout=10`、`StrictHostKeyChecking=accept-new`、
+>   `IdentitiesOnly=yes`）。文档所称"已在依赖中"不准确——是**间接的 Go 模块依赖**，不是被引用的库。
+> - **无流式回传**：`cmd.CombinedOutput()` 一次性收集，远端输出**不会**边跑边推给前端。
+> - **无 scp、无产物回拉**：全仓无 scp 调用，远程只回传 stdout；这也是下一条限制的直接原因。
+> - **仅 `go` 报告可远程执行**：`intel_exec.go` 对 `reportKind != "go"` 直接返回
+>   「远程执行目前仅支持 go 报告（stdout 自包含）」。**因此本节和 §10 反复承诺的"添加 macOS
+>   节点跑 XCUITest / 装 Android SDK 跑 gradlew"目前跑不通**——xcodebuild / Gradle / Maven 依赖
+>   落盘报告（xcresult / surefire XML / JUnit XML），拿不回本机就无法解析落库。
+> - **capabilities 有表无逻辑**：`remote_nodes.capabilities` 列存在、CRUD 与页面可填，但执行链路
+>   **没有任何按能力标签路由**的代码——只有调用方显式传 `node` id 才会走远程；`intel_exec.go`
+>   注释里"routed runs rely on the node's capability labels instead"所指的机制并不存在。
+> - 已实现部分：节点 CRUD/可达性探测、host key 指纹落库、远程命令 shell 元字符拒绝、白名单约束。
 - **执行链路集成**：一次测试运行前走 `ensure-ready`——逐依赖 + 工具链 + 绑定设备/节点逐个
   检查，缺失/离线则列出并提示（可跳转去逐项安装/连接），到位才进执行；结果回写 env 状态。
 - **库环境初始化（schema/data）**：中间件就绪后、跑集成测试/契约校验前，先做**表结构与数据
@@ -439,6 +487,21 @@ Android SDK/Node/Gradle/Go…）、**Android 设备 / 远程执行节点**（真
 **日志与产物（log_path）留存默认 30 天 / 单项目容量上限，可在全局设置调整，超限自动清理**
 （audit 记录与 findings 历史不受影响）；旁路产物（bug 报告/子集）随 issue 保留。
 
+> **⚠️ 实现现状：上表漏记了 RAG 向量表 `intel_chunks`**（迁移见
+> `internal/store/migrate.go` 的 `migrationIntelRag`）：列
+> `project_id/module_id/kind/ref_id/title/content/source_file/source_line/embedding`，
+> 供 `/api/intel/ask` 与功能点 AI 对话做余弦召回。`embedding` 在 **PostgreSQL 上是
+> `vector(1024)` + `vector_cosine_ops` 的 HNSW 索引**，在 **SQLite 上退化为 TEXT 存
+> `[1,2,3]` 文本、检索走进程内 cosine 全量比较**（`internal/store/rag.go`）。固定 1024 维来自
+> 默认 embedding 模型 bge-m3，换模型需重建索引。**为什么选 pgvector/HNSW、为什么做 SQLite/PG
+> 双方言而非标准栈的 MySQL 8**，属技术栈偏离，评审材料见
+> [`docs/TECH_DEVIATION.md`](TECH_DEVIATION.md) 的偏离项 ②③。
+>
+> 另：本段"日志产物默认留 30 天、超限自动清理"**未实现**——`test_runs`/`test_results` 只在
+> 删除项目时随 `project_id` 一并删除，没有保留期回收（详见 §7 标注的 janitor 缺口）；
+> `intel.workers` / `intel.env.*` / `intel.device.*` 也非代码内常量，而是页面写入的
+> `settings` KV 命名约定，只有 `intel.repos_dir` 真正被读取。
+
 ## 5. API 设计（新增端点，Token 鉴权，风格对齐现有编排 API）
 
 ```
@@ -505,6 +568,34 @@ POST /api/intel/ai-rules/{id}/polish         AI 润色提示词（返回润色�
 POST /api/intel/scan/rules {"projectId","ruleIds[]"}  按配置规则逐条扫描（AI 建议/风险/性能，异步）
 ```
 
+> **⚠️ 实现现状（本节是设计清单，非已交付接口表）**。`internal/server/server.go` 共注册
+> **98 条路由**，其中 intel 侧 56 条。与本节对不上的地方：
+> - **设计中写了但完全没有 handler 的端点**：`/api/intel/settings/probe-repos`、
+>   `/api/intel/settings/repos-rebuild`（见 §3.1 标注）、`/api/intel/sync/scan`（增量重扫只能再调
+>   `/api/intel/analyze`）、`/api/intel/sbom`（SBOM 在 analyze 时生成，随 `intel_overview` 的
+>   `sbom_json` 列存库并经 `/api/intel/overview` 返回，**无独立导出端点**）、
+>   `/api/intel/scan/findings`（实际只有 `GET /api/intel/findings` 列表 + `POST
+>   /api/intel/findings/{id}/waive`，**扫描动作没有独立触发端点**）、`/api/intel/issues/{id}/ack`、
+>   `/api/intel/issues/{id}/link-feature`、`/api/intel/runs/{id}/results`（`handleIntelRunByID`
+>   只识别 `GET /api/intel/runs/{id}` 与 `POST .../cancel`）。
+> - **路径归属与表格不同**：设计中写在 `/api/intel/projects/{id}/…` 下的
+>   `modules`、`commands`、`commands-modules` **都不是子路径**——实际端点是
+>   `GET /api/intel/modules`、`GET|PUT /api/intel/modules/`（`handleIntelModuleCommands`，按
+>   moduleId 操作）；`/api/intel/projects/{id}` 只挂了 GET/PUT/DELETE 与 `sources` 子资源。
+> - **`POST /api/intel/run` 的入参远少于设计**：结构体只有 `{projectId, moduleId, node, force}`；
+>   没有 `scope`、`kind[]`、`caseIds[]`，因此 `scope=all|module|class|affected|manual` 与
+>   "按能力标签自动匹配"未实现（`node` 为空即本机执行，见 §3.6 标注）。
+> - **设计中没写、实际已存在的 intel 端点**（本节宜补录）：`/api/intel/index`、`/api/intel/ask`、
+>   `/api/intel/chats(/{id})`、`/api/intel/overview`、`/api/intel/gateway-routes`、
+>   `/api/intel/run-all`、`/api/intel/plan`、`/api/intel/impact`、`/api/intel/results/{id}/…`、
+>   `/api/intel/fixes/generate`、`/api/intel/contracts/check(-batch)`、
+>   `/api/intel/{android,web,ios}-bindings`、`/api/intel/env/{ensure,status,install,stop,external,
+>   schema-init}`、`/api/intel/env/devices(/{id})`、`/api/intel/nodes(/{id})`、
+>   `/api/intel/ai-rules(/{id})`、`/api/intel/overrides/{suggest,enqueue}`、
+>   `/api/intel/pending(/{id}/confirm)`。
+>
+> 权威接口表以 `docs/API.md` 为准。
+
 ## 6. 配置页（webui）「测试」页
 
 现有内嵌 SPA 新增「测试」功能，采用**两段式导航：项目列表 → 项目详情**。
@@ -559,6 +650,25 @@ POST /api/intel/scan/rules {"projectId","ruleIds[]"}  按配置规则逐条扫�
   ② 弹窗二选一「不重建」（保留原缓存目录与已 clone 仓库，数据继续可用）/「重建」（确认删除
   原缓存目录并重新 clone，相关项目标为待重新分析），全程审计留痕。
 
+> **⚠️ 实现现状（本节多数控件已落地，以下几项没有）**
+> - **repos_dir 两阶段修改**：无预检/确认端点与前端弹窗（见 §3.1 标注）。
+> - **测试 Worker 并发数**：页面无该设置项，后端 `intel.workers` 无人读取，实际并发是编译期
+>   常量 `intelExecConcurrency = 2`（**不是**本节所述的"默认 1、可热改"）。
+> - **Git clone 认证（token/SSH key 加密落库）**：**完全没有实现**——`IntelProject` 无
+>   `git_token`/`ssh_key` 之类字段，`cloneGitRepo`/`ensureGitClone` 也不注入任何凭据，
+>   私有仓库只能依赖主机自身的 git 凭据（§9 承诺的"git 私钥/token 加密落库"同此）。
+>   （中间件口令与远程节点 SSH auth 的加密落库**已实现**，见 `internal/store/crypto.go`。）
+> - **flaky 隔离区**：后端只做"同轮内对失败用例立即重跑一次、转绿则计 `flaky_count` 并改判
+>   passed"（`intel_exec.go` 的 `flakyRetry`，且**仅 go 报告生效**）；**没有**
+>   `flaky_quarantined` 状态、**没有**"连续 N 次"阈值、**没有**从受影响范围/增量回归自动剔除，
+>   前端也就没有隔离区视图与解除隔离操作。
+> - **工具链卸载入口 / 中间件卷清理**：`/api/intel/env/install` 只有装没有卸；env 路由里没有
+>   卷清理端点（`/api/intel/env/stop` 只做容器停止）。
+> - ✅ 已实现且与描述一致：两段式导航、功能点列表/详情/拖动排序/涉及端、单测区与 AI 对话区、
+>   命令白名单、待确认队列与批量覆写、findings 过滤与豁免/误报、SBOM 导出按钮（前端
+>   `downloadIntelSbom()` 拉 `/api/intel/overview` 的 `sbomJson` 落盘，**不经后端导出端点**）、
+>   设备连接/绑定、环境四块状态与逐项安装。
+
 ### 6.1 Star Burst APP 端对应变动
 
 本功能是 Star Burst 的后端能力（Web 已有「测试」页），Star Burst 移动 APP 作为同一账号体系的
@@ -586,24 +696,89 @@ POST /api/intel/scan/rules {"projectId","ruleIds[]"}  按配置规则逐条扫�
 - **测试 Worker 并发**：独立于 OpenCode 编排 worker，数量在**页面全局设置「测试并发」**中配置，
   **默认 1（串行）**，可放宽为并行；改动即时生效，不重启。（存量 `--workers` flag 只管编排
   任务，与测试执行互不影响。）
+
+> **⚠️ 实现现状（本条"任务化"与"并发可配"均未兑现——本文档最主要的两处承诺未兑现）**
+> - **intel 完全没有接入任务状态机**。`internal/store/task.go` 的 `Task` 结构体**没有 `Kind`
+>   字段**，`tasks` 表也没有 kind 列；全仓创建任务的**生产**调用点只有 5 处
+>   （`CreateTask`：`internal/server/batch.go:61`、`internal/server/scheduler.go:96`、
+>   `internal/automation/engine.go:146`；`CreateTaskWithStatus`：`internal/server/tasks.go:249`、
+>   `internal/server/workflow.go:82`），**没有一处来自 intel**（`internal/server/intel*.go` 内
+>   既不出现 `store.Task` 也不出现 `CreateTask`）。§3.6 的 env 操作、§3.4 的 fix-apply 同样
+>   **不是** task kind，只是各自 handler 里的同步/异步处理。
+> - **直接后果（intel 运行拿不到的能力）**：因为不进 `tasks` 表、不进 `internal/tasks` 执行器，
+>   intel run **没有** —— ① **自动重试与退避**（`attempts`/`available_at` 只对 tasks 生效）；
+>   ② **`dependsOn` 依赖编排**（无法表达 analyze → run → rootcause → fix-apply → 复测）；
+>   ③ **优先级排序**（`priority` 列不参与 intel 派发）；④ **worker 池**（`--workers` /
+>   `--max-concurrency` 只管编排任务）；⑤ **启动崩溃恢复**——`RecoverStaleRunning`
+>   （`internal/store/task.go`）只在 `internal/tasks/executor.go` 的 `Run()` 里调用，
+>   **`test_runs` 没有等价物**：后端重启后遗留的 `running`/`queued` run 会永久停留在该状态，
+>   既不重置也不标失败；⑥ **janitor 清理**——`internal/tasks/janitor.go` 的保留期回收
+>   （`--task-retention`）只扫 `tasks`，`test_runs`/`test_results` 及其输出会无限增长（§4
+>   所称"日志产物默认留 30 天、超限自动清理"亦无实现）。
+> - **实际形态**：`internal/server/intel_runner.go` 的自有派发 —— `enqueueIntelRun` 建行后
+>   `go runIntelJob(...)`，靠 `intelExecSem`（`const intelExecConcurrency = 2`，**编译期常量、
+>   不可热改**）限制全局进程数，靠 `intelExecMutex(projectID)` 做同项目串行，靠 `intelCancels`
+>   + `POST /api/intel/runs/{id}/cancel` 做取消；进度走独立事件 `intel.run.event`（非
+>   `task.event`），单次超时 `intelRunTimeout = 10 分钟`、run 内输出截断 `intelOutputLimit =
+>   256 KiB`。§4 的 `intel.workers` 设置项**全仓无人读取**。
+> - **仍有价值**：本节设计（把执行下沉为 task kind）是**待实施的规划**，不是对现状的描述；
+>   实现前请以本标注为准。
 - **执行 kind**：`tasks` 新增 `kind=test-run`（os/exec 跑确定性命令）、`kind=env`（容器拉取/
   启停/工具链安装）、`kind=audit`（漏洞/静态扫描）、`kind=fix-apply`（应用修复，唯一写路径）；
   与现有 prompt kind 并存；worker 池、取消、超时复用；命令必须落在**项目命令白名单**内。
+
+  > **⚠️ 实现现状：`kind=test-run` / `env` / `audit` / `fix-apply` 四种 task kind 全部未落地**，
+  > `Task` 结构体与 `tasks` 表都**没有 kind 列**。四类工作分别由
+  > `internal/server/intel_runner.go`（测试执行）、`internal/server/env.go`（环境供给）、
+  > `internal/server/intel_audit.go` + `internal/intel/{security,compliance,deps,sbom}`（审计扫描）、
+  > `internal/server/intel_audit.go` 的 `handleIntelFixAction`（修复 apply/reject/rollback）
+  > **各自实现**，互不共享 worker 池/重试/依赖，
+  > 也**不"与现有 prompt kind 并存"**（因为它们根本不在 tasks 体系内）。详见本节上方标注与文末
+  > §11 偏差清单。已实现的约束只有"命令必须落在项目命令白名单内"。
 - **执行 transport（本机 / 远程节点）**：runner 抽象为可插拔 executor——本机 `os/exec` 与
   远程 `SSH`（golang.org/x/crypto/ssh，已在依赖中）两套实现；远程执行流式回传输出、scp 拉回
   报告，解析与落库走同一管道；节点按能力标签路由，所有远程命令同样受命令白名单约束。
+
+  > **⚠️ 实现现状：与括号内所述不符**（完整逐条对照见 §3.6「远程执行节点」下的标注）。要点：
+  > 全仓**无 `golang.org/x/crypto/ssh` import**，远程走 `envagent.RunSSH` 起**系统 `ssh` 二进制**；
+  > 输出用 `CombinedOutput()` **一次性回传，非流式**；**无 scp、无产物回拉**；因此
+  > **仅 `go` 报告类型允许远程执行**，`xcodebuild`/`gradlew`/`mvn` 会被硬拒；**无按能力标签路由**
+  > （`node` 参数为空即本机）。"可插拔 executor"抽象也未出现——远程分支是 `intel_exec.go` 里的
+  > 一段 `if remoteNode != nil` 内联逻辑。
 - **执行前置**：一次 run 前先 `ensure-ready`（env 门禁），分三类响应（就绪 / 缺失可修给途径 /
   平台不支持明确告知），环境故障归因 `ENV_ISSUE`（区分 missing/unsupported），不误报到业务代码。
 - **推送**：新增 `intel.ready` / `intel.progress` / `intel.done` / `test.result` / `env.health` /
   `audit.finding` / `fix.suggest` / `feature.test.done`（功能点单测完成）/
   `feature.chat.answer`（AI 对话回复就绪）事件；APP 与 Web 走同一事件源，路由到对应端展示。
+
+  > **⚠️ 实现现状：上述 9 个事件名在代码里一个都不存在。**全仓 `hub.Broadcast` 的 intel 侧只有
+  > **单一事件类型 `intel.run.event`**（`internal/server/intel_runner.go` 的
+  > `pushIntelRunEvent`，载荷是整条 `test_runs` 行），靠 `run.status`
+  > （queued/running/passed/failed/canceled）+ `run.progress` 表达全部语义；env 门禁结果、
+  > 审计 findings、修复建议、功能点对话**均无独立事件**，前端只能靠拉取。编排侧仍只有
+  > `task.event` / `session.event` / `subscribed`。
 - **自动化**：`rules.kind` 扩展 `intel-run`，支持 GitLab push/tag webhook + cron 周期回归；
   触发时自动带 last_tested_sha 做增量。✅ 复用 `/api/webhook` 基础设施。
 - **审计**：analyze/run/执行命令/env 操作/命令白名单修改/覆写修改/修复应用全部走既有 API
   审计中间件；命令与实际参数逐条记录；写操作（修复应用）单独高亮记录。
 - **批量**：`/api/batch` 支持对多个项目并行下发分析/执行。
 
+  > **⚠️ 实现现状（自动化与批量两条均未兑现）**
+  > - `rules.kind` 的取值只有 `cron` / `git` / `http` 三种（`internal/store/rule.go` 的
+  >   `TriggerCron/TriggerGit/TriggerHTTP`，`internal/server/rules.go` 按此校验），**不存在
+  >   `intel-run` kind**；`internal/automation/engine.go` 命中规则后调 `store.CreateTask`
+  >   下发的是 **OpenCode prompt 任务**，**不会**触发 analyze/run 或带 `last_tested_sha` 的增量回归。
+  >   （✅ 部分成立：`/api/webhook` 基础设施确实存在并被 `rules.go` 复用为 `http` 触发入口。）
+  > - `/api/batch` 的入参是 `{prompt, targets[]}`，为每个 target 建一条 `store.Task`
+  >   （`internal/server/batch.go`），**只支持批量下发编排 prompt**，**没有**"对多个项目并行
+  >   下发分析/执行"的能力。
+
 ## 8. 分阶段实施
+
+> **⚠️ 实现现状**：下表是**规划表**，不是进度表。当前状态：M1/M2/M3/M5/M6/M8 的能力**大体已
+> 落地**，但 M3 的"`test-run` kind"与"flaky 自动隔离"、M5 的"可卸载/卷清理/能力标签路由"、
+> M7 的"intel-run 规则 + SBOM 导出端点"、M4 的写回形态选项与 §7 全部集成假设**均未按表中措辞
+> 实现**（M9 属移动端仓库，本仓无从核对）。逐条以文中各「⚠️ 实现现状」标注和 §11 清单为准。
 
 | 阶段 | 内容 | 验收 |
 |------|------|------|
@@ -629,6 +804,10 @@ POST /api/intel/scan/rules {"projectId","ruleIds[]"}  按配置规则逐条扫�
   注入**；中间件自动拉起生成的随机口令与外部配置一致加密落库并页面遮蔽（服务重启直接复用）；
   **远程节点 SSH 口令/密钥同样加密落库**，启用 host key 指纹校验（SSH-FP）默认证入，防止中间人；
   巡检日志对口令脱敏，明文凭证不出现在 API 响应与日志。
+
+  > **⚠️ 实现现状**：中间件口令（`env_services`）与远程节点 SSH auth（`remote_nodes.auth`）
+  > 确实走 AES-256-GCM 加密落库（`internal/store/crypto.go`），host key 指纹字段亦已落库；
+  > 但 **"git 私钥/token 加密落库" 未实现**（无任何凭据字段与注入路径），见 §11 第 10 条。
 - **单用户访问**：只有本人通过 VPN 使用，**不设细粒度权限/RBAC**；沿用既有基础鉴权
   （Web Session 加 APP Token），不向第三方开放。
 - **成本**：全量 LLM 分析按文件量节流；增量模式下 LLM 仅处理变更影响面与未解决问题。
@@ -648,6 +827,11 @@ POST /api/intel/scan/rules {"projectId","ruleIds[]"}  按配置规则逐条扫�
 - **平台能力（iOS）**：Linux 主机无 Xcode/模拟器，iOS 相关测试在门禁中标记 `unsupported`
   明确告知，并可**添加远程 macOS 节点**（能力标签 `ios-xcode`）经 SSH 执行 XCUITest 并拉回
   报告；无 macOS 节点时该项保持不可执行。
+
+  > **⚠️ 实现现状：只有前半句成立**。门禁把 iOS 相关项标 `unsupported` 已实现；但"添加 macOS
+  > 节点 → 经 SSH 跑 XCUITest → 拉回报告"整条链路**当前不可用**：远程执行硬性只放行 `go`
+  > 报告、无产物回拉、无按能力标签路由（详见 §3.6 标注）。也就是说 iOS/Android 真机这类
+  > "必须去别的平台跑"的场景，现在事实上**仍不可执行**，与"无 macOS 节点时不可执行"没有区别。
 - **漏洞库在线可达（公网）**：当前环境公网可达（github.com/ghcr.io/osv.dev 通，nvd.nist.gov
   反爬 403、proxy.golang.org 超时）——漏洞扫描在线拉取为主，个别域名受限时回退镜像/离线缓存
   （见 §3.7）。⚠️ **Nexus(192.0.2.150:8081) 是 OSS 制品仓库，不含漏洞数据**（漏洞防护属
@@ -656,3 +840,41 @@ POST /api/intel/scan/rules {"projectId","ruleIds[]"}  按配置规则逐条扫�
   后续独立工作。
 - **多项目并发**：同一项目 repo 的分析/执行需按目录串行（复用 sessionGate 思路），避免两轮
   git pull 竞争；不同项目可并行（受测试 Worker 并发数控制）。
+
+## 11. 文档与实现的偏差清单（集中收口）
+
+本节把上文各「⚠️ 实现现状」标注的结论一次列全，便于评审与排期。核对方式：逐条读
+`internal/server/`、`internal/intel/`、`internal/store/`、`internal/tasks/` 源码与
+`internal/server/server.go` 的路由注册表（共 **98 条路由**，其中 intel 侧 56 条），**不采信
+文档自述**。文中所有行号会随提交漂移，故一律以"文件 + 符号名"定位。
+
+| # | 小节 | 文档声称 | 代码实际 | 影响 / 后果 | 处置建议 |
+|---|------|----------|----------|-------------|----------|
+| 1 | §7 任务化、§3.5 执行、§8 M3 | analyze/run 复用任务状态机，`tasks` 新增 `kind=test-run/env/audit/fix-apply` | `store.Task` **无 `Kind` 字段**、`tasks` 表无 kind 列；5 处生产建任务调用点无一处来自 intel；intel 走 `intel_runner.go` 自有派发 + `intelExecSem` + `intelExecMutex` + `intelCancels` | intel run **拿不到重试、`dependsOn`、优先级、worker 池、`RecoverStaleRunning` 崩溃恢复、janitor 清理**；`test_runs` 里重启前 `running`/`queued` 的行永久悬挂 | 保留设计为待办；短期给 `test_runs` 补启动期"孤儿 run 置 failed"，长期再下沉为 task kind |
+| 2 | §3.6、§7 执行 transport、§10 iOS | 远程执行用 `golang.org/x/crypto/ssh`（"已在依赖中"）、流式回传、scp 拉回产物、按能力标签路由 | 全仓**无 `crypto/ssh` import**（x/crypto 仅 bcrypt）；实际 `envagent.RunSSH` 起**系统 `ssh` 二进制** + `CombinedOutput()` 一次性收集；**无 scp/产物回拉**；`reportKind != "go"` 直接拒绝；`capabilities` 列有表无路由逻辑 | 去 macOS 跑 `xcodebuild`、去远端跑 Gradle/Maven **整条路走不通**，而"补 macOS 节点"正是文中引入远程执行的头号理由；`intel_exec.go` 内"capability labels"注释属误导 | 先补产物回拉（scp/tar over ssh）再放开非 go 报告；capabilities 要么实现自动匹配要么从文档/字段语义降级为"人工选节点" |
+| 3 | §6 全局设置、§3.1 缓存路径、§5 | `intel.repos_dir` 两阶段修改（预检 → 确认 → 破坏性删除重建），默认路径 `~/.local/share/starburst-backend/intel-repos` | `probe-repos` / `repos-rebuild` **两个 handler 都不存在**；无 repos_dir 变更清理逻辑；**无默认值**（读不到即报 `intel.repos_dir not configured`） | 改路径后旧缓存既不清理也不重建，磁盘只增不减；未配置时 Git 项目完全无法分析 | 二选一：实现两阶段端点，或把本节降级为"仅提示"并手动清理 |
+| 4 | §6/§7 测试并发、§4 `intel.workers` | 并发数页面可配、默认 1（串行）、热生效不重启 | 编译期常量 `intelExecConcurrency = 2`，`intel.workers` 全仓无人读取 | 实际默认 **2 并行**（非串行），且改并发要重编译重启 | 若要兑现承诺：读 setting + 可重建信号量；否则修正文档为"常量 2" |
+| 5 | §7 推送 | 9 个新事件类型（`intel.ready`…`feature.chat.answer`） | intel 侧只有 **`intel.run.event`** 一种，语义靠 `run.status`/`run.progress` 表达 | 前端无法区分"环境就绪/审计发现/修复建议/对话回复"等语义，只能轮询 | 事件名以代码为准改写本节，或按语义补事件类型 |
+| 6 | §7 自动化、§7 批量 | `rules.kind` 扩展 `intel-run`；`/api/batch` 可并行下发分析/执行 | 规则 kind 只有 `cron/git/http`，命中后建的是 **prompt 任务**；`/api/batch` 同样只建 prompt 任务 | 周期回归、push/tag 触发回归**当前无法自动跑起来**（§8 M7 验收不成立） | 新增 `intel-run` 触发类型并把 target 指向 intel 队列 |
+| 7 | §3.5/§6 flaky | 连续 N 次先败后绿 → `flaky_quarantined`、自动剔除出增量范围、页面隔离区可解除 | 只有 `flakyRetry`（**仅 go 报告**、`flakyRetryMaxRetries = 1`）同轮立即重跑、转绿则 `flaky_count+1` 并改判 passed；无隔离状态、无剔除、无 UI | 不稳定用例仍会被反复计入回归；跨报告类型（JUnit/playwright/XCTest）不做 flaky 判定 | 补 `flaky_quarantined` 状态机 + 影响面剔除 |
+| 8 | §5、§3.7 SBOM 与扫描触发 | `POST /api/intel/sbom`、`POST /api/intel/scan/findings`、`/api/intel/sync/scan`、`/api/intel/issues/{id}/ack`、`/api/intel/issues/{id}/link-feature`、`/api/intel/runs/{id}/results` | 上述端点**均未注册**；SBOM 随 `intel_overview.sbom_json` 由 analyze 产出、前端 `downloadIntelSbom()` 下载；findings 扫描随 analyze 触发；issue 只有列表 | 依赖本节接口表的调用方会拿到 404/405 | 以 `docs/API.md` 为权威，本节改为"设计提案" |
+| 9 | §3.4/§6 修复写回形态 | 写回可选 直接写文件 / 补丁文件 / 剪贴板 / 建分支+提交，四选一 | `applyIntelFix` **只有直接写文件**（`os.WriteFile`）；`intel_fixes.write_mode` 列存在但写入路径不使用；备份 + `rollback` 已实现 | 主干污染风险比文档描述更高（无法选择"只出补丁"） | 实现其余三种 mode，或在文档标注"仅直接写" |
+| 10 | §3.1/§6/§9 Git 凭据 | clone 认证 HTTP token / SSH 私钥加密落库、运行时注入 | `IntelProject` 无凭据字段，`cloneGitRepo`/`ensureGitClone` **不注入任何凭据**（§9 该条对 git 不成立；中间件口令与节点 SSH auth 确实已 AES-256-GCM 加密落库） | 私有 GitLab 仓库只能在主机侧预置凭据，页面配置项是空头承诺 | 补凭据字段 + `GIT_ASKPASS`/ssh-agent 注入，或删掉该承诺 |
+| 11 | §3.6 依赖声明 | 人工 manifest `intel-env.yaml`（含 `init_scripts`） | **无解析实现**（仅 `internal/store/env.go` 注释里提过一次）；依赖只靠 `envdetect` 自动推导 | 自动推导覆盖不到的项目无法人工补声明 | 标注为未实现或落地解析器 |
+| 12 | §5 路径归属 | `GET /api/intel/projects/{id}/modules`、`PUT …/commands`、`…/commands-modules` | 实际是 `GET /api/intel/modules` 与 `GET\|PUT /api/intel/modules/`（按 moduleId），projects 子路径只挂了 `sources` | 与 §5 写法不一致，易误判为缺失 | 改写 §5 路径 |
+| 13 | §3.5、§8 M3 报告解析 | 解析 surefire / playwright json / go test -json（§3.5 另列 XCTest、pytest） | `parseReport` 只分派 `go` 与 `surefire`；`report.ParsePlaywrightJSON` **已实现有单测但无调用方** | Web/E2E 用例跑完只有一条"整轮"结果，逐用例视图空白；`npm` 类型同理 | 把 Playwright 分支接进 `parseReport` 并给 `npm/web` 落报告路径 |
+| 14 | 文首设计原则、§3.1 Profile 注册表 | "现装现有体系：Java/Maven、Go、Android、iOS、Web、BFF(GraphQL)、Node" | 类型**探测**（`internal/intel/profile.go` 的 7 个 Profile 锚点）确实全都有；但"每个 Profile 打包自己的结构化扫描器"只有 **Java（`java.go`）与 Go（`go.go`）**两套，其余类型 `ScanModule` 返回空结果 | 混合仓库里 Android/iOS/Web 子项目能被识别出 type/role，却拿不到实体/端点契约，字段级校验与影响面推导对这些子项目不成立 | 见 `internal/intel/scan.go` 的 `ScanModule` 注释；补 Android/iOS/Web 扫描器前，文中"现装"应限定为"探测现装、扫描器仅 Java/Go" |
+
+**另需知悉（不算"文档说谎"，但会影响判断）**
+
+- **env 门禁遇错即放行**：`internal/server/env.go` 的 `envGate` 在 `ensureEnv` 返回错误时
+  `log … (放行)` 并 `return nil`。即"环境探测本身坏了"等同于"环境检查通过"，与 §3.6/§7 承诺的
+  硬门禁语义相反（本地 run 只有探测正常时才被真正拦住；`force`/远程 run 完全跳过门禁）。
+- **轻量化部署看不到 intel**：`/api/system` 的 `vectorCapable`（= pgvector 已装 **且**
+  embedding 已配）为 false 时，`internal/webui/static/assets/app.js` **直接隐藏「测试」入口**。
+  因此默认 SQLite 部署下，整套 intel 功能"后端可用、页面无入口"。这也是
+  [TECH_DEVIATION.md](TECH_DEVIATION.md) 偏离项 ② 把"SQLite 进程内 cosine 回退路径是否放行"
+  列为待评审确认点的原因。
+
+> 本节只描述"文档 vs 代码"的差异，不构成实施优先级承诺；技术栈层面的偏离理由与评审材料
+> 见 [`docs/TECH_DEVIATION.md`](TECH_DEVIATION.md)。

@@ -7,7 +7,6 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -335,7 +334,12 @@ func (s *Server) generateFixForFinding(ctx context.Context, projectID, findingID
 	if err != nil {
 		return nil, err
 	}
-	abs := filepath.Join(root, filepath.FromSlash(relFile))
+	// finding.Location 是库里的字符串（扫描器写入，也可能来自覆写/LLM），
+	// 和同文件 :213/:267 的写侧一样必须先做包含校验再读。
+	abs, err := intelResolveRepoPath(root, relFile)
+	if err != nil {
+		return nil, err
+	}
 	data, err := os.ReadFile(abs)
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", relFile, err)

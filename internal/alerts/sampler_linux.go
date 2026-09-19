@@ -11,6 +11,14 @@ import (
 	"syscall"
 )
 
+// procStatPath and procMeminfoPath are package-level variables (rather than
+// inline literals) so tests can point the parsers at fixture files instead of
+// the live host. The shipped values are the real /proc paths.
+var (
+	procStatPath    = "/proc/stat"
+	procMeminfoPath = "/proc/meminfo"
+)
+
 // linuxSampler reads CPU/memory usage from /proc and disk usage via Statfs.
 type linuxSampler struct {
 	mu        sync.Mutex
@@ -35,7 +43,7 @@ func (s *linuxSampler) cpuPercent() float64 {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	f, err := os.Open("/proc/stat")
+	f, err := os.Open(procStatPath)
 	if err != nil {
 		return 0
 	}
@@ -68,6 +76,14 @@ func (s *linuxSampler) cpuPercent() float64 {
 		s.prevIdle = idle
 		return 0
 	}
+	// Counters can go backwards after a reboot or a host re-provisioning. The
+	// unsigned deltas below would then wrap around into a bogus ~100%
+	// utilisation and fire a false alert, so re-prime the baseline instead.
+	if total < s.prevTotal || idle < s.prevIdle {
+		s.prevTotal = total
+		s.prevIdle = idle
+		return 0
+	}
 	totalDelta := total - s.prevTotal
 	idleDelta := idle - s.prevIdle
 	s.prevTotal = total
@@ -82,7 +98,7 @@ func (s *linuxSampler) cpuPercent() float64 {
 
 // memPercent derives used memory from /proc/meminfo (MemTotal - MemAvailable).
 func memPercent() float64 {
-	f, err := os.Open("/proc/meminfo")
+	f, err := os.Open(procMeminfoPath)
 	if err != nil {
 		return 0
 	}

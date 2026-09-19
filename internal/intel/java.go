@@ -709,7 +709,11 @@ func isPrimitiveOrVoid(t string) bool {
 
 // extractDtoFields extracts the declared fields of a DTO class, mapping each
 // Java type to a JSON type. required defaults to false (nullability annotations
-// are not yet parsed; the LLM assist layer can refine it later).
+// such as @NotNull/@NotBlank are not yet parsed; the LLM assist layer can
+// refine it later). Extraction is single-level: a field whose type is another
+// DTO is only reduced by javaToJSONType to "object"/"array", and the caller
+// (resolveResponseFields) reads that one DTO file without recursion, so nested
+// field contracts are not resolved here.
 func extractDtoFields(lines []string) []fieldSpec {
 	out := make([]fieldSpec, 0)
 	for _, l := range lines {

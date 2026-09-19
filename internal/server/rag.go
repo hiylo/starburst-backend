@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -51,6 +52,11 @@ func (s *Server) handleIntelIndex(w http.ResponseWriter, r *http.Request) {
 
 	n, err := s.indexIntelProject(ctx, req.ProjectID)
 	if err != nil {
+		if errors.Is(err, store.ErrRagUnsupported) {
+			writeErr(w, http.StatusServiceUnavailable,
+				"the knowledge-base index needs PostgreSQL with pgvector; SQLite deployments do not include the intel features")
+			return
+		}
 		log.Printf("intel index project %d: %v", req.ProjectID, err)
 		writeErr(w, http.StatusInternalServerError, "index failed: "+err.Error())
 		return
@@ -63,6 +69,12 @@ func (s *Server) handleIntelIndex(w http.ResponseWriter, r *http.Request) {
 func (s *Server) indexIntelProject(ctx context.Context, projectID int64) (int, error) {
 	if s.embedding == nil || !s.embedding.Enabled() {
 		return 0, errEmbeddingDisabled
+	}
+	// The chunk index exists only to be searched, and searching needs pgvector.
+	// Building it anywhere else would pay for one embedding call per chunk and
+	// write rows no reader can ever reach.
+	if ok, err := s.store.PGVectorInstalled(ctx); err != nil || !ok {
+		return 0, store.ErrRagUnsupported
 	}
 	chunks, err := s.buildIntelChunks(ctx, projectID)
 	if err != nil {
@@ -393,6 +405,12 @@ func (s *Server) gatherDocChunks(ctx context.Context, projectID int64) []*store.
 		if !strings.HasSuffix(strings.ToLower(d.Name()), ".md") {
 			return nil
 		}
+		// 只收常规文件：仓库里一个 "notes.md -> /etc/shadow" 的软链接会被
+		// ReadFile 跟进去，把任意可读文件灌进知识库并回传给 token 持有者。
+		// WalkDir 给的是 Lstat 语义，所以这里能看出符号链接。
+		if info, err := d.Info(); err != nil || !info.Mode().IsRegular() {
+			return nil
+		}
 		rel, _ := filepath.Rel(root, path)
 		data, err := os.ReadFile(path)
 		if err != nil {
@@ -515,6 +533,11 @@ func (s *Server) handleIntelAsk(w http.ResponseWriter, r *http.Request) {
 
 	resp, err := s.askIntelProject(ctx, req.ProjectID, req.Question, req.ChatID, req.Limit)
 	if err != nil {
+		if errors.Is(err, store.ErrRagUnsupported) {
+			writeErr(w, http.StatusServiceUnavailable,
+				"vector retrieval needs PostgreSQL with pgvector; SQLite deployments do not include the intel knowledge base")
+			return
+		}
 		log.Printf("intel ask project %d: %v", req.ProjectID, err)
 		writeErr(w, http.StatusInternalServerError, "ask failed: "+err.Error())
 		return
@@ -533,21 +556,11 @@ func (s *Server) askIntelProject(ctx context.Context, projectID int64, question 
 		return nil, err
 	}
 
-	// The free-text project profile (projects.description) is always injected as
-	// an "overview" fact, so broad questions about the whole project (rather than
-	// a specific endpoint/table) have grounding beyond the vector top-K.
-	overviewText := ""
-	var overviewSource map[string]any
+	// The free-text project profile grounds broad questions about the whole
+	// project; how it folds into the retrieval result is applyOverview's job.
+	description := ""
 	if proj, err := s.store.GetIntelProject(ctx, projectID); err == nil {
-		if d := strings.TrimSpace(proj.Description); d != "" {
-			overviewText = "项目画像：\n" + d
-			overviewSource = map[string]any{
-				"title":      "项目画像",
-				"kind":       "overview",
-				"content":    d,
-				"sourceFile": "项目画像",
-			}
-		}
+		description = proj.Description
 	}
 
 	key := retrievalCacheKey(projectID, question, limit)
@@ -595,29 +608,11 @@ func (s *Server) askIntelProject(ctx context.Context, projectID int64, question 
 		ragRetrievalCache.put(key, retrievalHit{projectID: projectID, context: contextJSON, sources: sources})
 	}
 
-	// 若检索片段里已含项目 overview chunk，则不再单独注入画像，避免描述在上下文
-	// 中重复出现（chunk 随分析后的索引重建保持新鲜）。
-	for _, src := range sources {
-		if k, _ := src["kind"].(string); k == "overview" {
-			overviewText = ""
-			overviewSource = nil
-			break
-		}
-	}
+	contextText, displaySources, overviewUsed := applyOverview(description, contextJSON, sources)
 
 	answer := ""
-	if s.llm != nil && s.llm.Enabled() && (chunkCount > 0 || overviewText != "") {
-		contextText := contextJSON
-		if overviewText != "" {
-			contextText = overviewText + "\n\n" + contextJSON
-		}
+	if s.llm != nil && s.llm.Enabled() && (chunkCount > 0 || overviewUsed) {
 		answer = s.generateChatAnswer(ctx, history, contextText, question)
-	}
-
-	// The project profile is a first-class citation when it grounds the answer.
-	displaySources := sources
-	if overviewSource != nil {
-		displaySources = append([]map[string]any{overviewSource}, sources...)
 	}
 
 	// Persist the turn so subsequent questions carry full context.
@@ -634,6 +629,32 @@ func (s *Server) askIntelProject(ctx context.Context, projectID int64, question 
 		"sources":  displaySources,
 		"count":    len(displaySources),
 	}, nil
+}
+
+// applyOverview folds the free-text project profile (projects.description) into
+// a retrieval result. Vector top-K only answers questions that match a specific
+// table or endpoint, so the profile is prepended to the LLM context and cited
+// first to ground whole-project questions. It is dropped when retrieval already
+// returned an "overview" chunk — the index rebuild after each analysis carries
+// the same description, and injecting it twice would waste context.
+func applyOverview(description, contextJSON string, sources []map[string]any) (contextText string, displaySources []map[string]any, used bool) {
+	d := strings.TrimSpace(description)
+	if d == "" {
+		return contextJSON, sources, false
+	}
+	for _, src := range sources {
+		if k, _ := src["kind"].(string); k == "overview" {
+			return contextJSON, sources, false
+		}
+	}
+	profile := map[string]any{
+		"title":      "项目画像",
+		"kind":       "overview",
+		"content":    d,
+		"sourceFile": "项目画像",
+	}
+	return "项目画像：\n" + d + "\n\n" + contextJSON,
+		append([]map[string]any{profile}, sources...), true
 }
 
 // resolveChat loads the conversation (and its recent history) to continue, or

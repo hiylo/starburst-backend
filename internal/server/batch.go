@@ -52,6 +52,16 @@ func (s *Server) handleBatch(w http.ResponseWriter, r *http.Request) {
 
 	created := make([]string, 0, len(req.Targets))
 	for _, tg := range req.Targets {
+		// 每个目标目录都会成为对应任务里 agent 的工作目录，逐个校验（一处不合法
+		// 即整批拒绝，避免只建成一半任务）。
+		if err := validateWorkDirectory(tg.Directory); err != nil {
+			writeErr(w, http.StatusBadRequest, "invalid directory: "+err.Error())
+			return
+		}
+		if tg.SessionID != "" && !isValidSessionID(tg.SessionID) {
+			writeErr(w, http.StatusBadRequest, "invalid sessionId")
+			return
+		}
 		t := &store.Task{
 			ID:        newTaskID(),
 			SessionID: tg.SessionID,

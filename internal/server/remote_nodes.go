@@ -8,13 +8,17 @@ import (
 	"strings"
 	"time"
 
+	"github.com/hiylo/starburst-backend/internal/netguard"
 	"github.com/hiylo/starburst-backend/internal/store"
 )
 
 // checkNodeReachable probes host:port (TCP) to determine node reachability.
+// The host comes from the request or from a stored node, so the dial is guarded:
+// a device token must not turn this into a port scanner for metadata addresses.
 func checkNodeReachable(ctx context.Context, host string, port int) bool {
-	d := net.Dialer{Timeout: 3 * time.Second}
-	conn, err := d.DialContext(ctx, "tcp", net.JoinHostPort(host, strconv.Itoa(port)))
+	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	conn, err := netguard.Dial(ctx, "tcp", net.JoinHostPort(host, strconv.Itoa(port)))
 	if err != nil {
 		return false
 	}

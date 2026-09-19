@@ -17,6 +17,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/hiylo/starburst-backend/internal/netguard"
 )
 
 // Status values for a probed environment item.
@@ -108,6 +110,10 @@ func ADBDeviceList(ctx context.Context) ([]ADBDevice, error) {
 // ADBConnect connects to a wireless device host:port and reports whether the
 // device reached the "device" state.
 func ADBConnect(ctx context.Context, host string, port int) error {
+	// adb 是自己解析主机的外部命令，netguard 的拨号包装管不到它，只能在这里先校验。
+	if err := netguard.CheckHost(ctx, host); err != nil {
+		return err
+	}
 	addr := net.JoinHostPort(host, strconv.Itoa(port))
 	if _, err := RunADB(ctx, "connect", addr); err != nil {
 		return err
@@ -303,11 +309,13 @@ func existingContainerID(ctx context.Context, name string) string {
 	return strings.TrimSpace(strings.Split(out, "\n")[0])
 }
 
-// portOpen dials host:port with a short timeout.
+// portOpen dials host:port with a short timeout. The dial goes through
+// netguard so a caller-supplied host cannot point the backend at link-local or
+// metadata addresses; the budget covers name resolution as well as connect.
 func portOpen(ctx context.Context, host string, port int) bool {
-	addr := net.JoinHostPort(host, strconv.Itoa(port))
-	d := net.Dialer{Timeout: 500 * time.Millisecond}
-	conn, err := d.DialContext(ctx, "tcp", addr)
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	conn, err := netguard.Dial(ctx, "tcp", net.JoinHostPort(host, strconv.Itoa(port)))
 	if err != nil {
 		return false
 	}

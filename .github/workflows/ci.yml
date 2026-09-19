@@ -23,16 +23,20 @@ jobs:
       - name: Build
         run: go build ./...
 
-  # PostgreSQL is an optional backend. The pgtest-tagged tests build their own
-  # scratch database inside the service container and drop it afterwards.
+  # PostgreSQL 是可选后端，但生产推荐形态（RAG 向量检索）恰好只有它有：
+  # internal/store/rag.go 的 PGVectorInstalled 在非 PG 上无条件返回 false。
+  # 所以这里必须真的跑起来，而不是留一个静默 skip 的绿勾。
+  # 镜像必须带 pgvector：migrate.go 的 intel_rag 迁移会 CREATE EXTENSION vector，
+  # 裸 postgres:16 会在这里直接失败。
   postgres:
     runs-on: ubuntu-latest
     services:
       postgres:
-        image: postgres:16
+        image: pgvector/pgvector:pg16
         env:
           POSTGRES_USER: postgres
-          POSTGRES_PASSWORD: postgres
+          # 仅存活于本次 job 的容器内临时口令，不是任何真实凭据。
+          POSTGRES_PASSWORD: pgtest-ci-only
           POSTGRES_DB: postgres
         options: >-
           --health-cmd "pg_isready -U postgres"
@@ -46,10 +50,35 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: '1.25'
+      # openScratchStore（internal/store/postgres_test.go）自己 CREATE/DROP
+      # DATABASE ocb_test_<pid>_<n> 并在临时库里跑迁移，所以连接角色需要 CREATEDB；
+      # 这里用同样的流程预跑一遍，让权限不足或镜像缺 vector 在几十秒内就报错，
+      # 而不是埋在测试日志里。
+      - name: Preflight scratch database
+        env:
+          PGPASSWORD: pgtest-ci-only
+        run: |
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 <<'SQL'
+          CREATE DATABASE ocb_ci_preflight;
+          \c ocb_ci_preflight
+          CREATE EXTENSION IF NOT EXISTS vector;
+          SELECT extversion FROM pg_extension WHERE extname = 'vector';
+          \c postgres
+          DROP DATABASE ocb_ci_preflight;
+          SQL
       - name: Test PostgreSQL dialect
         env:
-          OCB_PG_DSN: postgres://postgres:postgres@localhost:5432/postgres?sslmode=disable
-        run: go test -tags pgtest -run Postgres -v ./internal/store/
+          STARBURST_PG_DSN: postgres://postgres:pgtest-ci-only@localhost:5432/postgres?sslmode=disable
+        run: |
+          set -o pipefail
+          log="$RUNNER_TEMP/pgtest.log"
+          go test -tags pgtest -race -run Postgres -v ./internal/store/ 2>&1 | tee "$log"
+          # 两个 pgtest 文件（postgres_test.go / rag_pg_test.go）都靠读不到
+          # STARBURST_PG_DSN 或 tag 漏写而整体 skip，此时 job 依然是绿的。显式拒绝。
+          if grep -qE -- '--- SKIP|no tests to run' "$log"; then
+            echo '::error::pgtest 用例被跳过，检查 STARBURST_PG_DSN 与 -tags pgtest'
+            exit 1
+          fi
 
   # install.sh 在沙箱前缀下真实跑一遍：不装到系统，但验证参数解析、下载、目录
   # 与 unit 生成。占位符断言防住 DSN 含 & 时被 ${var//pat/rep} 写坏的回归。

@@ -2,10 +2,12 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"log"
 	"net/http"
 	"strings"
+	"unicode"
 )
 
 // OpenCodeProxyPrefix is the HTTP prefix under which the backend mirrors the
@@ -29,7 +31,14 @@ const OpenCodeProxyPrefix = "/api/opencode"
 // (/auth/*), opening a terminal (/pty) and global teardown (/global/dispose)
 // are admin-only; plain reads and permission replies stay open so the APP can
 // approve permission requests remotely.
-func proxyIsSensitive(path string) bool {
+//
+// GET /config/providers 是唯一的例外，必须放行：App 与 Web 的模型下拉框都以它为
+// 数据源。它原本会随 /config 一族一起被挡成 admin-only，导致 APP token 拿不到
+// 模型列表；回程的凭据剥离（providerCredentialPath）才是这里正确的防线。
+func proxyIsSensitive(method, path string) bool {
+	if method == http.MethodGet && path == "/config/providers" {
+		return false
+	}
 	if strings.HasPrefix(path, "/auth/") {
 		return true
 	}
@@ -50,6 +59,90 @@ func proxyIsSensitive(path string) bool {
 		return true
 	}
 	return false
+}
+
+// providerCredentialPath reports whether an upstream response is a provider /
+// config payload that embeds plaintext credentials.
+//
+// opencode 的 /config/providers 与 /provider 会在每个 provider 的 key 字段里
+// 原样回传明文 API Key，而这两个接口是模型下拉框的数据源，App 与 Web 都必须能
+// 读——所以访问控制上不能封，只能在回程把凭据字段抹掉。/auth/* 不在此列：那里
+// 存的就是密钥本身，且已被 proxyIsSensitive 限制为管理员专属。
+func providerCredentialPath(path string) bool {
+	for _, prefix := range []string{"/config", "/provider"} {
+		if path == prefix || strings.HasPrefix(path, prefix+"/") {
+			return true
+		}
+	}
+	return false
+}
+
+// maxSanitizedBodyBytes caps how much of an upstream JSON response is buffered
+// for redaction. Beyond it we refuse to relay at all rather than risk passing
+// credentials through unredacted.
+const maxSanitizedBodyBytes = 16 << 20
+
+// maxProxyRequestBytes caps the body the mirror proxy forwards. Attachments are
+// inlined as base64 (a 10 MiB file is ~13.4 MiB of JSON), so the cap leaves room
+// for that while still refusing unbounded uploads.
+const maxProxyRequestBytes = 64 << 20
+
+// credentialKey normalizes a JSON field name (lower-case, separators dropped)
+// and reports whether it carries a secret.
+//
+// 用后缀而不是全名比对：上游会把 ANTHROPIC_API_KEY、aws_secret_access_key 这类
+// 名字原样带出来，只比全名会漏。这里宁可多抹——App 与 Web 的 DTO 字段全部带默认
+// 值，少一个字段只是不显示，多泄一个密钥是事故；且只 blank 非空字符串，所以
+// token 上限、成本这类数字字段不受影响。
+var credentialSuffixes = []string{
+	"key", "token", "secret", "password", "passwd", "credential",
+	"authorization", "bearer", "signature",
+}
+
+func credentialKey(name string) bool {
+	var b strings.Builder
+	b.Grow(len(name))
+	for _, r := range name {
+		if r == '_' || r == '-' || r == ' ' {
+			continue
+		}
+		b.WriteRune(unicode.ToLower(r))
+	}
+	s := b.String()
+	if s == "" {
+		return false
+	}
+	for _, suffix := range credentialSuffixes {
+		if strings.HasSuffix(s, suffix) {
+			return true
+		}
+	}
+	return false
+}
+
+// redactCredentials blanks every credential-looking string in a decoded JSON
+// value and returns how many were removed.
+func redactCredentials(v any) int {
+	switch t := v.(type) {
+	case map[string]any:
+		removed := 0
+		for k, val := range t {
+			if s, ok := val.(string); ok && s != "" && credentialKey(k) {
+				t[k] = ""
+				removed++
+				continue
+			}
+			removed += redactCredentials(val)
+		}
+		return removed
+	case []any:
+		removed := 0
+		for _, val := range t {
+			removed += redactCredentials(val)
+		}
+		return removed
+	}
+	return 0
 }
 
 // hopByHopHeaders must not be relayed to the upstream (RFC 9110 §7.6.1): each
@@ -110,7 +203,7 @@ func (s *Server) handleOpenCodeProxy(w http.ResponseWriter, r *http.Request) {
 	// 高危上游操作只允许管理员（web session）调用：APP token 一旦泄露即
 	// 等同持有 opencode 全权——写 provider key、开 PTY、全局 dispose 都不该
 	// 由设备 token 直接触发。读取与 permission reply（App 远程批准）保留。
-	if !s.requireWeb(r) && proxyIsSensitive(upstreamPath) {
+	if !s.requireWeb(r) && proxyIsSensitive(r.Method, upstreamPath) {
 		writeErr(w, http.StatusForbidden, "operation requires admin web session")
 		return
 	}
@@ -136,6 +229,14 @@ func (s *Server) handleOpenCodeProxy(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
 
+	// 请求体上限：附件以 base64 内嵌（10 MiB 附件 ≈ 13.4 MiB JSON），留出余量
+	// 但拒绝无界请求体。已知长度先给干净的 413，分块传输由 MaxBytesReader 兜底。
+	if r.ContentLength > maxProxyRequestBytes {
+		writeErr(w, http.StatusRequestEntityTooLarge, "request body too large")
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, maxProxyRequestBytes)
+
 	resp, err := s.openCode.Do(ctx, r.Method, upstreamPath, r.URL.Query(), r.Body, hdr)
 	if err != nil {
 		log.Printf("opencode proxy %s %s: %v", r.Method, upstreamPath, err)
@@ -144,9 +245,17 @@ func (s *Server) handleOpenCodeProxy(w http.ResponseWriter, r *http.Request) {
 	}
 	defer resp.Body.Close()
 
+	contentType := resp.Header.Get("Content-Type")
+	isSSE := strings.Contains(contentType, "text/event-stream")
+	// provider 目录回传的是明文密钥：命中凭据路径的响应必须整体缓冲、抹掉凭据字段
+	// 再回程，此时上游给的 Content-Length / Content-Encoding 已失效。
+	// 这里不看 Content-Type 是否为 JSON——上游若漏带或换带别的类型，按类型放行
+	// 就等于把密钥原文透出去；缓冲后解析失败一律 502（失败关闭）。
+	sanitize := !isSSE && providerCredentialPath(upstreamPath)
+
 	// Relay the upstream response headers verbatim (dropping hop-by-hop).
 	for k, vv := range resp.Header {
-		if isHopByHopHeader(k) {
+		if isHopByHopHeader(k) || (sanitize && (k == "Content-Length" || k == "Content-Encoding")) {
 			continue
 		}
 		for _, v := range vv {
@@ -154,11 +263,16 @@ func (s *Server) handleOpenCodeProxy(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	w.Header().Set("X-Accel-Buffering", "no") // disable proxy buffering for SSE
+
+	if sanitize {
+		relaySanitizedJSON(w, resp, upstreamPath)
+		return
+	}
 	w.WriteHeader(resp.StatusCode)
 
 	// SSE: stream with a flush per read so events are delivered immediately.
 	// Non-SSE responses just copy through.
-	if fl, ok := w.(http.Flusher); ok && strings.Contains(resp.Header.Get("Content-Type"), "text/event-stream") {
+	if fl, ok := w.(http.Flusher); ok && isSSE {
 		buf := make([]byte, 32*1024)
 		for {
 			n, rerr := resp.Body.Read(buf)
@@ -174,4 +288,45 @@ func (s *Server) handleOpenCodeProxy(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	_, _ = io.Copy(w, resp.Body)
+}
+
+// relaySanitizedJSON buffers an upstream credential-path response, blanks its
+// credential fields and writes the result. Anything it cannot prove safe is
+// refused rather than relayed — a passthrough on the failure path would defeat
+// the redaction.
+func relaySanitizedJSON(w http.ResponseWriter, resp *http.Response, path string) {
+	blob, err := io.ReadAll(io.LimitReader(resp.Body, maxSanitizedBodyBytes+1))
+	if err != nil {
+		log.Printf("opencode proxy %s: read credential payload: %v", path, err)
+		writeErr(w, http.StatusBadGateway, "upstream opencode request failed")
+		return
+	}
+	if int64(len(blob)) > maxSanitizedBodyBytes {
+		log.Printf("opencode proxy %s: credential payload over %d bytes, refusing to relay", path, maxSanitizedBodyBytes)
+		writeErr(w, http.StatusBadGateway, "upstream response could not be sanitized")
+		return
+	}
+	if len(blob) == 0 {
+		// 空响应（204 / 条件请求的 304）没有正文可抹，只回状态码。
+		w.WriteHeader(resp.StatusCode)
+		return
+	}
+	var decoded any
+	if err := json.Unmarshal(blob, &decoded); err != nil {
+		log.Printf("opencode proxy %s: credential payload is not JSON: %v", path, err)
+		writeErr(w, http.StatusBadGateway, "upstream response could not be sanitized")
+		return
+	}
+	if n := redactCredentials(decoded); n > 0 {
+		log.Printf("opencode proxy %s: redacted %d credential field(s)", path, n)
+	}
+	out, err := json.Marshal(decoded)
+	if err != nil {
+		log.Printf("opencode proxy %s: re-encode credential payload: %v", path, err)
+		writeErr(w, http.StatusBadGateway, "upstream response could not be sanitized")
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(resp.StatusCode)
+	_, _ = w.Write(out)
 }

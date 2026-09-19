@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -10,7 +11,6 @@ import (
 	"testing"
 
 	"github.com/hiylo/starburst-backend/internal/embed"
-	"github.com/hiylo/starburst-backend/internal/llm"
 	"github.com/hiylo/starburst-backend/internal/store"
 )
 
@@ -156,14 +156,69 @@ public class Order {
 	}
 }
 
-// TestAskIntelProjectOverviewInjection verifies the project profile is injected
-// as a first-class source when the description exists but the overview chunk is
-// not among the retrieved fragments, and that the injection is skipped (dedup)
-// when the overview chunk itself is retrieved.
-func TestAskIntelProjectOverviewInjection(t *testing.T) {
+// TestApplyOverview pins how the free-text project profile folds into a
+// retrieval result: injected and cited first when the vector top-K only returned
+// code chunks, dropped when an overview chunk was already retrieved, and ignored
+// when the project has no description.
+func TestApplyOverview(t *testing.T) {
+	const retrieved = "【t_order 表】(来源 Order.java:1)\n字段：id"
+	chunks := []map[string]any{
+		{"kind": "entity", "title": "t_order 表", "sourceFile": "Order.java"},
+	}
+
+	t.Run("inject when overview chunk absent", func(t *testing.T) {
+		ctxText, sources, used := applyOverview("支付网关项目，负责订单支付与退款。", retrieved, chunks)
+		if !used {
+			t.Fatal("overview should have been used")
+		}
+		if !strings.HasPrefix(ctxText, "项目画像：\n支付网关") {
+			t.Errorf("context missing profile prefix: %q", ctxText)
+		}
+		if !strings.Contains(ctxText, "t_order 表") {
+			t.Errorf("context lost retrieved chunks: %q", ctxText)
+		}
+		if len(sources) != 2 {
+			t.Fatalf("expected 2 sources (画像 + entity), got %d", len(sources))
+		}
+		if sources[0]["sourceFile"] != "项目画像" {
+			t.Fatalf("expected 项目画像 first, got %v", sources[0]["sourceFile"])
+		}
+		if len(chunks) != 1 {
+			t.Errorf("input sources mutated: %d entries left", len(chunks))
+		}
+	})
+
+	t.Run("dedup when overview chunk retrieved", func(t *testing.T) {
+		got := []map[string]any{
+			{"kind": "overview", "title": "项目概览 pay", "sourceFile": "项目画像"},
+			{"kind": "entity", "title": "t_order 表", "sourceFile": "Order.java"},
+		}
+		ctxText, sources, used := applyOverview("支付网关项目。", retrieved, got)
+		if used {
+			t.Fatal("profile must not be injected twice")
+		}
+		if ctxText != retrieved {
+			t.Errorf("context should be unchanged, got %q", ctxText)
+		}
+		if len(sources) != 2 {
+			t.Fatalf("expected the retrieved pair unchanged, got %d", len(sources))
+		}
+	})
+
+	t.Run("no description", func(t *testing.T) {
+		ctxText, sources, used := applyOverview("   ", retrieved, chunks)
+		if used || ctxText != retrieved || len(sources) != 1 {
+			t.Fatalf("blank description must be a no-op: used=%v ctx=%q n=%d", used, ctxText, len(sources))
+		}
+	})
+}
+
+// TestAskIntelProjectUnsupportedOnSQLite keeps the "SQLite hides 智能测试"
+// contract at the server layer: retrieval failures surface as ErrRagUnsupported
+// (mapped to 503 by handleIntelAsk) rather than a generic ask failure.
+func TestAskIntelProjectUnsupportedOnSQLite(t *testing.T) {
 	s := newTestServer(t)
 
-	// 固定 1024 维向量的假嵌入服务（问题与 chunk 都返回同一向量，相似度恒为 1）。
 	embSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		vec := make([]float32, store.EmbedDim)
 		for i := range vec {
@@ -176,64 +231,31 @@ func TestAskIntelProjectOverviewInjection(t *testing.T) {
 	t.Cleanup(embSrv.Close)
 	s.SetEmbedding(embed.New(embSrv.URL, "", "test-model"))
 
-	llmSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"这是一个支付网关项目。"}}]}`))
-	}))
-	t.Cleanup(llmSrv.Close)
-	s.SetLLM(llm.New(llmSrv.URL, "test-key", "test-model"))
-
 	ctx := context.Background()
 	p := &store.IntelProject{Name: "pay", Source: "local", Description: "支付网关项目，负责订单支付与退款。"}
 	if err := s.store.CreateIntelProject(ctx, p); err != nil {
 		t.Fatal(err)
 	}
-
-	vec := func() []float32 {
-		v := make([]float32, store.EmbedDim)
-		for i := range v {
-			v[i] = 0.01
-		}
-		return v
+	vec := make([]float32, store.EmbedDim)
+	for i := range vec {
+		vec[i] = 0.01
+	}
+	err := s.store.ReplaceProjectChunks(ctx, p.ID, []*store.RagChunk{
+		{Kind: "entity", Title: "t_order 表", Content: "数据表 t_order 字段：id",
+			SourceFile: "Order.java", SourceLine: 1, Embedding: vec},
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
 
-	t.Run("inject when overview chunk absent", func(t *testing.T) {
-		if err := s.store.ReplaceProjectChunks(ctx, p.ID, []*store.RagChunk{
-			{Kind: "entity", Title: "t_order 表", Content: "数据表 t_order 字段：id", SourceFile: "Order.java", SourceLine: 1, Embedding: vec()},
-		}); err != nil {
-			t.Fatal(err)
-		}
-		resp, err := s.askIntelProject(ctx, p.ID, "这个项目是做什么的", 0, 10)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if resp["answer"] == "" {
-			t.Fatal("expected non-empty answer")
-		}
-		sources := resp["sources"].([]map[string]any)
-		if len(sources) != 2 {
-			t.Fatalf("expected 2 sources (画像 + entity), got %d", len(sources))
-		}
-		if sources[0]["sourceFile"] != "项目画像" {
-			t.Fatalf("expected 项目画像 first, got %v", sources[0]["sourceFile"])
-		}
-	})
+	// The question must be unique: ragRetrievalCache is process-wide and a hit
+	// would skip the store call this test is asserting on.
+	if _, err := s.askIntelProject(ctx, p.ID, "SQLite 部署下这个项目是做什么的", 0, 10); !errors.Is(err, store.ErrRagUnsupported) {
+		t.Fatalf("askIntelProject err = %v, want ErrRagUnsupported", err)
+	}
 
-	t.Run("dedup when overview chunk retrieved", func(t *testing.T) {
-		if err := s.store.ReplaceProjectChunks(ctx, p.ID, []*store.RagChunk{
-			{Kind: "overview", Title: "项目概览 pay", Content: "项目 pay 概览", SourceFile: "项目画像", Embedding: vec()},
-		}); err != nil {
-			t.Fatal(err)
-		}
-		resp, err := s.askIntelProject(ctx, p.ID, "这个项目有哪些模块", 0, 10)
-		if err != nil {
-			t.Fatal(err)
-		}
-		sources := resp["sources"].([]map[string]any)
-		if len(sources) != 1 {
-			t.Fatalf("expected 1 source (overview chunk only, no duplicate 画像), got %d", len(sources))
-		}
-		if sources[0]["kind"] != "overview" {
-			t.Fatalf("expected overview chunk, got kind=%v", sources[0]["kind"])
-		}
-	})
+	// Indexing must refuse before any embedding call, not just reading back.
+	if _, err := s.indexIntelProject(ctx, p.ID); !errors.Is(err, store.ErrRagUnsupported) {
+		t.Fatalf("indexIntelProject err = %v, want ErrRagUnsupported", err)
+	}
 }

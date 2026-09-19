@@ -74,6 +74,20 @@ func (s *Server) createRule(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "invalid kind")
 		return
 	}
+	// directory 会成为 agent 的工作目录（cron/http 触发）或本机 `git -C` 的仓库目录
+	// （kind=git 的 gitHead 轮询）。注意 git 触发的仓库目录实际取 `schedule`，
+	// `directory` 只是兜底，所以两个字段都要按目录校验——schedule 在 cron 触发下是
+	// cron 表达式，不能这么判，故只对 git 类型校验它。
+	if err := validateWorkDirectory(req.Directory); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid directory: "+err.Error())
+		return
+	}
+	if req.Kind == store.TriggerGit {
+		if err := validateWorkDirectory(req.Schedule); err != nil {
+			writeErr(w, http.StatusBadRequest, "invalid schedule (仓库目录): "+err.Error())
+			return
+		}
+	}
 	rule := &store.Rule{
 		ID:        newRuleID(),
 		Name:      req.Name,

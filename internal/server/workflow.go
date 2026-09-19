@@ -47,9 +47,17 @@ func (s *Server) handleWorkflowCreate(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "steps are required")
 		return
 	}
+	if err := validateWorkDirectory(req.Directory); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid directory: "+err.Error())
+		return
+	}
 	for i, st := range req.Steps {
 		if st.Prompt == "" {
 			writeErr(w, http.StatusBadRequest, "step "+strconv.Itoa(i+1)+" has empty prompt")
+			return
+		}
+		if err := validateWorkDirectory(st.Directory); err != nil {
+			writeErr(w, http.StatusBadRequest, "step "+strconv.Itoa(i+1)+" invalid directory: "+err.Error())
 			return
 		}
 	}

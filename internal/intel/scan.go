@@ -196,11 +196,17 @@ type scanSummary struct {
 	Endpoints []*store.IntelEndpoint `json:"endpoints"`
 }
 
-// ScanModule scans a single module directory for its contracts. For a java
-// module it extracts entities (JPA @Entity/@Table/@Column) and endpoints
-// (Controller @*Mapping) with per-file:line provenance; non-Java types return
-// an empty (not error) result for now (their scanners land with later
-// milestones).
+// ScanModule scans a single module directory for its contracts. Two stacks have
+// real scanners today, picked by the build anchor found in the module dir:
+// a Java module (pom.xml / build.gradle*) goes through scanJavaFiles and yields
+// entities (JPA @Entity/@Table/@Column) plus endpoints (Controller @*Mapping,
+// GraphQL @*Mapping) with per-file:line provenance; a Go module (go.mod) goes
+// through scanGoFiles and yields exported types as entities, plus standard
+// library HTTP route registrations and exported methods as endpoints. A go.mod
+// anchor wins outright, so a directory holding both Go and Java sources is
+// scanned as Go. Every other module type (android/ios/web/node/bff and friends)
+// returns an empty (not failed) summary: analysis still records the module and
+// its type/role while its contract scanners land in later milestones.
 func ScanModule(root, relPath string) (*scanSummary, error) {
 	dir := filepath.Join(root, relPath)
 	if fi, err := os.Stat(dir); err == nil && !fi.IsDir() {

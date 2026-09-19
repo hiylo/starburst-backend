@@ -183,6 +183,11 @@ func (s *Server) createTask(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "invalid sessionId")
 		return
 	}
+	// directory 是任务执行时 OpenCode agent 的工作目录，同样由调用方给出。
+	if err := validateWorkDirectory(req.Directory); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid directory: "+err.Error())
+		return
+	}
 
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()

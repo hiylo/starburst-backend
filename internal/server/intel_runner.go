@@ -188,7 +188,8 @@ func (s *Server) runIntelAll(projectID int64, force bool, run *store.TestRun) {
 		return
 	}
 	if len(mods) == 0 {
-		s.finishIntelRunAll(ctx, run, "项目没有可测试模块")
+		// Nothing to run is not a failure; the summary says why.
+		s.finishIntelRunAll(ctx, run, "passed", "项目没有可测试模块")
 		return
 	}
 
@@ -234,16 +235,24 @@ func (s *Server) runIntelAll(projectID int64, force bool, run *store.TestRun) {
 
 	summary := fmt.Sprintf("全部完成：%d 通过 / %d 失败 / %d 错误（共 %d 模块）",
 		passedCount, failedCount, errorsCount, len(mods))
-	if failedCount > 0 || errorsCount > 0 {
+	// The aggregate used to be hardcoded "passed", so a run where every module
+	// failed still read green to anything that filters on status.
+	status := "passed"
+	switch {
+	case failedCount > 0:
+		status = "failed"
+		summary = "部分失败：" + summary
+	case errorsCount > 0:
+		status = "error"
 		summary = "部分失败：" + summary
 	}
-	s.finishIntelRunAll(ctx, run, summary)
+	s.finishIntelRunAll(ctx, run, status, summary)
 }
 
 // finishIntelRunAll marks the aggregate run finished with a summary.
-func (s *Server) finishIntelRunAll(ctx context.Context, run *store.TestRun, summary string) {
+func (s *Server) finishIntelRunAll(ctx context.Context, run *store.TestRun, status, summary string) {
 	now := time.Now()
-	run.Status = "passed"
+	run.Status = status
 	run.FinishedAt = &now
 	run.Progress = summary
 	run.Output = summary

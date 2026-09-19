@@ -11,9 +11,9 @@ import (
 	"github.com/hiylo/starburst-backend/internal/store"
 )
 
-// handleIntelDevices lists devices, refreshing from adb when available (GET).
-// Wireless connections are attached via adb connect before an adb-device is
-// upserted, so a later run finds them without re-probing.
+// handleIntelDevices lists the persisted device rows (GET). It deliberately does
+// not probe adb: wireless devices are attached by handleIntelDeviceConnect, which
+// upserts what `adb devices` reported so a later run finds them without re-probing.
 func (s *Server) handleIntelDevices(w http.ResponseWriter, r *http.Request) {
 	if !s.requireWeb(r) {
 		if _, ok := s.requireToken(r); !ok {

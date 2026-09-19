@@ -61,3 +61,13 @@ func (s *sqlStore) DeleteExpiredWebSessions(ctx context.Context) (int, error) {
 	n, _ := res.RowsAffected()
 	return int(n), nil
 }
+
+// RevokeWebSessionsExcept drops every session but keepID; returns count.
+func (s *sqlStore) RevokeWebSessionsExcept(ctx context.Context, keepID string) (int, error) {
+	res, err := s.db.ExecContext(ctx, s.q(`DELETE FROM web_sessions WHERE id <> ?`), keepID)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return int(n), nil
+}

@@ -141,24 +141,46 @@ func (s *Server) handleWebSession(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleWebPassword changes the admin password (requires web session).
+// Changing it also revokes every other web session: a hijacked cookie must not
+// survive the credential rotation meant to lock the hijacker out. The caller's
+// own session is kept so the admin isn't logged out by their own action.
 func (s *Server) handleWebPassword(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
-	if !s.requireWeb(r) {
+	sid := r.Header.Get("X-Web-Session")
+	if sid == "" || !s.requireWeb(r) {
 		writeErr(w, http.StatusUnauthorized, "not authorized")
 		return
 	}
 	var req struct {
-		NewPassword string `json:"newPassword"`
+		CurrentPassword string `json:"currentPassword"`
+		NewPassword     string `json:"newPassword"`
 	}
 	if !readBody(w, r, &req) {
+		return
+	}
+	// 仅凭会话即可换密码 = 拿到会话就能夺取账号（会话可能来自 XSS、共用电脑或
+	// 日志转储），所以旧密码是必填项。
+	ok, err := s.auth.VerifyPassword(r.Context(), req.CurrentPassword)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "auth error")
+		return
+	}
+	if !ok {
+		writeErr(w, http.StatusUnauthorized, "current password is incorrect")
 		return
 	}
 	if err := s.auth.SetPassword(r.Context(), req.NewPassword); err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
+	}
+	if n, err := s.store.RevokeWebSessionsExcept(r.Context(), sid); err != nil {
+		// 密码已经改成功，这里不回滚也不报失败，但要留下告警：其他会话仍有效。
+		log.Printf("change password: revoke other web sessions failed: %v", err)
+	} else if n > 0 {
+		log.Printf("change password: revoked %d other web session(s)", n)
 	}
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }

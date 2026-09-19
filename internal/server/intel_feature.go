@@ -3,6 +3,8 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -11,6 +13,7 @@ import (
 
 	"github.com/hiylo/starburst-backend/internal/intel/contract"
 	"github.com/hiylo/starburst-backend/internal/intel/feature"
+	"github.com/hiylo/starburst-backend/internal/netguard"
 	"github.com/hiylo/starburst-backend/internal/store"
 )
 
@@ -42,9 +45,9 @@ func (s *Server) handleIntelFeatureTest(w http.ResponseWriter, r *http.Request) 
 		writeErr(w, http.StatusBadRequest, "projectId, featureId and baseUrl are required")
 		return
 	}
-	baseURL, err := url.Parse(strings.TrimSpace(req.BaseURL))
-	if err != nil || (baseURL.Scheme != "http" && baseURL.Scheme != "https") {
-		writeErr(w, http.StatusBadRequest, "baseUrl must be a valid http(s) URL")
+	baseURL, err := intelCheckBaseURL(r.Context(), req.BaseURL)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
@@ -111,6 +114,21 @@ func matchFeatureByEnds(eps []*store.IntelEndpoint, endsJSON string) []*store.In
 	return out
 }
 
+// intelCheckBaseURL parses a caller-supplied base URL and rejects targets the
+// backend must not reach. Scheme alone is not a defence: the host is resolved
+// and every address checked, so a name pointing at link-local metadata is
+// refused before any request is made.
+func intelCheckBaseURL(ctx context.Context, raw string) (*url.URL, error) {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") {
+		return nil, errors.New("baseUrl must be a valid http(s) URL")
+	}
+	if err := netguard.CheckHost(ctx, u.Hostname()); err != nil {
+		return nil, fmt.Errorf("baseUrl target not allowed: %w", err)
+	}
+	return u, nil
+}
+
 // testFeatureEndpoint issues one HTTP request for an endpoint (filling path and
 // query parameters with placeholder values) and returns the reachability and
 // contract-check outcome.
@@ -172,7 +190,9 @@ func (s *Server) testFeatureEndpoint(ctx context.Context, base *url.URL, ep *sto
 		}
 	}
 
-	client := &http.Client{Timeout: 15 * time.Second}
+	// 目标由调用方给出：用受校验的 client（解析后按 IP 固定拨号、不跟随重定向），
+	// 否则 baseUrl 就成了打向元数据/链路本地地址的 SSRF 入口。
+	client := netguard.Client(15 * time.Second)
 	httpReq, err := http.NewRequestWithContext(ctx, method, u.String(), body)
 	if err != nil {
 		out["error"] = err.Error()

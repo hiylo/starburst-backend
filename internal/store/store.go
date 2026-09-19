@@ -11,6 +11,9 @@ import (
 var (
 	ErrNotFound = errors.New("store: not found")
 	ErrConflict = errors.New("store: conflict")
+	// ErrRagUnsupported is returned by vector retrieval on SQLite, which has no
+	// pgvector. The intel features that depend on it are hidden in that mode.
+	ErrRagUnsupported = errors.New("store: vector search requires PostgreSQL with pgvector")
 )
 
 // Setting is a single configuration key/value persisted in the store.
@@ -211,6 +214,10 @@ type Store interface {
 	DeleteWebSession(ctx context.Context, id string) error
 	// DeleteExpiredWebSessions purges expired sessions.
 	DeleteExpiredWebSessions(ctx context.Context) (int, error)
+	// RevokeWebSessionsExcept deletes every web session but keepID, and returns
+	// how many were dropped. Used when the admin password changes so a stolen
+	// session does not outlive the credential that produced it.
+	RevokeWebSessionsExcept(ctx context.Context, keepID string) (int, error)
 
 	// ---- Session events (global event collector) ----
 

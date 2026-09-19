@@ -57,10 +57,11 @@ func intelPlanCommandFor(commandsJSON, buildTool, kindType string) (build, test 
 	if wl := whitelistedTestCommand(commandsJSON, buildTool, kindType); wl != nil {
 		test = strings.Join(wl, " ")
 	}
-	// Go 测试计划执行必须禁用缓存并强制 -json：`go test` 命中缓存时只输出
-	// "ok (cached)"，没有逐用例 JSON 事件；而无 -json 的裸命令（如默认白名单
-	// `go test ./...`）同样解析不出用例。计划执行要拿到真实逐用例结果，故 Go
-	// 命令若缺 -count=1 则回退到默认可解析命令；其他工具按白名单原样采用。
+	// Go 测试计划执行必须禁用缓存并强制 -json：命中缓存的包只输出
+	// "ok (cached)"，没有逐用例 JSON 事件；缺 -json 的裸命令同样解析不出用例。
+	// 计划要拿到真实逐用例结果，故 Go 命令只要缺 -count=1 就整条**覆写**为可解析
+	// 的默认命令（不保留白名单原文）；其他工具按白名单原样采用。单模块 run 走
+	// testCommandFor 的默认命令，白名单命中时仍按原文执行，不受此约束。
 	if buildTool == "go" && !strings.Contains(test, "-count=1") {
 		test = "go test -json -count=1 ./..."
 	}
@@ -281,7 +282,7 @@ func (s *Server) runIntelPlan(projectID int64, run *store.TestRun, steps []Intel
 	s.pushIntelRunEvent(run)
 
 	if len(steps) == 0 {
-		s.finishIntelPlan(ctx, run, "项目没有可执行模块")
+		s.finishIntelPlan(ctx, run, "passed", "项目没有可执行模块")
 		return
 	}
 
@@ -321,13 +322,17 @@ func (s *Server) runIntelPlan(projectID int64, run *store.TestRun, steps []Intel
 	wg.Wait()
 
 	summary := "测试计划完成：" + strconv.Itoa(passedCount) + " 模块通过 / " + strconv.Itoa(failedCount) + " 失败"
-	s.finishIntelPlan(ctx, run, summary)
+	status := "passed"
+	if failedCount > 0 {
+		status = "failed"
+	}
+	s.finishIntelPlan(ctx, run, status, summary)
 }
 
 // finishIntelPlan marks the aggregate plan run finished.
-func (s *Server) finishIntelPlan(ctx context.Context, run *store.TestRun, summary string) {
+func (s *Server) finishIntelPlan(ctx context.Context, run *store.TestRun, status, summary string) {
 	now := time.Now()
-	run.Status = "passed"
+	run.Status = status
 	run.FinishedAt = &now
 	run.Progress = summary
 	run.Output = summary

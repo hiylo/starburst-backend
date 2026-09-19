@@ -249,6 +249,80 @@ func goActionStatus(action string) string {
 	}
 }
 
+// ParseGoTestText parses the classic (non -json) `go test` output, where every
+// finalized case prints a "--- PASS|FAIL|SKIP: Name (0.00s)" line followed by
+// its indented log lines. The module command carries -json, so this is the
+// fallback for a project whose reviewed whitelist entry omits it — without it
+// such a hand-run Go module yields no per-case results at all. go prints the
+// PASS lines only under -v, so a plain passing package still yields nothing —
+// the caller then relies on the process exit code for the run status.
+func ParseGoTestText(data []byte) []CaseResult {
+	var out []CaseResult
+	var cur *CaseResult
+	flush := func() {
+		if cur == nil {
+			return
+		}
+		if cur.Status == "failed" {
+			cur.ErrorXML = truncate(cur.ErrorXML)
+		}
+		out = append(out, *cur)
+		cur = nil
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		if r, ok := goTextCaseLine(strings.TrimSpace(line)); ok {
+			flush()
+			cur = r
+			continue
+		}
+		indented := strings.HasPrefix(line, " ") || strings.HasPrefix(line, "\t")
+		if cur == nil || !indented {
+			flush() // package summary lines, build output
+			continue
+		}
+		if cur.Status == "failed" {
+			cur.ErrorXML += strings.TrimSpace(line) + "\n"
+		}
+	}
+	flush()
+	return out
+}
+
+// goTextCaseLine recognises a "--- STATUS: Name (1.23s)" case line. Subtests
+// arrive indented under their parent and keep their "Parent/sub" name.
+func goTextCaseLine(trimmed string) (*CaseResult, bool) {
+	rest, found := strings.CutPrefix(trimmed, "--- ")
+	if !found {
+		return nil, false
+	}
+	status, rest, found := strings.Cut(rest, ":")
+	if !found || !strings.HasSuffix(rest, ")") {
+		return nil, false
+	}
+	rest = strings.TrimSpace(rest)
+	open := strings.LastIndex(rest, " (")
+	if open <= 0 {
+		return nil, false
+	}
+	name := rest[:open]
+	var statusKind string
+	switch strings.TrimSpace(status) {
+	case "PASS":
+		statusKind = "passed"
+	case "FAIL":
+		statusKind = "failed"
+	case "SKIP":
+		statusKind = "skipped"
+	default:
+		return nil, false
+	}
+	return &CaseResult{
+		Name:       name,
+		Status:     statusKind,
+		DurationMs: secondsToMillis(strings.TrimSuffix(rest[open+2:len(rest)-1], "s")),
+	}, true
+}
+
 // playwrightReport is the root of a Playwright JSON report.
 type playwrightReport struct {
 	Suites []playwrightSuite `json:"suites"`

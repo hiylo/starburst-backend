@@ -432,8 +432,13 @@ func (s *Server) handleIntelEnvSchemaInit(w http.ResponseWriter, r *http.Request
 			results = append(results, scriptResult{Rel: script.Rel, Err: err.Error()})
 			continue
 		}
-		args := []string{"exec", "-i", svc.ContainerName, "mysql",
-			"-uroot", "-p" + svc.Password}
+		args := []string{"exec", "-i"}
+		if svc.Password != "" {
+			// MYSQL_PWD rather than -p<pw>: argv of the docker client is readable
+			// by any local process via ps/proc, the env of another user's process is not.
+			args = append(args, "-e", "MYSQL_PWD="+svc.Password)
+		}
+		args = append(args, svc.ContainerName, "mysql", "-uroot")
 		if dbName != "" {
 			args = append(args, dbName)
 		}

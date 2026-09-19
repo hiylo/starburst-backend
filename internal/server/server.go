@@ -338,10 +338,23 @@ func (s *Server) logMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-// tokenFromRequest resolves the Bearer token (or ?token=) to its record.
+// queryTokenPaths are the only endpoints that accept an APP token as ?token=.
+// Browsers cannot set headers on a WebSocket or EventSource handshake; every
+// other route must carry the credential in Authorization: Bearer, because URLs
+// leak into access logs, proxies and browser history.
+var queryTokenPaths = map[string]bool{
+	"/api/ws":     true,
+	"/api/stream": true,
+}
+
+// tokenFromRequest resolves the Bearer token, falling back to ?token= on the WS
+// and SSE upgrade endpoints only (see queryTokenPaths).
 func (s *Server) tokenFromRequest(r *http.Request) (*store.Token, bool) {
 	if rec, ok := s.requireToken(r); ok {
 		return rec, true
+	}
+	if !queryTokenPaths[r.URL.Path] {
+		return nil, false
 	}
 	if q := r.URL.Query().Get("token"); q != "" {
 		rec, err := s.auth.VerifyToken(r.Context(), q)
@@ -459,19 +472,14 @@ func writeErr(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, map[string]string{"error": msg})
 }
 
-func readJSON(r *http.Request, v any) error {
-	defer r.Body.Close()
-	return json.NewDecoder(r.Body).Decode(v)
-}
-
 // maxJSONBody 是 JSON 请求体的最大字节数（4MiB）。
 const maxJSONBody = 4 << 20
 
 // errBodyTooLarge 表示请求体超过 maxJSONBody，调用方应返回 413。
 var errBodyTooLarge = errors.New("request body too large")
 
-// readJSONLimited 与 readJSON 类似，但用 http.MaxBytesReader 限制请求体
-// 大小，超限时返回 errBodyTooLarge（对应 HTTP 413）。
+// readJSONLimited 解析 JSON 请求体，并用 http.MaxBytesReader 限制大小
+// （超限时返回 errBodyTooLarge，对应 HTTP 413）。
 func readJSONLimited(w http.ResponseWriter, r *http.Request, v any) error {
 	defer r.Body.Close()
 	r.Body = http.MaxBytesReader(w, r.Body, maxJSONBody)

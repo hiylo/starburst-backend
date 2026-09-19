@@ -20,8 +20,9 @@ import (
 const maxResponseBody = 16 << 20 // 16 MiB
 
 // maxMessagesBody 限制 FetchSessionMessages 读取会话消息导出时的最大字节数；
-// 该接口数据量天然较大，单独放宽，解码本身按流式进行。
-const maxMessagesBody = 256 << 20 // 256 MiB
+// 该接口数据量天然较大，相比 maxResponseBody 单独放宽，但仍是硬上限——解码按
+// 流式进行，超限时读到的正文被截断并以错误失败，不会无界占内存。
+const maxMessagesBody = 64 << 20 // 64 MiB
 
 // maxSSEEventSize 限制单个 SSE 事件跨行累积的最大字节数，超限丢弃该事件。
 const maxSSEEventSize = 16 << 20 // 16 MiB
@@ -403,7 +404,7 @@ func (c *Client) FetchSessionMessages(ctx context.Context, sessionID string) ([]
 	}
 
 	// 上游响应是单个大 JSON 数组，用 Decoder 按元素流式解码，
-	// 避免 io.ReadAll 把整个响应（可达 256 MiB）一次性读进内存。
+	// 避免 io.ReadAll 把整个响应（上限 maxMessagesBody）一次性读进内存。
 	dec := json.NewDecoder(io.LimitReader(resp.Body, maxMessagesBody))
 	tok, err := dec.Token()
 	if err != nil {
@@ -425,6 +426,9 @@ func (c *Client) FetchSessionMessages(ctx context.Context, sessionID string) ([]
 			} `json:"parts"`
 		}
 		if err := dec.Decode(&m); err != nil {
+			if errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.EOF) {
+				return nil, fmt.Errorf("parse messages: 上游响应超过 %d MiB 上限被截断", maxMessagesBody>>20)
+			}
 			return nil, fmt.Errorf("parse messages: %w", err)
 		}
 		var sb strings.Builder

@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
-	"net/url"
 	"time"
 
 	"github.com/hiylo/starburst-backend/internal/intel/contract"
@@ -100,9 +99,9 @@ func (s *Server) handleIntelContractCheckBatch(w http.ResponseWriter, r *http.Re
 		writeErr(w, http.StatusBadRequest, "projectId and baseUrl are required")
 		return
 	}
-	base, err := url.Parse(req.BaseURL)
-	if err != nil || (base.Scheme != "http" && base.Scheme != "https") {
-		writeErr(w, http.StatusBadRequest, "baseUrl must be a valid http(s) URL")
+	base, err := intelCheckBaseURL(r.Context(), req.BaseURL)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Minute)

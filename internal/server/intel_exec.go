@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -443,7 +444,13 @@ func (s *Server) runIntelTests(ctx context.Context, projectID, moduleID, nodeID 
 	} else {
 		output, execErr = runCommand(ctx, dir, cmdArgs[0], cmdArgs[1:]...)
 	}
-	if execErr != nil {
+	// A test framework signals failures through its exit code, so a non-zero
+	// exit still comes with a parseable report. Bailing out on any error meant
+	// the runs that most need per-case results were exactly the ones that got
+	// none; only a command that never ran (spawn failure, cancelled ctx) is
+	// terminal here.
+	var exitErr *exec.ExitError
+	if execErr != nil && !errors.As(execErr, &exitErr) {
 		// 保留输出尾部（截断到上限），失败原因一并记录，供详情页排查。
 		run.Output = truncateOutput(output)
 		return fmt.Errorf("test command failed: %w", execErr)
@@ -467,7 +474,7 @@ func (s *Server) runIntelTests(ctx context.Context, projectID, moduleID, nodeID 
 		results = append(results, &store.TestResult{
 			Kind:     "npm",
 			Endpoint: "npm test",
-			Passed:   true,
+			Passed:   exitErr == nil,
 		})
 	}
 	if err := s.store.AddIntelTestResults(ctx, results); err != nil {
@@ -482,10 +489,16 @@ func (s *Server) runIntelTests(ctx context.Context, projectID, moduleID, nodeID 
 			failed++
 		}
 	}
-	if failed > 0 {
+	switch {
+	case failed > 0:
 		run.Status = "failed"
 		run.Progress = fmt.Sprintf("失败 %d 个用例", failed)
-	} else {
+	case exitErr != nil:
+		// Non-zero exit with nothing parsed as failed — a compile error, a bad
+		// command, a crash before the report was written. Not a pass.
+		run.Status = "failed"
+		run.Progress = fmt.Sprintf("命令退出码 %d，未解析到失败用例", exitErr.ExitCode())
+	default:
 		run.Status = "passed"
 		run.Progress = fmt.Sprintf("通过 %d 个用例", len(results))
 	}
@@ -514,7 +527,10 @@ func truncateOutput(out []byte) string {
 func testCommandFor(buildTool, kindType string) ([]string, string) {
 	switch buildTool {
 	case "go":
-		return []string{"go", "test", "-json", "./..."}, "go"
+		// -count=1 matches the plan path: a cached package emits no per-test JSON
+		// events, so without it a re-run of unchanged code yields zero cases and
+		// the run is recorded as a green "通过 0 个用例".
+		return []string{"go", "test", "-json", "-count=1", "./..."}, "go"
 	case "maven":
 		return []string{"mvn", "test"}, "surefire"
 	case "gradle":
@@ -708,6 +724,9 @@ func parseReport(reportKind, dir string, output []byte) []*store.TestResult {
 	switch reportKind {
 	case "go":
 		cases, _ = report.ParseGoTestJSON(output)
+		if len(cases) == 0 {
+			cases = report.ParseGoTestText(output)
+		}
 	case "surefire":
 		files, _ := filepath.Glob(filepath.Join(dir, "target", "surefire-reports", "TEST-*.xml"))
 		for _, f := range files {

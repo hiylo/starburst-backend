@@ -257,3 +257,51 @@ func TestParsePlaywrightJSON(t *testing.T) {
 		t.Errorf("should timeout = %+v, want error/30000ms", r)
 	}
 }
+
+func TestParseGoTestText(t *testing.T) {
+	out := `=== RUN   TestBoom
+--- FAIL: TestBoom (0.12s)
+    main_test.go:6: boom
+    panic: something
+=== RUN   TestOK
+--- PASS: TestOK (0.00s)
+--- SKIP: TestSkip (0.00s)
+    main_test.go:9: not on this platform
+FAIL
+FAIL	demo	0.200s
+FAIL
+`
+	got := ParseGoTestText([]byte(out))
+	if len(got) != 3 {
+		t.Fatalf("got %d results, want 3: %+v", len(got), got)
+	}
+	byName := map[string]CaseResult{}
+	for _, r := range got {
+		byName[r.Name] = r
+	}
+	if r := byName["TestBoom"]; r.Status != "failed" || r.DurationMs != 120 ||
+		!strings.Contains(r.ErrorXML, "main_test.go:6: boom") {
+		t.Errorf("TestBoom = %+v, want failed/120ms with the log lines", r)
+	}
+	if r := byName["TestOK"]; r.Status != "passed" || r.ErrorXML != "" {
+		t.Errorf("TestOK = %+v, want passed with no error text", r)
+	}
+	if r := byName["TestSkip"]; r.Status != "skipped" || r.ErrorXML != "" {
+		t.Errorf("TestSkip = %+v, want skipped with no error text", r)
+	}
+
+	// Subtests arrive indented under their parent and keep their slash name.
+	subs := ParseGoTestText([]byte("--- FAIL: TestOuter (0.00s)\n" +
+		"    --- FAIL: TestOuter/sub (0.01s)\n" +
+		"        outer_test.go:12: nope\n"))
+	if len(subs) != 2 || subs[1].Name != "TestOuter/sub" ||
+		!strings.Contains(subs[1].ErrorXML, "outer_test.go:12: nope") {
+		t.Errorf("subtests = %+v, want TestOuter + TestOuter/sub carrying the detail", subs)
+	}
+
+	// A build failure carries no case lines at all: the caller must be able to
+	// tell "nothing failed" from "nothing ran", so this stays empty.
+	if got := ParseGoTestText([]byte("# demo\n./main.go:3:2: undefined: foo\nFAIL\tdemo [build failed]\n")); len(got) != 0 {
+		t.Errorf("build failure = %+v, want no cases", got)
+	}
+}
