@@ -77,6 +77,13 @@ function fmtTime(ts) {
   if (d.toDateString() === now.toDateString()) return hm;
   return pad(d.getMonth() + 1) + "-" + pad(d.getDate()) + " " + hm;
 }
+// 仅当天的短时间 HH:mm:ss，用于逐条消息明细行。
+function fmtClock(ts) {
+  if (!ts) return "";
+  const d = new Date(ts);
+  const pad = n => String(n).padStart(2, "0");
+  return pad(d.getHours()) + ":" + pad(d.getMinutes());
+}
 function clipText(s, n) {
   s = String(s || "");
   return s.length > n ? { text: s.slice(0, n), truncated: true } : { text: s, truncated: false };
@@ -141,11 +148,26 @@ function normalizeTurns(raw) {
       tokens: info.tokens || null,
       error: info.error || null,
       finish: info.finish || "",
+      // 用户消息可携带系统提示词（system part / system 字段），App 据此在上下文
+      // 占用详情里展示；web 之前不捕获。取第一条非空即可。
+      system: firstSystemPrompt(info, parts),
     });
   }
   return out.filter(t => t.role === "user"
     ? t.parts.length
     : (t.parts.length || t.error || t.model || t.tokens));
+}
+// 从消息 info 或 parts 里取系统提示词：优先 info.system，其次 part.system /
+// part.type==="system" 的文本。
+function firstSystemPrompt(info, parts) {
+  const direct = (info && typeof info.system === "string" && info.system.trim()) || "";
+  if (direct) return direct;
+  for (const p of parts) {
+    const v = (typeof p.system === "string" && p.system.trim()) ||
+      (p.type === "system" && typeof p.text === "string" && p.text.trim()) || "";
+    if (v) return v;
+  }
+  return "";
 }
 function absorbMeta(turn, info) {
   if (info.modelID) turn.model = info.modelID;
@@ -1577,21 +1599,33 @@ ChatView.prototype.contextStats = function () {
   let used = 0, out = 0, reason = 0, cache = 0, cost = 0;
   let user = 0, assistant = 0;
   let firstTs = 0, endTs = 0;
+  const rows = [];
   for (const t of this.turns) {
     if (t.role === "user") user++; else assistant++;
     if (t.ts && (!firstTs || t.ts < firstTs)) firstTs = t.ts;
     if (t.doneTs && t.doneTs > endTs) endTs = t.doneTs;
     const tk = t.tokens || {};
     const c = (tk.cache || {}).read || 0;
-    used += (tk.input || 0) + c + (tk.output || 0);
-    out += tk.output || 0;
-    reason += tk.reasoning || 0;
-    cache += c;
+    const u = tk.input || 0, o = tk.output || 0, r = tk.reasoning || 0;
+    used += u + c + o;
+    out += o; reason += r; cache += c;
     cost += t.cost || 0;
+    // parts 类型统计（text/tool/patch…），供展开区概览。
+    const types = {};
+    for (const p of (t.parts || [])) { if (p && p.type) types[p.type] = (types[p.type] || 0) + 1; }
+    const partsInfo = Object.entries(types).map(([k, v]) => `${k}×${v}`).join(" · ");
+    rows.push({ ts: t.ts, role: t.role, model: t.model || "", agent: t.agent || "",
+      in: u, out: o, reason: r, cache: c, cost: t.cost || 0, text: turnText(t), partsInfo });
   }
+  rows.reverse(); // 最新在前
   const inOnly = used - out - cache;
   const s = (this.ctx && this.ctx.session && this.ctx.session()) || {};
-  return { used, out, inOnly, reason, cache, cost, user, assistant, firstTs, endTs,
+  // 系统提示词：取最后一条带 system 字段的用户消息（对齐 App）。
+  let system = "";
+  for (let i = this.turns.length - 1; i >= 0; i--) {
+    if (this.turns[i].role === "user" && this.turns[i].system) { system = this.turns[i].system; break; }
+  }
+  return { used, out, inOnly, reason, cache, cost, user, assistant, firstTs, endTs, rows, system,
     model: this.turns.length ? (this.turns[this.turns.length - 1].model || "") : modelOf(s.model),
     agent: s.agent || "", sessionId: this.sessionId, created: (s.time && s.time.created) || firstTs };
 };
@@ -1600,7 +1634,7 @@ function modelOf(m) {
   if (typeof m === "object") return m.id || m.modelID || "";
   return String(m);
 }
-// 上下文占用详情弹窗：预算进度、token 分项、花费、消息数、会话元信息（对齐 App ContextUsageDialog）。
+// 上下文占用详情弹窗：预算进度、token 分项（对齐 App ContextUsageDialog）。
 ChatView.prototype.showContextUsage = function () {
   const c = this.ctx, st = this.contextStats();
   const budget = (c.contextBudget && c.contextBudget()) || 0;
@@ -1612,6 +1646,52 @@ ChatView.prototype.showContextUsage = function () {
   if (st.created) rows.push(["创建时间", esc(fmtTime(st.created))]);
   const dur = st.firstTs && st.endTs ? fmtDur(st.endTs - st.firstTs) : "";
   if (dur) rows.push(["总历时", esc(dur)]);
+  // 分类分项 stacked bar：输入 / 输出 / 推理 / 缓存读取。
+  const catTotal = st.inOnly + st.out + st.reason + st.cache;
+  const catBar = catTotal
+    ? `<div class="ctx-catbar">${[
+        [st.inOnly, "in", "输入"], [st.out, "out", "输出"], [st.reason, "rz", "推理"], [st.cache, "cch", "缓存"]
+      ].filter(x => x[0] > 0).map(([v, cls, lab]) =>
+        `<i class="${cls}" style="width:${Math.max(1, v / catTotal * 100).toFixed(1)}%" title="${lab} ${fmtTok(v)}"></i>`).join("")}
+    </div>
+    <div class="ctx-catlegend">${[
+        [st.inOnly, "输入", "in"], [st.out, "输出", "out"], [st.reason, "推理", "rz"], [st.cache, "缓存", "cch"]
+      ].filter(x => x[0] > 0).map(([v, lab, cls]) =>
+        `<span><i class="${cls}"></i>${lab} ${fmtTok(v)}</span>`).join("")}</div>`
+    : "";
+  // 逐条消息 token 明细（初始 20 条，可点「查看更多」逐步追加）。
+  const shown = this._ctxRowsShown || 20;
+  const total = st.rows.length;
+  const slicedRows = st.rows.slice(0, shown);
+  const rowHtml = (r, i) => {
+    const isUser = r.role === "user";
+    // 主位置显示「消息描述」而非模型名（对齐 App raw message 行）；模型名进悬停 title。
+    const desc = (r.text && r.text.trim()) ? r.text.trim().replace(/\s+/g, " ") : "（无文本）";
+    const fullTitle = `${r.role === "assistant" ? "AI" : "我"} · ${r.model || r.agent || "—"} · ${desc.slice(0, 240)}`;
+    const expanded = !!(this._ctxExpanded && this._ctxExpanded.has(i));
+    return `<div class="ctx-trow${expanded ? " expanded" : ""}" data-ctx-row="${i}" title="${esc(fullTitle)}">
+      <span class="t">${r.ts ? fmtClock(r.ts) : "—"}</span>
+      <b class="who ${escapeHtml(r.role)}">${r.role === "assistant" ? "AI" : "我"}</b>
+      <span class="mdl">${esc(clipText(desc, 44).text)}</span>
+      ${isUser
+        ? (r.cost ? `<span class="tk cost">${esc(fmtCost(r.cost))}</span>` : "")
+        : `<span class="tk in" title="输入">↑${fmtTok(r.in)}</span>
+           <span class="tk out" title="输出">↓${fmtTok(r.out)}</span>
+           ${r.reason ? `<span class="tk rz" title="推理">↳${fmtTok(r.reason)}</span>` : ""}
+           ${r.cache ? `<span class="tk cch" title="缓存读取">⇑${fmtTok(r.cache)}</span>` : ""}
+           ${r.cost ? `<span class="tk cost">${esc(fmtCost(r.cost))}</span>` : ""}`}
+    </div>
+    <div class="ctx-texp${expanded ? " open" : ""}" data-ctx-exp="${i}">
+      ${expanded ? `<div class="ctx-parts">${esc(r.partsInfo || "")}</div><pre>${esc(clipText(r.text || "（无文本）", 4000).text)}</pre>` : ""}
+    </div>`;
+  };
+  const msgRows = slicedRows.map(rowHtml).join("");
+  const moreBtn = total > shown
+    ? `<button class="ghost sm ctx-more" type="button" data-ctx-more="${Math.min(shown + 20, total)}">查看更多消息（还有 ${total - shown} 条）</button>`
+    : total > 20 ? `<div class="ctx-more muted">共 ${total} 条消息</div>` : "";
+  const sysHtml = st.system
+    ? `<details class="ctx-sysprompt"><summary>系统提示词</summary><pre>${esc(st.system)}</pre></details>`
+    : "";
   let html = `
     <div class="ctx-dlg">
       ${budget ? `<div class="ctx-dlg-progress">
@@ -1627,11 +1707,40 @@ ChatView.prototype.showContextUsage = function () {
         <div class="ctx-dlg-cell"><b>${fmtTok(st.cache)}</b><span>缓存读取</span></div>
         <div class="ctx-dlg-cell"><b>${esc(fmtCost(st.cost)) || "—"}</b><span>花费</span></div>
       </div>
+      ${catBar}
       <div class="ctx-dlg-row"><span>消息</span><b>${st.user + st.assistant} 条 <span class="muted">(用户 ${st.user} / AI ${st.assistant})</span></b></div>
+      ${sysHtml}
+      ${msgRows ? `<div class="ctx-rows"><div class="ctx-rowhead">最近 ${st.rows.length > 15 ? 15 : st.rows.length} 条消息的 token</div>${msgRows}</div>` : ""}
       <div class="ctx-dlg-meta">${rows.map(r => `<span>${r[0]}：${r[1]}</span>`).join("")}</div>
     </div>`;
-  if (global.wbModalOpen) global.wbModalOpen("上下文占用详情", html);
-  else if (this.ctx && this.ctx.toast) this.ctx.toast("上下文占用", `${fmtTok(st.used)} token · 已用 ${pct}%`, "info");
+  if (global.wbModalOpen) {
+    const prevScroll = (document.getElementById("wbModalBody") || {}).scrollTop || 0;
+    global.wbModalOpen("上下文占用详情", html);
+    const body = document.getElementById("wbModalBody");
+    if (body) body.scrollTop = prevScroll;
+    if (body && msgRows) {
+      // 「查看更多」：逐步追加逐条明细；已显示全部已加载轮次时再翻一页更早历史。
+      // 点行展开/收起该消息的完整内容。重绘后保留正文滚动位置。
+      body.onclick = async (e) => {
+        const row = e.target.closest("[data-ctx-row]");
+        if (row) {
+          const idx = Number(row.dataset.ctxRow);
+          this._ctxExpanded = this._ctxExpanded || new Set();
+          if (this._ctxExpanded.has(idx)) this._ctxExpanded.delete(idx); else this._ctxExpanded.add(idx);
+          this.showContextUsage();
+          return;
+        }
+        const b = e.target.closest("[data-ctx-more]");
+        if (!b) return;
+        this._ctxRowsShown = Math.max(this._ctxRowsShown || 0, Number(b.dataset.ctxMore) || 0);
+        const st = this.contextStats();
+        if (this._ctxRowsShown >= st.rows.length && this.cursor && !this.loading) {
+          await this.loadOlder();
+        }
+        this.showContextUsage();
+      };
+    }
+  } else if (this.ctx && this.ctx.toast) this.ctx.toast("上下文占用", `${fmtTok(st.used)} token · 已用 ${pct}%`, "info");
 };
 
 /* ---- 语音输入（后端 /api/stt 流式识别） ---- */

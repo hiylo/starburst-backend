@@ -12,7 +12,7 @@
      style.css 的 --font-sans / --font-mono 均有系统回退，加载失败只是字形不同。 -->
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" media="print" onload="this.media='all'">
 <noscript><link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet"></noscript>
-<link rel="stylesheet" href="/assets/style.css">
+<link rel="stylesheet" href="/assets/style.css?v=__BUILD__">
 <script>
 /* 主题必须在首次绘制前落到 <html>：等 app.js 执行会先闪一帧深色。
    解析规则与 app.js 的 applyTheme 共用同一份语义（模式存在 sb.theme）。 */
@@ -750,7 +750,7 @@
   </div>
 </div>
 
-<script src="/assets/chat.js"></script>
-<script src="/assets/app.js"></script>
+<script src="/assets/chat.js?v=__BUILD__"></script>
+<script src="/assets/app.js?v=__BUILD__"></script>
 </body>
 </html>

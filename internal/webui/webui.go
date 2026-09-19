@@ -5,7 +5,9 @@ import (
 	"io/fs"
 	"net/http"
 	"path"
+	"strconv"
 	"strings"
+	"time"
 )
 
 //go:embed static
@@ -14,6 +16,10 @@ var staticFS embed.FS
 // FS implements the server.webUIFSProvider contract over the embedded assets.
 type FS struct {
 	sub fs.FS
+	// buildStamp 每次进程启动生成，用于 index.html 里静态资源 URL 的 ?v= 缓存破坏：
+	// 前端 JS/HTML 随后端版本更新，浏览器（含 App WebView / 强缓存）可能拿旧资产导致
+	// 行为与新后端不一致，带版本号的 query 保证部署后必定加载新文件。
+	buildStamp string
 }
 
 // New returns a webUI provider serving the embedded static assets.
@@ -22,7 +28,7 @@ func New() *FS {
 	if err != nil {
 		panic(err)
 	}
-	return &FS{sub: sub}
+	return &FS{sub: sub, buildStamp: strconv.FormatInt(time.Now().Unix(), 36)}
 }
 
 // Open reads a file from the embedded assets.
@@ -50,6 +56,10 @@ func (f *FS) Serve(w http.ResponseWriter, r *http.Request, p string) {
 	w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
 	w.Header().Set("Pragma", "no-cache")
 	w.Header().Set("Expires", "0")
+	// index.html 里的 ?v=__BUILD__ 换成进程构建戳，强制静态资源走新版本。
+	if name == "index.html" && strings.Contains(string(data), "__BUILD__") {
+		data = []byte(strings.ReplaceAll(string(data), "__BUILD__", f.buildStamp))
+	}
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(data)
 }
