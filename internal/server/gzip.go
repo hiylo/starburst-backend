@@ -16,8 +16,11 @@ package server
 //   - sync.Pool 复用 gzip.Writer，避免每个压缩响应都分配一次。
 
 import (
+	"bufio"
 	"compress/gzip"
+	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -101,6 +104,19 @@ func (g *gzipResponseWriter) Close() {
 		gzipWriterPool.Put(g.gz)
 		g.gz = nil
 	}
+}
+
+// Hijack 让 WebSocket 升级能穿过 gzip 包装层。App 端 OkHttp/Ktor 的 WS 握手默认带
+// Accept-Encoding: gzip，没有该方法时 gorilla upgrader 会因
+// 「response does not implement http.Hijacker」升级失败（HTTP 500），推送通道对 App
+// 永久不可用。升级发生在任何 WriteHeader 之前，压缩开关未被触发（gz==nil），
+// 因此 Hijack 后归还原始连接、此时直接透传即可。
+func (g *gzipResponseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	h, ok := g.ResponseWriter.(http.Hijacker)
+	if !ok {
+		return nil, nil, fmt.Errorf("underlying ResponseWriter does not support hijacking")
+	}
+	return h.Hijack()
 }
 
 // gzipMiddleware 包装整个路由：仅对接受 gzip 的客户端且可压缩响应启用；SSE 原样透传。
