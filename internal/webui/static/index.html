@@ -1,14 +1,29 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-theme="dark">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark light">
 <title>StarBurst 控制台</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop offset='0' stop-color='%236366f1'/%3E%3Cstop offset='.55' stop-color='%238b5cf6'/%3E%3Cstop offset='1' stop-color='%2306b6d4'/%3E%3C/linearGradient%3E%3C/defs%3E%3Cpath fill='url(%23g)' d='M12 2l2.9 6.26 6.6.57-5 4.4 1.53 6.52L12 16.9 5.97 19.75 7.5 13.23l-5-4.4 6.6-.57z'/%3E%3C/svg%3E">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<!-- 网络字体异步加载：样式表会阻塞渲染，内网/离线设备上取不到 CDN 时整页会一直白屏。
+     style.css 的 --font-sans / --font-mono 均有系统回退，加载失败只是字形不同。 -->
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" media="print" onload="this.media='all'">
+<noscript><link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet"></noscript>
 <link rel="stylesheet" href="/assets/style.css">
+<script>
+/* 主题必须在首次绘制前落到 <html>：等 app.js 执行会先闪一帧深色。
+   解析规则与 app.js 的 applyTheme 共用同一份语义（模式存在 sb.theme）。 */
+(function () {
+  try {
+    var mode = localStorage.getItem("sb.theme") || "system";
+    var light = window.matchMedia("(prefers-color-scheme: light)").matches;
+    document.documentElement.dataset.theme = mode === "system" ? (light ? "light" : "dark") : mode;
+  } catch (e) { /* 保留 HTML 上的 dark 兜底 */ }
+})();
+</script>
 </head>
 <body>
 <div class="toast-wrap" id="toastWrap"></div>
@@ -45,6 +60,8 @@
     <header class="topbar">
       <h1 id="pageTitle">AI 工作台</h1>
       <span class="plate">starburst-backend</span>
+      <!-- 顶栏而不是侧栏：手机上侧栏收成图标栏，带文字的 select 放不下。 -->
+      <select id="themeMode" class="theme-pick" aria-label="外观主题" title="外观主题"></select>
     </header>
 
     <div class="content">
@@ -65,7 +82,7 @@
       </div>
 
       <!-- AI 工作台（首页） -->
-      <div id="page-workbench" class="page wb-page">
+      <div id="page-workbench" class="page wb-page hidden">
         <div class="wb-stats">
           <div class="wb-stat"><div class="n" id="wbCountQ">0</div><div class="l"><span class="dot dot-q"></span>提问中</div></div>
           <div class="wb-stat"><div class="n" id="wbCountB">0</div><div class="l"><span class="dot dot-b"></span>处理中</div></div>
@@ -97,8 +114,8 @@
           <div class="wb-col wb-col-panel">
             <div id="wbPanelPlaceholder" class="wb-placeholder">
               <div class="ico" aria-hidden="true"><svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8M12 17v4"/><path d="M7 9h3M7 12h3m4-3h3m-3 3h3"/></svg></div>
-              选择左侧会话，查看 AI 决策面板<br>
-              <span class="muted" style="font-size:12px">AI 最近回复 · 待决问题 · 最近对话 · 快捷回复</span>
+              选择左侧会话，进入 AI 对话工作台<br>
+              <span class="muted" style="font-size:12px">完整对话与工具执行过程 · 待决问题 / 授权 · 附件与 @ 引用</span>
             </div>
             <div id="wbPanel" class="wb-panel hidden"></div>
           </div>
@@ -114,7 +131,7 @@
       </div>
 
       <!-- 任务 -->
-      <div id="page-tasks" class="page">
+      <div id="page-tasks" class="page hidden">
         <div class="card">
           <h2><span class="dot"></span>提交任务</h2>
           <label>Prompt</label>
@@ -186,7 +203,7 @@
       </div>
 
       <!-- 编排 -->
-      <div id="page-workflow" class="page">
+      <div id="page-workflow" class="page hidden">
         <div class="card">
           <h2><span class="dot"></span>创建编排（多步链式任务）</h2>
           <label>编排名称（可选）</label>
@@ -209,7 +226,7 @@
       </div>
 
       <!-- 实时流 -->
-      <div id="page-stream" class="page">
+      <div id="page-stream" class="page hidden">
         <div class="card">
           <h2><span class="dot"></span>上游事件流（SSE）</h2>
           <p class="muted" style="font-size:12px;margin-top:0">
@@ -226,7 +243,7 @@
       </div>
 
       <!-- 项目 -->
-      <div id="page-projects" class="page">
+      <div id="page-projects" class="page hidden">
         <div class="card">
           <h2><span class="dot"></span>本机 OpenCode 会话</h2>
           <div class="row"><button class="ghost" onclick="loadProjects()">刷新</button></div>
@@ -247,7 +264,7 @@
       </div>
 
       <!-- 自动化规则 -->
-      <div id="page-rules" class="page">
+      <div id="page-rules" class="page hidden">
         <div class="card">
           <h2><span class="dot"></span>智能生成规则（AI）</h2>
           <label>用一句话描述你的自动化需求</label>
@@ -315,7 +332,7 @@
       </div>
 
       <!-- 归档 -->
-      <div id="page-archives" class="page">
+      <div id="page-archives" class="page hidden">
         <div class="card">
           <h2><span class="dot"></span>归档会话</h2>
           <label>会话 ID</label>
@@ -338,7 +355,7 @@
       </div>
 
       <!-- 审计 -->
-      <div id="page-audit" class="page">
+      <div id="page-audit" class="page hidden">
         <div class="card">
           <h2><span class="dot"></span>审计日志</h2>
           <div class="row">
@@ -353,7 +370,7 @@
       </div>
 
       <!-- Token 管理 -->
-      <div id="page-tokens" class="page">
+      <div id="page-tokens" class="page hidden">
         <div class="card">
           <h2><span class="dot"></span>生成 Token</h2>
           <div class="row">
@@ -382,7 +399,7 @@
       </div>
 
       <!-- 智能测试（intel）——管理列表页 -->
-      <div id="page-intel" class="page">
+      <div id="page-intel" class="page hidden">
         <!-- 顶部统计 -->
         <div class="stat-grid" id="intelStats">
           <div class="stat"><div class="k">项目总数</div><div class="v" id="intelStatTotal">0</div></div>
@@ -424,7 +441,7 @@
       </div>
 
       <!-- 智能测试 —— 项目详情（独立页面） -->
-      <div id="page-intel-detail" class="page">
+      <div id="page-intel-detail" class="page hidden">
         <div class="intel-detail-layout">
           <div class="intel-detail-main">
             <div class="card">
@@ -631,7 +648,7 @@
       </div>
 
       <!-- 设置 -->
-      <div id="page-settings" class="page">
+      <div id="page-settings" class="page hidden">
         <div class="card">
           <h2><span class="dot"></span>大模型配置（智能编排）</h2>
           <p class="muted" style="font-size:12px;margin-top:0">用于智能生成规则、任务摘要、失败自愈决策。留空 API 地址则退回纯规则引擎。</p>
@@ -675,8 +692,11 @@
         </div>
         <div class="card">
           <h2><span class="dot"></span>修改管理密码</h2>
+          <label>当前密码</label>
+          <input type="password" id="curpw" autocomplete="current-password" placeholder="必填，用于确认是你本人">
           <label>新密码</label>
-          <input type="password" id="newpw" placeholder="至少 4 位">
+          <input type="password" id="newpw" autocomplete="new-password" placeholder="至少 8 位，且不能是常见弱口令">
+          <div class="muted" style="margin-top:6px;font-size:12px">保存后其他设备的登录会话会全部失效，需要重新登录。</div>
           <div class="row" style="margin-top:12px"><button onclick="doChangePassword()">保存密码</button></div>
           <div id="pwMsg" class="msg"></div>
         </div>
@@ -726,6 +746,7 @@
   </div>
 </div>
 
+<script src="/assets/chat.js"></script>
 <script src="/assets/app.js"></script>
 </body>
 </html>

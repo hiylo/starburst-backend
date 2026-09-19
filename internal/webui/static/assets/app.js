@@ -6,7 +6,6 @@
 
 const SESSION_KEY = "ocb_web_session";
 const APP_TOKEN_KEY = "ocb_app_token";
-const PAGE_KEY = "ocb_last_page";
 let session = localStorage.getItem(SESSION_KEY) || "";
 
 const TASK_STATUS = {
@@ -15,6 +14,47 @@ const TASK_STATUS = {
   pending: "等待前置", blocked: "被阻塞",
 };
 const KIND_LABEL = { cron: "cron 定时", git: "git 监听", http: "webhook" };
+
+/* ---------- 外观主题 ---------- */
+// 模式取值与安卓 Theme.kt 对齐：system / light / dark / amoled / dim，
+// style.css 里每个非 system 取值都有一组 html[data-theme] 令牌覆盖。
+const THEME_KEY = "sb.theme";
+const THEME_MODES = [
+  { mode: "system", label: "跟随系统" },
+  { mode: "light", label: "浅色" },
+  { mode: "dark", label: "深色" },
+  { mode: "amoled", label: "纯黑 AMOLED" },
+  { mode: "dim", label: "柔和 Dim" },
+];
+const prefersLight = window.matchMedia("(prefers-color-scheme: light)");
+
+// resolveTheme 把「模式」翻译成样式里真实存在的 data-theme 值。
+function resolveTheme(mode) {
+  return mode === "system" ? (prefersLight.matches ? "light" : "dark") : mode;
+}
+function currentThemeMode() {
+  const m = localStorage.getItem(THEME_KEY) || "system";
+  return THEME_MODES.some(t => t.mode === m) ? m : "system";
+}
+function applyTheme() {
+  document.documentElement.dataset.theme = resolveTheme(currentThemeMode());
+  const sel = document.getElementById("themeMode");
+  if (sel) sel.value = currentThemeMode();
+}
+function setThemeMode(mode) {
+  localStorage.setItem(THEME_KEY, mode);
+  applyTheme();
+}
+function initThemePicker() {
+  const sel = document.getElementById("themeMode");
+  if (sel) {
+    sel.innerHTML = THEME_MODES.map(t => `<option value="${t.mode}">${t.label}</option>`).join("");
+    sel.addEventListener("change", () => setThemeMode(sel.value));
+  }
+  // 跟随系统时，操作系统的深浅色切换要即时生效（桌面按时段自动换色就走这条）。
+  prefersLight.addEventListener("change", () => { if (currentThemeMode() === "system") applyTheme(); });
+  applyTheme();
+}
 
 function hdr(extra) {
   const h = { "Content-Type": "application/json" };
@@ -167,8 +207,7 @@ const TITLES = {
   tokens: "Token 管理", settings: "设置", intel: "智能测试",
 };
 function switchPage(name) {
-  // 记住当前页面，刷新后回到同一页而不是跳回首页。
-  localStorage.setItem(PAGE_KEY, name);
+  // 不记忆所在页：每次打开一律从 AI 工作台开始，避免误入/混叠其他页面。
   document.querySelectorAll(".page").forEach(p => p.classList.add("hidden"));
   const target = document.getElementById("page-" + name);
   if (target) target.classList.remove("hidden");
@@ -181,7 +220,13 @@ function switchPage(name) {
     content.classList.toggle("full", name === "intel");
   }
   // 每个页面切到时自动加载数据，避免打开就是空的、还得手动点"刷新"。
-  if (name === "workbench") { loadWorkbench(); loadWbEvents(); renderWbFilters(); ensureWbProviders(); }
+  // 对话区的 SSE 通道只在停在工作台时保持（见 wbSyncStream）。
+  wbSyncStream();
+  if (name === "workbench") {
+    loadWorkbench(); loadWbEvents(); renderWbFilters(); ensureWbProviders();
+    // 回到工作台补一次服务端快照：离开期间 token 级增量不再回放，靠整轮拉取收敛。
+    if (wbChat) wbChat.reload();
+  }
   else if (name === "tasks") { loadTasks(); loadTaskStats(); }
   else if (name === "workflow") { loadWorkflows(); if (!document.getElementById("wfSteps").children.length) wfAddStep(); }
   else if (name === "projects") loadProjects();
@@ -212,6 +257,9 @@ function doLogout() {
   localStorage.removeItem(SESSION_KEY);
   if (taskWS) { taskWS.close(); taskWS = null; }
   if (streamES) { streamES.close(); streamES = null; }
+  // 对话区的 SSE 通道用的是同一条登录会话，退出后必须退订，否则重连会一直 401。
+  if (wbChatUnsub) { wbChatUnsub(); wbChatUnsub = null; }
+  if (window.SBChat) SBChat.Bus.close();
   renderAuth();
 }
 
@@ -228,9 +276,10 @@ async function loadCapabilities() {
   }
   const intelBtn = document.querySelector('#nav [data-page="intel"]');
   if (intelBtn) intelBtn.style.display = vectorCapable ? "" : "none";
-  // 若智能测试当前不可用但仍停留其页面，退回工作台。
-  if (!vectorCapable && TITLES[localStorage.getItem(PAGE_KEY)] === "intel") {
-    localStorage.setItem(PAGE_KEY, "workbench");
+  // 若智能测试当前不可用但正停留在其页面，退回工作台。
+  if (!vectorCapable) {
+    const cur = document.querySelector(".page:not(.hidden)");
+    if (cur && cur.id === "page-intel") switchPage("workbench");
   }
 }
 
@@ -250,11 +299,9 @@ function renderAuth() {
       if (p.id !== "loginPage") p.classList.add("hidden");
     });
   } else {
-    // 登录后先按后端能力显示/隐藏智能测试入口，再恢复上次所在页面（刷新
-    // 不跳回首页）；无效/无记录则默认进 AI 工作台。
+    // 登录/刷新后一律进入 AI 工作台：不记忆上次所在页，保证每次打开都是工作台。
     loadCapabilities().then(() => {
-      const last = localStorage.getItem(PAGE_KEY);
-      switchPage(TITLES[last] ? last : "workbench");
+      switchPage("workbench");
     });
   }
 }
@@ -266,6 +313,8 @@ function saveAppToken() {
   document.getElementById("appToken").value = v;
   if (taskWS) taskWS.close();
   connectTaskWS();
+  // 换 Token 后 SSE 连接仍带旧凭据，退订重连一次（未订阅时是空操作）。
+  if (window.SBChat && wbChatUnsub) SBChat.Bus.restart();
   if (document.getElementById("page-stream").classList.contains("active")
     || !document.getElementById("page-stream").classList.contains("hidden")) ensureStream(true);
 }
@@ -1051,10 +1100,12 @@ async function saveEmbedConfig() {
   loadEmbedConfig();
 }
 async function doChangePassword() {
+  const cp = document.getElementById("curpw").value;
   const np = document.getElementById("newpw").value;
-  const res = await api("/api/web/password", { method: "POST", headers: hdr(), body: JSON.stringify({ newPassword: np }) });
+  const res = await api("/api/web/password", { method: "POST", headers: hdr(), body: JSON.stringify({ currentPassword: cp, newPassword: np }) });
   const data = await res.json();
-  show(document.getElementById("pwMsg"), res.ok ? "密码已更新" : (data.error || "修改失败"), res.ok);
+  show(document.getElementById("pwMsg"), res.ok ? "密码已更新，其他设备的会话已失效" : (data.error || "修改失败"), res.ok);
+  if (res.ok) { document.getElementById("curpw").value = ""; document.getElementById("newpw").value = ""; }
 }
 
 /* ---------- 自动刷新任务 ---------- */
@@ -1141,11 +1192,6 @@ function updateTaskAI(id, text, isFailure) {
  * ========================================================================== */
 const WB_HIGH_FREQ = new Set(["heartbeat", "server.heartbeat", "sync", "server.connected", "message.part.delta", "message.part.updated", "message.part.removed", "message.updated", "session.updated"]);
 const WB_MAX_EVENTS = 50;
-// 大屏浏览器可容纳更完整的内容：多拉消息、多显示几条、少截断。
-const WB_PANEL_LIMIT = 200;
-const WB_RECENT = 40;
-const WB_MSG_CLIP = 3000;
-const WB_RECENT_SHOW = 24;
 let wbSessions = [];
 let wbStatuses = {};
 let wbPending = {};
@@ -1158,8 +1204,6 @@ let wbSending = false;
 let wbLoading = false;
 let wbLastListLoad = 0;
 let wbFilterOption = "all";
-// 决策面板「最近对话」是否展开显示全部（默认收起，只显示最新 N 条，更早的从顶部展开）。
-let wbMoreMsgs = false;
 // 决策面板是否处于「改名」编辑态。
 let wbRenaming = false;
 // 会话是否正在压缩（压缩为同步长耗时操作，期间禁用操作按钮）。
@@ -1169,20 +1213,21 @@ let wbNewSet = new Set();
 // 待授权操作：sessionId → [PermissionRequest{id, permission, patterns, always, tool}]。
 let wbPermissions = {};
 // 待决问题的作答暂存：wbQAnswers[requestId][questionIndex] = [selectedLabels...]。
-// 一个 request 可包含多个 question，需全部作答后一次性提交（answers 数组按序对应）。
+// 单选且仅一问时点选即提交；其余情况（多选 / 一问以上）逐题暂存后整体提交，
+// answers 数组按序对应 questions，未作答的题为空数组。
 let wbQAnswers = {};
-// 渲染后是否把对话区贴底（打开会话 / 刚发送回复时用），展示最新消息。
-let wbPanelScrollBottom = false;
+// 待授权 / 待决问题的回复在途集合，防止连点二次提交（第二次必 404 报错）。
+const wbPermBusy = new Set();
+const wbQBusy = new Set();
+// 对话区控制器（SBChat.ChatView）与 SSE 订阅句柄；对话区独立于面板外壳，
+// 外壳重绘不得触碰它的 DOM（逐 token 增量与 innerHTML 会互相覆盖）。
+let wbChat = null;
+let wbChatUnsub = null;
+// 可选 Agent 列表（GET /agent 缓存）与每个会话用户选定的 agent。
+let wbAgents = [];
+let wbAgentChoice = {};
 // 正在拉取并渲染的决策面板会话 id（同会话去重，避免 5s 轮询与 WS 推送重复拉取）。
 let wbPanelFetching = null;
-// 快捷回复输入框自动撑高：随输入行数增长（最多到 max-height，超出内部滚动）。
-const WB_REPLY_MAX_H = 180;
-function wbAutosizeReply(ta) {
-  if (!ta) return;
-  ta.style.height = "auto";
-  ta.style.height = Math.min(ta.scrollHeight, WB_REPLY_MAX_H) + "px";
-  ta.style.overflowY = ta.scrollHeight > WB_REPLY_MAX_H ? "auto" : "hidden";
-}
 // 可选模型列表（GET /config/providers 缓存）；用于面板内切换会话模型。
 let wbProviders = null;
 let wbProvidersState = "idle"; // idle | loading | loaded | failed
@@ -1197,63 +1242,28 @@ let wbWorkbenchTimer = null;
 function wbRank(st) { return st === "question" ? 0 : (st === "busy" || st === "retry") ? 1 : 2; }
 function wbStatusLabel(st) { return { question: "提问中", busy: "处理中", retry: "重试中", idle: "空闲" }[st] || "空闲"; }
 
-// 决策面板输入快照：重绘前记住快捷回复 / 待决问题自定义输入的内容、焦点与滚动位置。
+// 决策面板外壳输入快照：重绘前记住待决问题自定义输入的内容与焦点。
+// 对话区的输入/滚动由 ChatView 自己托管，不在这条路径上（外壳重绘不会碰到它）。
 function wbSnapshotPanel() {
-  const snap = { q: {}, scroll: null };
-  const ta = document.getElementById("wbReplyInput");
-  if (ta) {
-    snap.reply = ta.value;
-    snap.focused = document.activeElement === ta;
-  }
+  const snap = { q: {}, focused: null };
   document.querySelectorAll('#wbPanel input[id^="wbQInput_"]').forEach(inp => {
     snap.q[inp.id] = inp.value;
+    if (document.activeElement === inp) snap.focused = inp.id;
   });
-  const sc = document.querySelector("#wbPanel .wb-scroll");
-  if (sc) snap.scroll = sc.scrollTop;
-  const mw = document.querySelector("#wbPanel .wb-msgwrap");
-  if (mw) snap.mw = { top: mw.scrollTop, height: mw.scrollHeight };
   return snap;
 }
 function wbRestorePanel(snap) {
   if (!snap) return;
-  const ta = document.getElementById("wbReplyInput");
-  if (ta && snap.reply != null) {
-    ta.value = snap.reply;
-    wbAutosizeReply(ta);
-    if (snap.focused) {
-      ta.focus();
-      const len = ta.value.length;
-      try { ta.setSelectionRange(len, len); } catch (_) {}
-    }
-  }
   Object.keys(snap.q || {}).forEach(id => {
     const inp = document.getElementById(id);
     if (inp) inp.value = snap.q[id];
   });
-  const sc = document.querySelector("#wbPanel .wb-scroll");
-  if (sc && snap.scroll != null) sc.scrollTop = snap.scroll;
-  // 对话区滚动：默认贴底看最新；已在底部（或要求贴底）时跟随新内容，否则保持原位置。
-  // 注意：首次打开时快照里没有旧 msgwrap（snap.mw 为空），此时必须按 wbPanelScrollBottom 贴底。
-  const mw = document.querySelector("#wbPanel .wb-msgwrap");
-  if (mw) {
-    let stick = wbPanelScrollBottom;
-    if (snap.mw) {
-      const nearBottom = snap.mw.height <= 0 || snap.mw.top + 120 >= snap.mw.height;
-      stick = stick || nearBottom;
-    }
-    if (stick) {
-      mw.scrollTop = mw.scrollHeight;
-      requestAnimationFrame(() => {
-        const m2 = document.querySelector("#wbPanel .wb-msgwrap");
-        if (m2) m2.scrollTop = m2.scrollHeight;
-      });
-    } else if (snap.mw) {
-      mw.scrollTop = snap.mw.top;
-    }
+  if (snap.focused) {
+    const inp = document.getElementById(snap.focused);
+    if (inp) { inp.focus(); try { inp.setSelectionRange(inp.value.length, inp.value.length); } catch (_) {} }
   }
-  wbPanelScrollBottom = false;
 }
-// 重绘决策面板但不丢输入/焦点/滚动（snapshot → render → restore）。
+// 重绘决策面板但不丢待决问题的作答输入（snapshot → render → restore）。
 function wbRerenderPanel() {
   const snap = wbSnapshotPanel();
   renderWbPanel();
@@ -1266,12 +1276,243 @@ function wbPanelSigFor(d) {
   if (!d) return "";
   const it = wbItems.find(x => x.session.id === d.id);
   const st = it ? it.status : d.status;
-  const model = (d.session && d.session.model && d.session.model.id) || "";
-  return [d.id, st, model,
+  const s = d.session || {};
+  const model = (s.model && s.model.id) || "";
+  const share = (s.share && s.share.url) ? 1 : 0;
+  return [d.id, st, model, share, s.title || s.slug || "", s.agent || wbAgentChoice[d.id] || "",
     (d.pending || []).map(q => q.id).join(","),
     (d.permissions || []).map(p => p.id).join(","),
-    (d.recent || []).map(m => m.role + ":" + m.text.slice(0, 60)).join("|"),
   ].join("\u0001");
+}
+
+/* ---- 对话区（SBChat.ChatView）装配 ---- */
+// 对话区一次性挂在 #wbChat 上：外壳（标题栏 / 待决卡片）重绘不得销毁该节点，
+// 否则逐 token 增量与输入焦点会被打断。
+function wbEnsureChat() {
+  const host = document.getElementById("wbChat");
+  if (!host || !window.SBChat) return null;
+  if (wbChat && wbChat.host === host) return wbChat;
+  wbChat = new SBChat.ChatView();
+  wbChat.mount(host, wbChatCtx());
+  wbSyncStream();
+  return wbChat;
+}
+// SSE 通道只在「停在工作台 + 已打开会话」时保持：/api/stream 后端有并发上限，
+// 切页 / 关面板立即退订，避免长期占用一条上游连接。
+function wbStreamCred() {
+  if (session) return "session=" + encodeURIComponent(session);
+  const t = localStorage.getItem(APP_TOKEN_KEY) || "";
+  return t ? "token=" + encodeURIComponent(t) : "";
+}
+function wbSyncStream() {
+  const page = document.getElementById("page-workbench");
+  const want = !!window.SBChat && !!wbSelected && !!wbChat && page && !page.classList.contains("hidden");
+  if (want && !wbChatUnsub) {
+    SBChat.Bus.cred = wbStreamCred;
+    wbChatUnsub = SBChat.Bus.subscribe(wbOnStream);
+  } else if (!want && wbChatUnsub) {
+    wbChatUnsub();
+    wbChatUnsub = null;
+  }
+}
+// SSE 事件入口：先交给对话区做增量渲染，再补列表/未读所需的状态副作用。
+function wbOnStream(obj) {
+  if (!wbChat) return;
+  try { wbChat.onEvent(obj); } catch (_) { /* 单条事件异常不应断流 */ }
+}
+function wbChatCtx() {
+  const sid = () => wbSelected;
+  const curSession = () => {
+    const it = wbItems.find(x => x.session.id === wbSelected);
+    return (it && it.session) || (wbPanelData && wbPanelData.session) || {};
+  };
+  return {
+    api,
+    toast,
+    dirHeaders: () => wbDirHeaders(wbCurrentDir()),
+    session: curSession,
+    isBusy: () => {
+      const it = wbItems.find(x => x.session.id === wbSelected);
+      const st = it ? it.status : (wbPanelData && wbPanelData.status) || "idle";
+      return st === "busy" || st === "retry";
+    },
+    isSending: () => wbSending,
+    confirm: (title, body) => window.confirm(title + "\n" + (body || "")),
+    copyText: (text) => wbCopyText(text, "已复制到剪贴板"),
+    openSession: (id) => openWbPanel(id),
+    agents: () => wbAgents.map(a => a.name),
+    modelOptions: () => wbModelOptions(),
+    contextBudget: () => wbContextBudget(),
+    send: (body) => wbSendPrompt(body),
+    sent: () => { wbStatuses[sid()] = { type: "busy" }; wbScheduleRenderList(); },
+    abort: () => wbAbortWbSession(sid()),
+    command: (name, args) => wbRunWbCommand(sid(), name, args),
+    revert: (turn) => wbRevertTo(turn),
+    regenerate: (turn) => wbRegenerate(turn),
+    switchModel: (value) => wbModelChangeValue(value),
+    switchAgent: (name) => wbAgentChange(name),
+    findFiles: (q) => wbFindFiles(q),
+    listCommands: () => wbListCommands(),
+    recognize: (onText) => wbRecognize(onText),
+    statusChanged: (st) => {
+      const id = sid();
+      if (!id) return;
+      wbStatuses[id] = { type: st === "retry" ? "retry" : (st === "busy" ? "busy" : "idle") };
+      wbScheduleRenderList();
+    },
+  };
+}
+// 上下文预算：取当前会话模型在 /config/providers 中声明的 context 上限。
+function wbContextBudget() {
+  const s = (wbPanelData && wbPanelData.session) || {};
+  const mid = modelId(s.model);
+  const pid = (s.model && s.model.providerID) || "";
+  for (const p of (wbProviders || [])) {
+    if (pid && p.id !== pid) continue;
+    const m = (p.models || []).find(x => x.id === mid);
+    if (m && m.context) return m.context;
+  }
+  return 0;
+}
+async function wbFindFiles(q) {
+  const dir = wbCurrentDir();
+  const url = `/api/opencode/find/file?query=${encodeURIComponent(q)}`
+    + (dir ? "&directory=" + encodeURIComponent(dir) : "");
+  const res = await api(url, { headers: appHeaders() });
+  if (!res.ok) return [];
+  const data = await res.json().catch(() => []);
+  return (Array.isArray(data) ? data : []).filter(x => typeof x === "string");
+}
+let wbCommandsCache = null;
+async function wbListCommands() {
+  if (wbCommandsCache) return wbCommandsCache;
+  const res = await api("/api/opencode/command", { headers: appHeaders() }).catch(() => null);
+  if (!res || !res.ok) return [];
+  const data = await res.json().catch(() => []);
+  wbCommandsCache = (Array.isArray(data) ? data : []).filter(c => c && c.name);
+  return wbCommandsCache;
+}
+// 语音输入：对齐 App ServerAsrRecorder —— 16kHz 单声道 PCM16LE 裸字节，
+// 200ms（3200 样本）一片推到 /api/stt/sessions/{id}/chunks，响应体即累积文本，
+// 松手后 /finish 取终稿、再交 /refine 用大模型校对（后端永不失败，兜底本地规则）。
+// 注意：整棵 /api/stt 只认 Authorization: Bearer（requireToken），web session 无效。
+const STT_RATE = 16000;
+const STT_CHUNK_SAMPLES = 3200;
+const STT_MAX_FAILURES = 3;
+
+async function wbRecognize(onText) {
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) throw new Error("浏览器不支持录音");
+  const token = localStorage.getItem(APP_TOKEN_KEY) || "";
+  if (!token) throw new Error("未配置 APP Token，无法使用服务端识别");
+  const bearer = { "Content-Type": "application/json", "Authorization": "Bearer " + token };
+  const octet = { "Content-Type": "application/octet-stream", "Authorization": "Bearer " + token };
+
+  const csRes = await fetch("/api/stt/sessions", { method: "POST", headers: bearer });
+  if (csRes.status === 503) throw new Error("后端未配置语音识别引擎");
+  if (!csRes.ok) throw new Error("识别会话创建失败 (" + csRes.status + ")");
+  const sid = ((await csRes.json().catch(() => ({}))) || {}).session_id || "";
+  if (!sid) throw new Error("识别会话创建失败");
+
+  const stream = await navigator.mediaDevices.getUserMedia({
+    audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true },
+  });
+  const AC = window.AudioContext || window.webkitAudioContext;
+  if (!AC) { stream.getTracks().forEach(t => t.stop()); throw new Error("浏览器不支持音频采集"); }
+  let ctx = null;
+  try { ctx = new AC({ sampleRate: STT_RATE }); } catch (_) { ctx = new AC(); }
+  const ratio = ctx.sampleRate / STT_RATE;
+
+  let tail = [];            // 重采样后未满一片的样本，留待下一次
+  let failures = 0;
+  let stopped = false;
+  let lastText = "";
+  let chain = Promise.resolve();   // 分片严格串行：乱序会让引擎拼出颠倒的文本
+
+  const sendChunk = (samples) => {
+    const pcm = new Int16Array(samples);
+    for (let i = 0; i < samples.length; i++) {
+      const s = Math.max(-1, Math.min(1, samples[i]));
+      pcm[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
+    }
+    chain = chain.then(async () => {
+      if (stopped) return;
+      let res;
+      try {
+        res = await fetch("/api/stt/sessions/" + encodeURIComponent(sid) + "/chunks",
+          { method: "POST", headers: octet, body: pcm.buffer });
+      } catch (_) { res = null; }
+      if (!res || !res.ok) {
+        if (++failures >= STT_MAX_FAILURES) { stopped = true; toast("识别中断", "语音识别请求连续失败", "crit"); }
+        return;
+      }
+      failures = 0;
+      const d = await res.json().catch(() => ({}));
+      const t = String(d.text || "").trim();
+      if (t && t !== lastText) { lastText = t; onText(t, false); }
+    });
+  };
+
+  const src = ctx.createMediaStreamSource(stream);
+  // ScriptProcessor 虽已标记废弃，但仍是唯一无需额外 worklet 文件的可行方案。
+  const proc = ctx.createScriptProcessor(4096, 1, 1);
+  let pos = 0;              // 上次读取的整数样本位，保证重采样相位连续
+  proc.onaudioprocess = (e) => {
+    if (stopped) return;
+    const input = e.inputBuffer.getChannelData(0);
+    const out = [];
+    let p = pos;
+    for (; p < input.length; p += ratio) {
+      const i = Math.floor(p), f = p - i;
+      const a = input[i];
+      const b = i + 1 < input.length ? input[i + 1] : a;
+      out.push(a + (b - a) * f);
+    }
+    pos = p - input.length;   // 落在下一段缓冲里的相位
+    tail = tail.concat(out);
+    while (tail.length >= STT_CHUNK_SAMPLES) {
+      sendChunk(tail.slice(0, STT_CHUNK_SAMPLES));
+      tail = tail.slice(STT_CHUNK_SAMPLES);
+    }
+  };
+  src.connect(proc); proc.connect(ctx.destination);
+
+  const teardown = async () => {
+    stopped = true;
+    try { proc.disconnect(); src.disconnect(); } catch (_) {}
+    stream.getTracks().forEach(t => t.stop());
+    try { await ctx.close(); } catch (_) {}
+  };
+
+  return {
+    stop: async () => {
+      if (tail.length) { sendChunk(tail); tail = []; }
+      await chain;                       // 等最后一片落账，否则 finish 会丢尾部
+      const wasBroken = failures >= STT_MAX_FAILURES;
+      await teardown();
+      if (wasBroken) return;
+      try {
+        const fr = await fetch("/api/stt/sessions/" + encodeURIComponent(sid) + "/finish",
+          { method: "POST", headers: bearer });
+        if (!fr.ok) throw new Error("finish " + fr.status);
+        let text = String(((await fr.json().catch(() => ({}))) || {}).text || "").trim();
+        if (!text) { toast("未识别到内容", "请靠近麦克风再试一次", "warn"); return; }
+        onText(text, true);
+        // 流式识别常有重字与同音错字，交给大模型就地校对后替换（与 App 一致）。
+        const rr = await fetch("/api/stt/refine", { method: "POST", headers: bearer, body: JSON.stringify({ text }) });
+        if (rr.ok) {
+          const rd = await rr.json().catch(() => ({}));
+          const polished = String(rd.text || "").trim();
+          if (polished && polished !== text) onText(polished, true);
+        }
+      } catch (e) {
+        toast("识别失败", String(e && e.message || e), "crit");
+      }
+    },
+    cancel: async () => {
+      await teardown();
+      fetch("/api/stt/sessions/" + encodeURIComponent(sid), { method: "DELETE", headers: bearer }).catch(() => {});
+    },
+  };
 }
 
 // 拉取可切换的 provider + 模型列表（懒加载并缓存；失败只尝试一次，避免每次刷新重复打接口）。
@@ -1290,6 +1531,9 @@ async function ensureWbProviders(force) {
         id: m.id,
         name: m.name || m.id,
         variant: m.variant || "default",
+        // limit.context 决定上下文占用百分比；capabilities.attachment 决定能否带附件。
+        context: (m.limit && m.limit.context) || 0,
+        attachment: !!(m.capabilities && m.capabilities.attachment),
       })),
     })).filter(p => p.models.length);
     wbProviders = list;
@@ -1300,52 +1544,88 @@ async function ensureWbProviders(force) {
     return wbProviders;
   }
 }
-// 渲染「模型」下拉选项：按 provider 分组；当前会话模型不在列表时额外补一项。
-function wbModelOptions(curModelId) {
+// 当前会话生效的模型选择值（providerID␁modelID␁variant），供下拉回填比对。
+function wbSessionModelValue() {
+  const m = (wbPanelData && wbPanelData.session && wbPanelData.session.model) || {};
+  if (!m.id) return "";
+  return (m.providerID || "") + "\u0001" + m.id + "\u0001" + (m.variant || "default");
+}
+// 渲染「模型」下拉选项：按 provider 分组并选中当前会话模型；
+// 当前模型不在列表时额外补一项（否则下拉会假装选中了第一个模型）。
+function wbModelOptions() {
   const list = wbProviders;
-  if (!list) return `<option value="" disabled>加载模型列表…</option>`;
+  // disabled 且无 selected 时浏览器会把下拉渲染成空白，用户看不到「正在加载」提示。
+  if (!list) return `<option value="" disabled selected>加载模型列表…</option>`;
+  const want = wbSessionModelValue();
   let html = "";
-  const curPid = (wbPanelData && wbPanelData.session && wbPanelData.session.model && wbPanelData.session.model.providerID) || "";
-  const curMid = curModelId || (wbPanelData && wbPanelData.session && wbPanelData.session.model && wbPanelData.session.model.id) || "";
   let found = false;
   for (const p of list) {
     const opts = p.models.map(m => {
-      if (m.id === curMid && p.id === curPid) found = true;
-      const label = `${m.name} (${p.id})`;
-      return `<option value="${escapeHtml(p.id + "\u0001" + m.id + "\u0001" + m.variant)}">${escapeHtml(label)}</option>`;
+      const v = p.id + "\u0001" + m.id + "\u0001" + m.variant;
+      if (v === want) found = true;
+      return `<option value="${escapeHtml(v)}"${v === want ? " selected" : ""}>${escapeHtml(m.name + " (" + p.id + ")")}</option>`;
     }).join("");
     html += `<optgroup label="${escapeHtml(p.name)}">${opts}</optgroup>`;
   }
-  if (!found && curMid) {
-    const variant = (wbPanelData && wbPanelData.session && wbPanelData.session.model && wbPanelData.session.model.variant) || "default";
-    html = `<option value="${escapeHtml(curPid + "\u0001" + curMid + "\u0001" + variant)}" selected>${escapeHtml(curMid)}（当前，未在列表）</option>` + html;
+  if (!found && want) {
+    const seg = want.split("\u0001");
+    html = `<option value="${escapeHtml(want)}" selected>${escapeHtml(seg[1] + "（当前，未在列表）")}</option>` + html;
   }
   return html;
 }
 // 模型下拉 change：POST /api/session/{id}/model 切换并刷新面板。
-async function wbModelChange(sel) {
-  const v = sel.value;
-  if (!v) return;
+// body 为扁平 V2ModelRef（providerID/modelID/variant），与 App switchSessionModelV2 一致；
+// directory 走 query 参数。
+async function wbModelChangeValue(v) {
+  const id = wbSelected;
+  if (!id || !v) return;
   const [providerID, modelID, variant] = v.split("\u0001");
   if (!providerID || !modelID) return;
-  const dir = (wbPanelData && wbPanelData.session && wbPanelData.session.directory) || "";
-  // 模型切换的 directory 以 query 参数传递（与 App switchSessionModelV2 一致）。
-  const url = `/api/opencode/api/session/${encodeURIComponent(wbSelected)}/model` + (dir ? "?directory=" + encodeURIComponent(dir) : "");
-  const body = JSON.stringify({ model: { id: modelID, providerID, variant: variant || "default" } });
-  const res = await api(url, { method: "POST", headers: appHeaders(), body });
-  if (!res.ok) {
-    toast("切换失败", `模型切换未生效 (${res.status})`, "crit");
-    // 重绘面板把下拉恢复到实际生效的模型（指纹包含 model，refreshWbPanel 会跟进）。
-    wbRerenderPanel();
+  const dir = wbCurrentDir();
+  const url = `/api/opencode/api/session/${encodeURIComponent(id)}/model` + (dir ? "?directory=" + encodeURIComponent(dir) : "");
+  const body = JSON.stringify({ providerID, modelID, variant: variant || "default" });
+  const res = await api(url, { method: "POST", headers: appHeaders(), body }).catch(() => null);
+  if (!res || !res.ok) {
+    toast("切换失败", `模型切换未生效 (${res ? res.status : "网络错误"})`, "crit");
+    if (wbChat) wbChat.refreshSelectors();
     loadWorkbench();
     return;
   }
   toast("已切换", `已切换到 ${modelID}`, "info");
+  const s = (wbItems.find(x => x.session.id === id) || {}).session;
+  if (s) s.model = { id: modelID, providerID, variant: variant || "default" };
   if (wbPanelData && wbPanelData.session) {
     wbPanelData.session.model = { id: modelID, providerID, variant: variant || "default" };
   }
+  if (wbChat) wbChat.refreshSelectors();
   wbRerenderPanel();
-  loadWorkbench();
+}
+// Agent 切换：POST /api/session/{id}/agent（App switchSessionAgentV2 同契约）。
+// 失败时仅记到本地选择（下一次 prompt 仍会带上 agent），不把下拉重置回错误值。
+async function wbAgentChange(name) {
+  const id = wbSelected;
+  if (!id || !name) return;
+  wbAgentChoice[id] = name;
+  const dir = wbCurrentDir();
+  const url = `/api/opencode/api/session/${encodeURIComponent(id)}/agent` + (dir ? "?directory=" + encodeURIComponent(dir) : "");
+  const res = await api(url, { method: "POST", headers: appHeaders(), body: JSON.stringify({ agent: name }) }).catch(() => null);
+  if (!res || !res.ok) {
+    toast("切换未生效", `Agent ${name} 未能切换（发送时仍会带上）`, "warn");
+    return;
+  }
+  const s = (wbItems.find(x => x.session.id === id) || {}).session;
+  if (s) s.agent = name;
+  if (wbPanelData && wbPanelData.session) wbPanelData.session.agent = name;
+  wbRerenderPanel();
+}
+// 可选 Agent 列表（GET /agent），只保留 primary/非隐藏（同 App 模式选择器口径）。
+async function ensureWbAgents() {
+  if (wbAgents.length) return wbAgents;
+  const res = await api("/api/opencode/agent", { headers: appHeaders() }).catch(() => null);
+  if (!res || !res.ok) return [];
+  const data = await res.json().catch(() => []);
+  wbAgents = (Array.isArray(data) ? data : []).filter(a => a && a.name && !a.hidden && a.mode !== "subagent");
+  return wbAgents;
 }
 
 // 归并子会话的忙/待决问题/待授权操作到父会话（口径与 App 工作台一致）。
@@ -1852,63 +2132,52 @@ function handleWbPush(ev) {
   refreshWbStats();
 }
 
-/* ---- 决策面板 ---- */
-function parseWbMessages(msgs) {
-  const list = Array.isArray(msgs) ? msgs : [];
-  // 最近 N 条有文本的消息，接口返回按时间从旧到新；收集时倒序遍历取「最新在前」。
-  const newestFirst = [];
-  for (let i = list.length - 1; i >= 0; i--) {
-    const m = list[i];
-    if (!m) continue;
-    const text = wbMsgText(m);
-    if (!text) continue;
-    newestFirst.push({
-      role: (m.info && m.info.role === "assistant") ? "assistant" : "user",
-      text,
-      ts: (m.info && m.info.time && m.info.time.created) || 0,
-    });
-    if (newestFirst.length >= WB_RECENT) break;
-  }
-  // 展示时再倒回来，保证聊天按时间从上往下（旧在上、新在下）。
-  const newestAsstIdx = newestFirst.findIndex(x => x.role === "assistant");
-  const chronological = newestFirst.slice().reverse();
-  const newestAsstChronoIdx = newestAsstIdx >= 0 ? chronological.length - 1 - newestAsstIdx : -1;
-  const recent = chronological.map((m, idx) => {
-    const full = m.role === "assistant" && idx === newestAsstChronoIdx;
-    return full
-      ? { ...m, full: true, clipped: false }
-      : { ...m, full: false, clipped: m.text.length > WB_MSG_CLIP, text: m.text.slice(0, WB_MSG_CLIP) };
-  });
-  return { recent };
-}
+/* ---- 决策面板（外壳；对话区由 SBChat.ChatView 托管） ---- */
 function wbMsgText(m) {
   return (m.parts || []).filter(p => p && p.type === "text" && !p.synthetic && !p.ignored && p.text).map(p => p.text).join("\n").trim();
 }
+// #wbPanel 的固定骨架只建一次：外壳写 #wbShell，对话区 #wbChat 作为兄弟节点，
+// 外壳重绘不会销毁对话区 DOM。
+function wbPanelSkeleton() {
+  const panel = document.getElementById("wbPanel");
+  if (panel.querySelector("#wbShell")) return panel;
+  panel.innerHTML = `<div class="wb-shell" id="wbShell"></div><div class="wb-chat" id="wbChat"></div>`;
+  return panel;
+}
 function openWbPanel(id) {
   const switched = wbSelected !== id;
+  if (!id) { closeWbPanel(); return; }
   wbSelected = id;
   wbMarkRead(id);
+  wbPanelSkeleton();
   document.getElementById("wbPanelPlaceholder").classList.add("hidden");
   document.getElementById("wbPanel").classList.remove("hidden");
   if (switched) {
     // 切会话时先清空为加载态，避免显示上一个会话的内容。
-    wbPanelData = { id, loading: true, recent: [], pending: [], permissions: [], status: "", session: null };
+    wbPanelData = { id, loading: true, pending: [], permissions: [], status: "", session: null };
     // 切换会话时清掉上一会话的待决问题作答暂存。
     wbQAnswers = {};
-    wbMoreMsgs = false;
     wbRenaming = false;
     wbCompacting = false;
-    wbPanelScrollBottom = true;
     renderWbPanel();
+    const chat = wbEnsureChat();
+    if (chat) { ensureWbAgents().then(() => chat.refreshSelectors()); chat.open(id); }
+  } else if (wbChat) {
+    wbChat.renderSelectors();
   }
   renderWbList();
   refreshWbPanel(id, true);
+  wbSyncStream();
 }
 function closeWbPanel() {
   wbSelected = null;
   wbPanelData = null;
-  document.getElementById("wbPanel").classList.add("hidden");
-  document.getElementById("wbPanel").innerHTML = "";
+  wbChat = null;
+  wbSyncStream();
+  wbPanelFetching = null;
+  const panel = document.getElementById("wbPanel");
+  panel.classList.add("hidden");
+  panel.innerHTML = "";
   document.getElementById("wbPanelPlaceholder").classList.remove("hidden");
   renderWbList();
 }
@@ -1923,60 +2192,37 @@ async function refreshWbPanel(id, force) {
   if (!force && wbPanelFetching === id) return;
   wbPanelFetching = id;
   try {
-    let msgs = [];
-    try {
-      const res = await api(`/api/opencode/session/${encodeURIComponent(id)}/message?limit=${WB_PANEL_LIMIT}`, { headers: appHeaders() });
-      if (res.ok) {
-        const data = await res.json();
-        msgs = Array.isArray(data) ? data : (data.messages || []);
-      }
-    } catch (e) { if (e.message === "unauthorized") return; }
     if (id !== wbSelected) return;
     if (!wbItems.length) wbItems = buildWbItems();
     const item = wbItems.find(x => x.session.id === id);
-    const parsed = parseWbMessages(msgs);
     const newData = {
       id,
-      recent: parsed.recent,
       pending: (item && item.pending) || [],
       permissions: (item && item.permissions) || [],
       status: item ? item.status : "idle",
-      session: item ? item.session : null,
+      session: item ? item.session : (wbPanelData && wbPanelData.session) || null,
     };
-    // 拉取后比较：内容没变化才跳过重绘。先拉后比才能发现「上游新增了消息」
-    // （旧逻辑在拉取前用旧面板数据比较，新增消息永远无法触发刷新）。
+    // 拉取后比较：内容没变化才跳过重绘（对话消息由 ChatView / SSE 负责，不在此拉取）。
     if (!force && wbPanelData && wbPanelData.id === id && wbPanelSigFor(wbPanelData) === wbPanelSigFor(newData)) return;
-    // 用户在快捷回复输入框里打字时暂缓整块重绘，避免抢走焦点/中断输入；
-    // 等输入结束（失焦）后下一次轮询再渲染新内容。强制刷新（如发送后）不受影响。
-    if (!force) {
-      const ta = document.getElementById("wbReplyInput");
-      if (ta && document.activeElement === ta) return;
-    }
     wbPanelData = newData;
     const snap = wbSnapshotPanel();
     renderWbPanel();
     wbRestorePanel(snap);
+    if (wbChat) wbChat.renderSelectors();
     // 模型下拉首次打开时后台加载 provider 列表，加载完仅重绘一次（保留输入）。
-    if (wbProvidersState === "idle") {
-      ensureWbProviders().then(() => {
-        if (wbSelected && wbPanelData && wbPanelData.id === wbSelected) {
-          const s2 = wbSnapshotPanel();
-          renderWbPanel();
-          wbRestorePanel(s2);
-        }
-      });
-    }
+    if (wbProvidersState === "idle") ensureWbProviders().then(() => { if (wbChat) wbChat.renderSelectors(); });
   } finally {
     if (wbPanelFetching === id) wbPanelFetching = null;
   }
 }
 function renderWbPanel() {
   wbMoreOpen = false;
-  const panel = document.getElementById("wbPanel");
+  const panel = wbPanelSkeleton();
+  const shell = document.getElementById("wbShell");
   const d = wbPanelData;
-  if (!d) { panel.innerHTML = ""; return; }
+  if (!d) { shell.innerHTML = ""; return; }
   if (d.loading || !d.session) {
-    panel.innerHTML = `<div class="wb-placeholder">加载中…</div>`;
+    shell.innerHTML = `<div class="wb-placeholder">加载中…</div>`;
     wbPanelSig = wbPanelSigFor(d);
     return;
   }
@@ -1990,35 +2236,20 @@ function renderWbPanel() {
   const model = modelId(s.model);
   const agent = s.agent ? String(s.agent) : "";
   const metaBits = [];
-  if (model) metaBits.push(`模型 ${escapeHtml(model)}`);
-  if (agent) metaBits.push(`Agent ${escapeHtml(agent)}`);
-  if (s.id) metaBits.push(`<span class="mono" style="font-size:10px">${escapeHtml(String(s.id).slice(0, 18))}</span>`);
-  if (s.time && s.time.created) metaBits.push(`创建 ${escapeHtml(new Date(s.time.created).toLocaleString())}`);
-  if (s.time && s.time.updated) metaBits.push(escapeHtml(new Date(s.time.updated).toLocaleString()));
+  if (model) metaBits.push(`<span class="chip" title="会话模型"><i>模型</i>${escapeHtml(model)}</span>`);
+  if (agent) metaBits.push(`<span class="chip" title="会话 Agent"><i>Agent</i>${escapeHtml(agent)}</span>`);
+  if (dir) metaBits.push(`<span class="chip" title="工作目录"><i>目录</i>${escapeHtml(dir)}</span>`);
+  if (s.id) metaBits.push(`<span class="chip mono" title="会话 ID"><i>ID</i>${escapeHtml(String(s.id).slice(0, 18))}</span>`);
   const statusBadgeCls = status === "question" ? "question" : (status === "busy" || status === "retry") ? "busy" : "idle";
   const isBusyForAct = status === "busy" || status === "retry";
   const shareUrl = (s.share && s.share.url) || "";
   const qhtml = renderWbQuestions();
   const permHtml = renderWbPermissions(d.permissions || []);
-  const total = d.recent.length;
-  const visCount = wbMoreMsgs ? total : Math.min(WB_RECENT_SHOW, total);
-  const hiddenCount = total - visCount;
-  // 聊天旧→新（上→下），默认展示最新几条；更早的在顶部展开。
-  const visMsgs = d.recent.slice(total - visCount);
-  const msgs = visMsgs.map(m => {
-    const t = wbTimeFormat(m.ts);
-    return `<div class="wb-msg ${m.role}${m.clipped ? " clipped" : ""}"><div class="who">${m.role === "assistant" ? "AI" : "我"}</div>${m.role === "assistant" ? `<div class="md">${mdRender(m.text)}</div>` : `<div class="txt">${escapeHtml(m.text)}</div>`}${m.clipped ? "<div class=\"md-clip\">…（已截断）</div>" : ""}${t ? `<div class="time">${t}</div>` : ""}</div>`;
-  }).join("") ||
-    `<div class="wb-placeholder" style="padding:16px">暂无对话内容</div>`;
-  const moreBtn = hiddenCount > 0
-    ? `<div class="wb-more"><button class="ghost sm" data-wb-more="1">加载更早的对话记录（还有 ${hiddenCount} 条）</button></div>`
-    : "";
-  panel.innerHTML = `
+  shell.innerHTML = `
     <div class="wb-panel-head">
       <span class="dot ${escapeHtml(status)}" style="margin-top:7px"></span>
       <div class="t">${escapeHtml(title)}
-        <div class="dir">${escapeHtml(dir) || "-"}</div>
-        ${metaBits.length ? `<div class="meta">${metaBits.join(" · ")}</div>` : ""}
+        ${(s.time && s.time.created) ? `<div class="meta">创建 ${escapeHtml(new Date(s.time.created).toLocaleString())}</div>` : ""}
       </div>
       <div style="display:flex;flex-direction:column;gap:6px;align-items:flex-end;flex-shrink:0">
         <span class="badge ${statusBadgeCls}">${wbStatusLabel(status)}</span>
@@ -2032,7 +2263,7 @@ function renderWbPanel() {
               <button data-wb-action="reload">重新加载</button>
               <button data-wb-action="fork">Fork 会话</button>
               <button data-wb-action="undo" ${isBusyForAct ? "disabled" : ""}>撤销上一条</button>
-              <button data-wb-action="redo" ${isBusyForAct ? "disabled" : ""}>重做</button>
+              <button data-wb-action="redo" ${isBusyForAct ? "" : "disabled"}>重做</button>
               <button data-wb-action="review">运行代码审查</button>
               <button data-wb-action="diff">查看更改（diff）</button>
               <button data-wb-action="timeline">会话时间线</button>
@@ -2044,6 +2275,7 @@ function renderWbPanel() {
           </div>
         </div>
       </div>
+      ${metaBits.length ? `<div class="wb-panel-meta">${metaBits.join("")}</div>` : ""}
     </div>
     ${wbRenaming ? `<div class="wb-rename-row">
       <input id="wbRenameInput" maxlength="120" value="${escapeHtml(title)}">
@@ -2051,23 +2283,9 @@ function renderWbPanel() {
       <button class="ghost sm" data-wb-rencancel="1">取消</button>
       <div id="wbRenameMsg" class="msg"></div>
     </div>` : ""}
-    <div class="wb-scroll">
-      <div class="wb-model-row"><span class="lbl">模型</span>
-        <select id="wbModelSelect" onchange="wbModelChange(this)">${wbModelOptions()}</select>
-      </div>
-            ${permHtml ? `<div class="wb-block"><h4>待授权操作<span class="info">${(d.permissions || []).length} 项</span></h4>${permHtml}</div>` : ""}
+    <div class="wb-blocks${(permHtml || qhtml) ? "" : " empty"}">
+      ${permHtml ? `<div class="wb-block"><h4>待授权操作<span class="info">${(d.permissions || []).length} 项</span></h4>${permHtml}</div>` : ""}
       ${qhtml ? `<div class="wb-block"><h4>待决问题<span class="info">${(d.pending || []).reduce((n, q) => n + (q.questions || []).length, 0)} 个</span></h4>${qhtml}</div>` : ""}
-      <div class="wb-block wb-msg-block"><h4>最近对话<span class="info">${wbMoreMsgs ? `全部 ${d.recent.length} 条` : `最新 ${visCount} / ${d.recent.length} 条`}</span></h4>
-        ${moreBtn}
-        <div class="wb-msgwrap">${msgs}</div>
-      </div>
-      <div class="wb-block">
-        <h4>快捷回复</h4>
-        <div class="wb-reply">
-          <textarea id="wbReplyInput" placeholder="给该会话发送指令…（Enter 发送，Shift+Enter 换行）"></textarea>
-          <button class="send" id="wbSendBtn" onclick="sendWbReply()">发送</button>
-        </div>
-      </div>
     </div>`;
   panel.onclick = (e) => {
     const morebtn = e.target.closest("[data-wb-morebtn]");
@@ -2092,19 +2310,6 @@ function renderWbPanel() {
     if (rens) { wbRenameSession(d.id); return; }
     const del = e.target.closest("[data-wb-del]");
     if (del) { deleteWbSession(del.dataset.wbDel); return; }
-    const more = e.target.closest("[data-wb-more]");
-    if (more) {
-      // 更早的消息插入在顶部：记录旧滚动锚点，展开后视角保持在原位置。
-      const mw = document.querySelector("#wbPanel .wb-msgwrap");
-      const anchor = mw ? { top: mw.scrollTop, oldH: mw.scrollHeight } : null;
-      wbMoreMsgs = true;
-      wbRerenderPanel();
-      if (anchor) {
-        const mw2 = document.querySelector("#wbPanel .wb-msgwrap");
-        if (mw2) mw2.scrollTop = anchor.top + (mw2.scrollHeight - anchor.oldH);
-      }
-      return;
-    }
     const opt = e.target.closest("[data-qopt]");
     if (opt) { wbQToggle(opt.dataset.qopt, Number(opt.dataset.qidx), opt.dataset.label); return; }
     const rej = e.target.closest("[data-qreject]");
@@ -2114,38 +2319,34 @@ function renderWbPanel() {
     const cus = e.target.closest("[data-qcustom]");
     if (cus) { wbQCustom(cus.dataset.qcustom, Number(cus.dataset.qidx)); return; }
   };
-  const ta = document.getElementById("wbReplyInput");
-  if (ta) ta.addEventListener("keydown", (ev) => {
-    // isComposing 判断：中文输入法选词时按 Enter 不应发送。
-    if (ev.key === "Enter" && !ev.shiftKey && !ev.isComposing) { ev.preventDefault(); sendWbReply(); }
-  });
-  if (ta) ta.addEventListener("input", () => wbAutosizeReply(ta));
-  if (ta) wbAutosizeReply(ta);
-  const msel = document.getElementById("wbModelSelect");
-  if (msel && s.model) {
-    const want = (s.model.providerID || "") + "\u0001" + (s.model.id || "") + "\u0001" + (s.model.variant || "default");
-    if (want !== "\u0001\u0001") msel.value = want;
-  }
+  // 自定义回答：Enter 等价于点「填入 / 提交」，避免多一步鼠标操作。
+  panel.onkeydown = (e) => {
+    if (e.key !== "Enter" || e.isComposing) return;
+    const inp = e.target.closest("[id^='wbQInput_']");
+    if (!inp) return;
+    e.preventDefault();
+    const m = inp.id.match(/^wbQInput_(.+)_(\d+)$/);
+    if (!m) return;
+    wbQCustom(m[1], Number(m[2]));
+  };
   wbPanelSig = wbPanelSigFor(wbPanelData);
 }
-// 渲染待决问题。一个 request 可含多个 question，answers 数组须按序一一对应，
-// 因此把同一 request 的问题聚合成一组，逐题选择后一次性提交全部作答。
-// 点选项只做本地暂存/高亮，绝不立即提交（避免误触导致 request 提前被消费）。
-// 渲染待授权操作。每条权限显示 permission 类型 + patterns，提供 允许一次 /
-// 始终允许 / 拒绝 三个动作（与 App replyToPermission 契约一致）。
+// 渲染待授权操作。每条权限显示 permission 类型 + patterns，提供 拒绝 /
+// 仅一次 / 始终允许 三个动作（顺序与 App 一致，「始终允许」需二次确认）。
 function renderWbPermissions(perms) {
   return (perms || []).map(p => {
     const patterns = (p.patterns || []).join("、") || "-";
     const tool = (p.tool && (p.tool.type || p.tool.id || p.tool.name)) ? ` · ${escapeHtml(p.tool.type || p.tool.id || p.tool.name)}` : "";
     const always = (p.always || []).join("、");
+    const busy = wbPermBusy.has(p.id);
     return `<div class="wb-qcard" data-wb-permcard>
       <div class="qhead">待授权 · ${escapeHtml(p.permission || "操作")}${tool}<span class="info" style="float:right;text-transform:none">${escapeHtml(p.id || "")}</span></div>
       <div class="q">${escapeHtml(patterns)}</div>
       ${always ? `<div class="muted" style="font-size:11px;margin-top:4px">已始终允许：${escapeHtml(always)}</div>` : ""}
       <div class="wb-qopts">
-        <button data-wb-perm="${escapeHtml(p.id)}" data-reply="once">允许一次</button>
-        <button data-wb-perm="${escapeHtml(p.id)}" data-reply="always">始终允许</button>
-        <button class="reject" data-wb-perm="${escapeHtml(p.id)}" data-reply="reject">拒绝</button>
+        <button class="reject" data-wb-perm="${escapeHtml(p.id)}" data-reply="reject" ${busy ? "disabled" : ""}>拒绝</button>
+        <button data-wb-perm="${escapeHtml(p.id)}" data-reply="once" ${busy ? "disabled" : ""}>仅一次</button>
+        <button class="primary" data-wb-perm="${escapeHtml(p.id)}" data-reply="always" ${busy ? "disabled" : ""}>始终允许</button>
       </div>
     </div>`;
   }).join("");
@@ -2165,19 +2366,39 @@ function wbOwningDir(reqId) {
 }
 // 处理待授权操作：allowed once / always / reject。
 async function wbPermReply(reqId, reply) {
-  const item = wbItems.find(x => x.session.id === wbSelected);
-  const dir = wbOwningDir(reqId) || (item && item.session && item.session.directory) || "";
-  const url = `/api/opencode/permission/${encodeURIComponent(reqId)}/reply` + (dir ? "?directory=" + encodeURIComponent(dir) : "");
-  const res = await api(url, { method: "POST", headers: appHeaders(), body: JSON.stringify({ reply }) });
-  if (!res.ok) { toast("授权失败", "权限回复未送达 (" + res.status + ")", "crit"); return; }
-  toast("已处理", reply === "reject" ? "已拒绝该操作" : (reply === "always" ? "已始终允许" : "已允许一次"), "info");
-  if (wbPanelData && wbPanelData.permissions) {
-    wbPanelData.permissions = wbPanelData.permissions.filter(p => p.id !== reqId);
+  if (!reqId || wbPermBusy.has(reqId)) return;
+  // 与 App 一致：「始终允许」影响后续会话，必须先二次确认，并展示将生效的规则。
+  if (reply === "always") {
+    const item = (wbPermissions[wbSelected] || []).find(x => x.id === reqId)
+      || Object.values(wbPermissions).flat().find(x => x.id === reqId) || {};
+    const always = (item.always || []).join("、");
+    const body = "将来匹配操作可能会自动批准。" + (always ? `\n适用于：${always}` : "");
+    if (!window.confirm("始终允许此权限？\n" + body)) return;
   }
+  wbPermBusy.add(reqId);
   wbRerenderPanel();
-  loadWorkbench();
+  try {
+    const item = wbItems.find(x => x.session.id === wbSelected);
+    const dir = wbOwningDir(reqId) || (item && item.session && item.session.directory) || "";
+    const url = `/api/opencode/permission/${encodeURIComponent(reqId)}/reply` + (dir ? "?directory=" + encodeURIComponent(dir) : "");
+    const res = await api(url, { method: "POST", headers: appHeaders(), body: JSON.stringify({ reply }) });
+    if (!res.ok) { toast("授权失败", "权限回复未送达 (" + res.status + ")", "crit"); return; }
+    toast("已处理", reply === "reject" ? "已拒绝该操作" : (reply === "always" ? "已始终允许" : "已允许一次"), "info");
+    if (wbPanelData && wbPanelData.permissions) {
+      wbPanelData.permissions = wbPanelData.permissions.filter(p => p.id !== reqId);
+    }
+    for (const sid of Object.keys(wbPermissions)) {
+      wbPermissions[sid] = (wbPermissions[sid] || []).filter(p => p.id !== reqId);
+    }
+    wbRerenderPanel();
+    loadWorkbench();
+  } finally {
+    wbPermBusy.delete(reqId);
+  }
 }
 
+// 渲染待决问题。一个 request 可含多个 question，answers 数组须按序一一对应。
+// 仅一问且非多选时点选项即提交；否则逐题暂存（高亮不提交），由底部按钮整体送出。
 function renderWbQuestions() {
   const pending = wbPanelData.pending || [];
   // 清理已不在待决列表里的 request 的暂存作答，避免旧选择残留。
@@ -2186,114 +2407,183 @@ function renderWbQuestions() {
   return pending.map(q => {
     const qs = q.questions || [];
     if (!qs.length) return "";
+    // 与 App 的 isSingle 一致：仅一问且非多选时，点选（或送出自定义答案）即提交。
+    const isSingle = qs.length === 1 && qs[0].multiple !== true;
+    const busy = wbQBusy.has(q.id);
     const sel = (wbQAnswers[q.id] = wbQAnswers[q.id] || qs.map(() => []));
     const cards = qs.map((qu, qi) => {
       const opts = (qu.options || []).map(o => {
         const active = (sel[qi] || []).includes(o.label);
-        return `<button class="wb-qopt${active ? " active" : ""}" data-qopt="${escapeHtml(q.id)}" data-qidx="${qi}" data-label="${escapeHtml(o.label)}">${escapeHtml(o.label)}${o.description ? `<br><span class="muted" style="font-size:11px;font-weight:400">${escapeHtml(o.description)}</span>` : ""}</button>`;
+        return `<button class="wb-qopt${active ? " active" : ""}" data-qopt="${escapeHtml(q.id)}" data-qidx="${qi}" data-label="${escapeHtml(o.label)}" ${busy ? "disabled" : ""}>${escapeHtml(o.label)}${o.description ? `<br><span class="muted" style="font-size:11px;font-weight:400">${escapeHtml(o.description)}</span>` : ""}</button>`;
       }).join("");
       const custom = qu.custom !== false
-        ? `<div class="wb-qcustom"><input id="wbQInput_${escapeHtml(q.id)}_${qi}" placeholder="自定义回答（可选）"><button class="ghost sm" data-qcustom="${escapeHtml(q.id)}" data-qidx="${qi}">填入</button></div>`
+        ? `<div class="wb-qcustom"><input id="wbQInput_${escapeHtml(q.id)}_${qi}" placeholder="${isSingle ? "输入回答后按 Enter 提交" : "自定义回答（可选）"}" ${busy ? "disabled" : ""}><button class="ghost sm" data-qcustom="${escapeHtml(q.id)}" data-qidx="${qi}" ${busy ? "disabled" : ""}>${isSingle ? "提交" : "填入"}</button></div>`
         : "";
       return `<div class="wb-qcard"><div class="qhead">${escapeHtml(qu.header || "AI 提问")}${qs.length > 1 ? ` <span class="muted" style="font-weight:400">${qi + 1}/${qs.length}</span>` : ""}</div><div class="q">${escapeHtml(qu.question)}</div>
         <div class="wb-qopts">${opts}</div>${custom}</div>`;
     }).join("");
+    if (isSingle) {
+      return `<div class="wb-qgroup">${cards}<div class="wb-qsubmit"><span class="muted" style="font-size:11px">点选选项即提交</span><button class="reject" data-qreject="${escapeHtml(q.id)}" ${busy ? "disabled" : ""}>拒绝</button></div></div>`;
+    }
     const answered = sel.filter(a => a && a.length).length;
-    const footer = `<div class="wb-qsubmit"><button class="sm" data-qsubmit="${escapeHtml(q.id)}" ${answered ? "" : "disabled"} title="已作答 ${answered}/${qs.length}">提交回答${qs.length > 1 ? `（${answered}/${qs.length}）` : ""}</button><button class="reject" data-qreject="${escapeHtml(q.id)}">拒绝</button></div>`;
+    const footer = `<div class="wb-qsubmit"><button class="sm" data-qsubmit="${escapeHtml(q.id)}" ${answered && !busy ? "" : "disabled"} title="已作答 ${answered}/${qs.length}">提交回答${qs.length > 1 ? `（${answered}/${qs.length}）` : ""}</button><button class="reject" data-qreject="${escapeHtml(q.id)}" ${busy ? "disabled" : ""}>拒绝</button></div>`;
     return `<div class="wb-qgroup">${cards}${footer}</div>`;
   }).join("");
 }
-// 点击问题选项：单选/多选切换本地暂存（不会立即提交）。
+// 点击问题选项：单选且多问时仅本地暂存；单选且仅一问时点选即提交（与 App 一致）。
 function wbQToggle(reqId, qidx, label) {
   const q = (wbPanelData.pending || []).find(x => x.id === reqId);
-  if (!q) return;
-  const qu = (q.questions || [])[qidx];
+  if (!q || wbQBusy.has(reqId)) return;
+  const qs = q.questions || [];
+  const qu = qs[qidx];
   if (!qu) return;
-  const sel = (wbQAnswers[reqId] = wbQAnswers[reqId] || (q.questions || []).map(() => []));
+  const sel = (wbQAnswers[reqId] = wbQAnswers[reqId] || qs.map(() => []));
   const cur = sel[qidx] || [];
   if (qu.multiple === true) {
     sel[qidx] = cur.includes(label) ? cur.filter(x => x !== label) : [...cur, label];
   } else {
     sel[qidx] = [label];
+    if (qs.length === 1) { postWbAnswer(reqId, [[label]]); return; }
   }
   wbRerenderPanel();
 }
-// 自定义回答「填入」：仅暂存，随「提交回答」一起发出。
-async function wbQCustom(reqId, qidx) {
+// 自定义回答：仅一问单选时直接提交，否则暂存（随「提交回答」一起发出）。
+function wbQCustom(reqId, qidx) {
   const input = document.getElementById("wbQInput_" + reqId + "_" + qidx);
   const v = input ? input.value.trim() : "";
   if (!v) { toast("答复失败", "请先输入回答内容"); return; }
   const q = (wbPanelData.pending || []).find(x => x.id === reqId);
-  if (!q) return;
+  if (!q || wbQBusy.has(reqId)) return;
   const qs = q.questions || [];
   const sel = (wbQAnswers[reqId] = wbQAnswers[reqId] || qs.map(() => []));
   sel[qidx] = [v];
+  if (qs.length === 1 && (qs[0].multiple !== true)) { postWbAnswer(reqId, [[v]]); return; }
   wbRerenderPanel();
 }
-async function wbQSubmit(reqId) {
+function wbQSubmit(reqId) {
   const q = (wbPanelData.pending || []).find(x => x.id === reqId);
-  if (!q) return;
+  if (!q || wbQBusy.has(reqId)) return;
   const qs = q.questions || [];
   const sel = (wbQAnswers[reqId] = wbQAnswers[reqId] || qs.map(() => []));
   // answers 数组长度必须与 questions 一致（未作答的给空数组）。
   const answers = qs.map((_, i) => (sel[i] || []).slice());
   if (!answers.some(a => a.length)) { toast("提交失败", "请至少回答一个问题"); return; }
-  await postWbAnswer(reqId, answers);
+  postWbAnswer(reqId, answers);
 }
 async function postWbAnswer(reqId, answers) {
-  const dir = wbOwningDir(reqId) || (wbPanelData && wbPanelData.session && wbPanelData.session.directory) || "";
-  // 与 App 一致：question reply 的目录以 query 参数传递（x-starburst-directory 头只对 prompt_async 生效）。
-  const url = `/api/opencode/question/${encodeURIComponent(reqId)}/reply` + (dir ? "?directory=" + encodeURIComponent(dir) : "");
-  const res = await api(url, { method: "POST", headers: appHeaders(), body: JSON.stringify({ answers }) });
-  if (!res.ok) { toast("答复失败", "问题回复未送达 (" + res.status + ")", "crit"); return; }
-  toast("已答复", "问题已回复", "info");
-  wbPanelData.pending = wbPanelData.pending.filter(x => x.id !== reqId);
-  delete wbQAnswers[reqId];
+  if (wbQBusy.has(reqId)) return;
+  wbQBusy.add(reqId);
   wbRerenderPanel();
-  loadWorkbench();
+  try {
+    const dir = wbOwningDir(reqId) || (wbPanelData && wbPanelData.session && wbPanelData.session.directory) || "";
+    // 与 App 一致：question reply 的目录以 query 参数传递（x-starburst-directory 头只对 prompt_async 生效）。
+    const url = `/api/opencode/question/${encodeURIComponent(reqId)}/reply` + (dir ? "?directory=" + encodeURIComponent(dir) : "");
+    const res = await api(url, { method: "POST", headers: appHeaders(), body: JSON.stringify({ answers }) });
+    if (!res.ok) { toast("答复失败", "问题回复未送达 (" + res.status + ")", "crit"); return; }
+    toast("已答复", "问题已回复", "info");
+    wbPanelData.pending = wbPanelData.pending.filter(x => x.id !== reqId);
+    for (const sid of Object.keys(wbPending)) {
+      wbPending[sid] = (wbPending[sid] || []).filter(x => x.id !== reqId);
+    }
+    delete wbQAnswers[reqId];
+    wbRerenderPanel();
+    loadWorkbench();
+  } finally {
+    wbQBusy.delete(reqId);
+  }
 }
 async function wbRejectQ(reqId) {
-  const dir = wbOwningDir(reqId) || (wbPanelData && wbPanelData.session && wbPanelData.session.directory) || "";
-  const url = `/api/opencode/question/${encodeURIComponent(reqId)}/reject` + (dir ? "?directory=" + encodeURIComponent(dir) : "");
-  const res = await api(url, { method: "POST", headers: appHeaders() });
-  if (!res.ok) { toast("拒绝失败", "拒绝未送达 (" + res.status + ")", "crit"); return; }
-  toast("已拒绝", "问题已拒绝", "info");
-  wbPanelData.pending = wbPanelData.pending.filter(q => q.id !== reqId);
-  delete wbQAnswers[reqId];
+  if (wbQBusy.has(reqId)) return;
+  wbQBusy.add(reqId);
   wbRerenderPanel();
-  loadWorkbench();
+  try {
+    const dir = wbOwningDir(reqId) || (wbPanelData && wbPanelData.session && wbPanelData.session.directory) || "";
+    const url = `/api/opencode/question/${encodeURIComponent(reqId)}/reject` + (dir ? "?directory=" + encodeURIComponent(dir) : "");
+    const res = await api(url, { method: "POST", headers: appHeaders() });
+    if (!res.ok) { toast("拒绝失败", "拒绝未送达 (" + res.status + ")", "crit"); return; }
+    toast("已拒绝", "问题已拒绝", "info");
+    wbPanelData.pending = wbPanelData.pending.filter(q => q.id !== reqId);
+    for (const sid of Object.keys(wbPending)) {
+      wbPending[sid] = (wbPending[sid] || []).filter(x => x.id !== reqId);
+    }
+    delete wbQAnswers[reqId];
+    wbRerenderPanel();
+    loadWorkbench();
+  } finally {
+    wbQBusy.delete(reqId);
+  }
 }
-async function sendWbReply() {
-  const ta = document.getElementById("wbReplyInput");
-  const text = ta ? ta.value.trim() : "";
-  if (!text || wbSending || !wbSelected) return;
+// 发送对话消息（prompt_async）。返回 true/false 供 ChatView 决定是否撤回乐观气泡。
+async function wbSendPrompt(body) {
+  const id = wbSelected;
+  if (!id || wbSending) return false;
   wbSending = true;
-  const btn = document.getElementById("wbSendBtn");
-  if (btn) btn.disabled = true;
-  const item = wbItems.find(x => x.session.id === wbSelected);
-  const dir = (item && item.session && item.session.directory) || "";
-  const body = {
-    messageId: "wb-" + Date.now().toString(36) + Math.random().toString(36).slice(2, 8),
-    parts: [{ type: "text", text }],
-  };
+  const dir = wbCurrentDir();
   const headers = appHeaders();
   if (dir) headers["x-starburst-directory"] = dir;
   try {
-    const res = await api(`/api/opencode/session/${encodeURIComponent(wbSelected)}/prompt_async`, { method: "POST", headers, body: JSON.stringify(body) });
-    if (!res.ok) { toast("发送失败", "快捷回复未送达 (" + res.status + ")", "crit"); return; }
-    if (ta) ta.value = "";
+    const res = await api(`/api/opencode/session/${encodeURIComponent(id)}/prompt_async`,
+      { method: "POST", headers, body: JSON.stringify(body) });
+    if (!res.ok) { toast("发送失败", "指令未送达 (" + res.status + ")", "crit"); return false; }
+    // 新指令覆盖上一轮未答的提问：服务端驳回 + 本地移除（与 App 行为一致），
+    // 否则切进会话还会看到已经作废的问题卡片。
+    wbDismissPendingQuestions(id);
     // 乐观更新状态：直接写 wbStatuses（列表/面板都从它派生），
-    // 避免被 renderWbList 的重建丢弃，让「处理中」立即生效直到 WS 事件到达。
-    wbStatuses[wbSelected] = { type: "busy" };
+    // 避免被 renderWbList 的重建丢弃，让「处理中」立即生效直到事件到达。
+    wbStatuses[id] = { type: "busy" };
     renderWbList();
-    wbPanelScrollBottom = true;
-    refreshWbPanel(wbSelected, true);
+    return true;
   } catch (e) {
     if (e.message !== "unauthorized") toast("发送失败", e.message || "未知错误", "crit");
+    return false;
   } finally {
     wbSending = false;
-    if (btn) btn.disabled = false;
   }
+}
+// 拒绝该会话（含子会话）的全部待决问题；不阻塞发送主流程。
+function wbDismissPendingQuestions(id) {
+  const childIds = wbSessions.filter(s => s.parentID === id).map(s => s.id);
+  for (const sid of [id, ...childIds]) {
+    const dir = (wbSessions.find(s => s.id === sid) || {}).directory || "";
+    for (const q of (wbPending[sid] || [])) {
+      api(`/api/opencode/question/${encodeURIComponent(q.id)}/reject` + (dir ? "?directory=" + encodeURIComponent(dir) : ""),
+        { method: "POST", headers: appHeaders() }).catch(() => {});
+      delete wbQAnswers[q.id];
+    }
+    wbPending[sid] = [];
+  }
+  if (wbPanelData && wbPanelData.id === id) { wbPanelData.pending = []; wbRerenderPanel(); }
+}
+// 回退到某一轮：POST /session/{id}/revert { messageID }（App revertSession 同契约）。
+async function wbRevertTo(turn) {
+  const id = wbSelected;
+  const mid = turn && (turn.id || (turn.msgIds || [])[0]);
+  if (!id || !mid) return;
+  const dir = wbCurrentDir();
+  const res = await api(`/api/opencode/session/${encodeURIComponent(id)}/revert`,
+    { method: "POST", headers: wbDirHeaders(dir), body: JSON.stringify({ messageID: mid }) }).catch(() => null);
+  if (!res || !res.ok) { toast("回退失败", `revert (${res ? res.status : "网络错误"})`, "crit"); return; }
+  toast("已回退", "该消息之后的内容已撤销，可用「更多 ▾ → 重做」恢复", "info");
+  if (wbChat) wbChat.dropAfter(mid);
+  loadWorkbench();
+}
+// 重新生成：回退到本轮对应的用户指令，再用同样的 parts 重发一次。
+async function wbRegenerate(turn) {
+  const id = wbSelected;
+  if (!id || !wbChat) return;
+  const turns = wbChat.turns;
+  const ix = turns.findIndex(t => t.id === turn.id);
+  let userTurn = null;
+  for (let i = ix - 1; i >= 0; i--) {
+    if (turns[i].role === "user" && turns[i].parts.some(p => p.type === "text" && !p.synthetic)) { userTurn = turns[i]; break; }
+  }
+  if (!userTurn) { toast("无法重新生成", "未找到该轮对应的指令", "warn"); return; }
+  const dir = wbCurrentDir();
+  const res = await api(`/api/opencode/session/${encodeURIComponent(id)}/revert`,
+    { method: "POST", headers: wbDirHeaders(dir), body: JSON.stringify({ messageID: userTurn.id }) }).catch(() => null);
+  if (!res || !res.ok) { toast("重新生成失败", `revert (${res ? res.status : "网络错误"})`, "crit"); return; }
+  wbChat.dropAfter(userTurn.id);
+  wbChat.resendTurn(userTurn.id);
 }
 // 修改会话标题（PATCH /session/{id}，与 App updateSession 契约一致）。
 // 压缩会话：POST /session/{id}/summarize（App summarizeSession 同契约）。
@@ -2322,16 +2612,13 @@ async function wbCompactSession(id) {
     if (!res.ok) { toast("压缩失败", "压缩未生效 (" + res.status + ")", "crit"); return; }
     toast("已压缩", "会话已压缩为摘要", "info");
     renderWbList();
-    refreshWbPanel(id, true);
+    if (wbChat) wbChat.reload();
+    wbScheduleWorkbench();
   } catch (e) {
     if (e.message !== "unauthorized") toast("压缩失败", e.message || "未知错误", "crit");
   } finally {
     wbCompacting = false;
-    if (wbSelected === id) {
-      const snap = wbSnapshotPanel();
-      renderWbPanel();
-      wbRestorePanel(snap);
-    }
+    if (wbSelected === id) wbRerenderPanel();
   }
 }
 
@@ -2406,7 +2693,7 @@ async function wbMoreMenuAction(action) {
   const id = wbSelected;
   if (!id) return;
   wbMoreMenuClose();
-  if (action === "reload") { refreshWbPanel(id, true); toast("已重新加载", "会话信息已刷新", "info"); return; }
+  if (action === "reload") { if (wbChat) wbChat.reload(); refreshWbPanel(id, true); toast("已重新加载", "会话信息已刷新", "info"); return; }
   if (action === "fork") { await wbForkSession(id); return; }
   if (action === "undo") { await wbUndoWbSession(id); return; }
   if (action === "redo") { await wbRedoWbSession(id); return; }
@@ -2447,7 +2734,7 @@ async function wbUndoWbSession(id) {
   const res = await api(`/api/opencode/session/${encodeURIComponent(id)}/revert`, { method: "POST", headers: wbDirHeaders(dir), body: JSON.stringify({ messageID: mid }) });
   if (!res.ok) { toast("撤销失败", "revert (" + res.status + ")", "crit"); return; }
   toast("已撤销", "已回退到上一条消息", "info");
-  refreshWbPanel(id, true);
+  if (wbChat) wbChat.reload();
   loadWorkbench();
 }
 async function wbRedoWbSession(id) {
@@ -2455,27 +2742,31 @@ async function wbRedoWbSession(id) {
   const res = await api(`/api/opencode/session/${encodeURIComponent(id)}/unrevert`, { method: "POST", headers: wbDirHeaders(dir) });
   if (!res.ok) { toast("重做失败", "unrevert (" + res.status + ")", "crit"); return; }
   toast("已重做", "已恢复上一条撤销", "info");
-  refreshWbPanel(id, true);
+  if (wbChat) wbChat.reload();
   loadWorkbench();
 }
 // 运行服务器端命令（如 /review），与 App executeCommand 契约一致。
-async function wbRunWbCommand(id, command) {
+// 返回布尔值：ChatView 据此决定是否撤回乐观气泡 / 把草稿还给输入框。
+async function wbRunWbCommand(id, command, args) {
   const dir = wbCurrentDir();
-  const res = await api(`/api/opencode/session/${encodeURIComponent(id)}/command`, { method: "POST", headers: wbDirHeaders(dir), body: JSON.stringify({ command, arguments: "" }) });
-  if (!res.ok) { toast("命令失败", `/${command} 未生效 (${res.status})`, "crit"); return; }
+  const res = await api(`/api/opencode/session/${encodeURIComponent(id)}/command`,
+    { method: "POST", headers: wbDirHeaders(dir), body: JSON.stringify({ command, arguments: args || "" }) }).catch(() => null);
+  if (!res || !res.ok) { toast("命令失败", `/${command} 未生效 (${res ? res.status : "网络错误"})`, "crit"); return false; }
   toast(`已运行 /${command}`, "命令已下发到会话", "info");
   wbStatuses[id] = { type: "busy" };
   renderWbList();
-  wbPanelScrollBottom = true;
-  refreshWbPanel(id, true);
+  if (wbChat) wbChat.setWorking("命令执行中…");
+  return true;
 }
 async function wbAbortWbSession(id) {
+  if (!id) return;
   const dir = wbCurrentDir();
   const res = await api(`/api/opencode/session/${encodeURIComponent(id)}/abort`, { method: "POST", headers: wbDirHeaders(dir) });
   if (!res.ok) { toast("停止失败", "abort (" + res.status + ")", "crit"); return; }
   toast("已停止", "已发送停止信号", "info");
   wbStatuses[id] = { type: "idle" };
   renderWbList();
+  if (wbChat && wbChat.sessionId === id) wbChat.setWorking("");
   refreshWbPanel(id, true);
 }
 async function wbShareWbSession(id) {
@@ -2611,7 +2902,9 @@ function wbTimelineFromMessages(msgs) {
       if (type === "tool") {
         toolSeq++;
         const state = p.state || {};
-        const st = state.type || "completed";
+        // 上游 ToolState 以 state.status 判别 pending|running|completed|error，
+        // 读 state.type 会恒为 undefined → 所有工具都显示「已完成」。
+        const st = state.status || state.type || "completed";
         const status = st === "running" ? "busy" : (st === "error" || st === "failed") ? "busy" : "idle";
         let summary = p.tool || "";
         const input = state.input || {};
@@ -4463,5 +4756,6 @@ function safeParseJSON(s) { try { return JSON.parse(s); } catch (_) { return nul
 
 /* ---------- 启动 ---------- */
 document.getElementById("appToken").value = localStorage.getItem(APP_TOKEN_KEY) || "";
+initThemePicker();
 renderAuth();
 connectTaskWS();
