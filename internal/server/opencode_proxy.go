@@ -446,6 +446,9 @@ func relayTrimMessageDiffs(w http.ResponseWriter, resp *http.Response, path stri
 	if n > 0 {
 		log.Printf("opencode proxy %s: trimmed summary.diffs from %d message(s)", path, n)
 	}
+	// 裁剪后 body 长度已变，必须丢弃上游 relay 过来的 Content-Length，否则浏览器
+	// 按旧长度等待不完整 body 会报网络错误。Go 会改为 chunked / 自动重算长度。
+	w.Header().Del("Content-Length")
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(resp.StatusCode)
 	_, _ = w.Write(out)
