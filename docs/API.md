@@ -370,9 +370,10 @@ Token 元数据列表（`tokenHash` 永不序列化给客户端）：
 
 ### POST /api/rules（双通道）
 ```json
-{ "name":"每晚测试", "kind":"cron|git|http", "schedule":"5m 或 cron 或 target", "directory":"/path", "prompt":"指令", "enabled":true }
+{ "name":"每晚测试", "kind":"cron|git|http", "schedule":"5m 或 cron 或 target", "directory":"/path", "prompt":"指令", "intelProjectId":1, "enabled":true }
 ```
 - 201 → 完整 Rule 对象（含新生成的 id）
+- `intelProjectId` 非 0 时：触发时改跑**测试智能 run-all 回归**（而非 prompt 任务），`prompt` 可留空；`intelProjectId=0`（默认）时必须有 `prompt`
 
 ### POST /api/rules/generate（双通道）
 自然语言自动生成一条规则草稿（不落库，客户端确认后再走 `POST /api/rules`）。请求：
@@ -528,7 +529,9 @@ data: {"payload":{"type":"message.part.updated","properties":{...}}}
 - `PUT /api/intel/modules/{moduleId}/overrides` `{"role":"业务后端","summary":"…"}` → `{"module":…}`。两个字段都是指针、可只传一个，但**空串等同不传**（无法把覆写改回自动值）；按自然键 `relPath` upsert 成 applied 校正（`kind_role` / `summary`），读取时覆盖自动值。两条写库调用的错误都被丢弃（`_ =`），落库失败也返回 200 + 改过的模块对象。
 - `GET /api/intel/gateway-routes?projectId=` → `{"gatewayRoutes":[{service,uri,pathsJson,source,sourceLine}]}`。`source` 为配置文件/Nacos 来源的是权威结果，`source=llm` 是分析时模型建议补齐的路径。
 - `GET /api/intel/android-bindings?projectId=` / `GET /api/intel/web-bindings?projectId=` / `GET /api/intel/ios-bindings?projectId=` → 三者同形 `{"bindings":[…]}`，分别是 DataBinding 布局 / Vue 模板 / SwiftUI 视图抽出的「页面 → 字段路径」必展示清单（Android 用 `widget`，Web/iOS 用 `slot`，均带 `sourceFile`/`sourceLine`）。
-- `GET /api/intel/test-cases?projectId=&moduleId=` → `{"testCases":[TestCase]}`（按 `path, class, method` 排序）。`lastStatus`/`lastDurationMs`/`flakyCount` 由每次运行回写。
+- `GET /api/intel/test-cases?projectId=&moduleId=` → `{"testCases":[TestCase]}`（按 `path, class, method` 排序）。`lastStatus`/`lastDurationMs`/`flakyCount`/`quarantined` 由每次运行回写（`quarantined` 在 flaky_count 累计达 3 次时自动置 1）。`POST /api/intel/test-cases` body `{"projectId":1,"moduleId":2,"endpoint":"Class.method"}` → 解除该用例的 flaky 隔离（`quarantined=0`、`flaky_count=0`）。
+- `GET /api/intel/settings` → `{"workers":N}`（测试执行并发，默认 2）。`POST /api/intel/settings` body `{"workers":3}`（1-16）→ 即时生效并持久化（`intel.workers`），重启恢复。
+- 测试报告逐用例解析：`go`（-json）、`surefire`（target/surefire-reports）、`playwright`（web/node 检出 playwright.config 时默认 `npx playwright test --reporter=json`）、`xctest`（xcode 模块，命令靠白名单/计划，报告从 stdout 或 junit*.xml）、`pytest`（python 模块，`pytest --junitxml=junit.xml`）。
 - `GET /api/intel/modules?projectId=3` → `{"modules":[IntelModule]}`（按 `relPath` 升序，人工改过的 `kindRole`/`summary` 会被 applied 校正覆盖后返回；**`kindType` 没有覆写通道**，读取侧只认 `kind_role`（含旧写法 `role`）与 `summary` 两个 field，别的 field 存进去也不生效）。`projectId` 缺失或非正整数 → 400；仅 GET，其余 405。这与 `GET /api/intel/projects/{id}` 响应里的 `modules` 同源，区别只在不要求先取项目详情。（此路由曾按 `/api/intel/projects/` 前缀解析路径 id，永不命中 → 200 空体。）
 
 ### 知识库与问答
