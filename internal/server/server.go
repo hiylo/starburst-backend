@@ -375,6 +375,12 @@ type statusWriter struct {
 	status int
 }
 
+// Unwrap lets http.NewResponseController(w) reach the underlying connection so
+// SetWriteDeadline works through this logging wrapper (SSE slow-client
+// reclamation). Without it ResponseController cannot see the real
+// ResponseWriter and every deadline silently no-ops.
+func (w *statusWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
 func (w *statusWriter) WriteHeader(code int) {
 	w.status = code
 	w.ResponseWriter.WriteHeader(code)

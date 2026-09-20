@@ -19,6 +19,13 @@ const sseMaxStreams = 64
 // out the write and free the goroutine + upstream connection.
 const sseIdleTimeout = 30 * time.Second
 
+// sseMaxWriteFailures bounds consecutive client-write failures before the
+// handler gives up. A wedged client (still TCP-connected but never draining)
+// does not cancel ctx, so without this the retry loop would keep re-opening
+// upstream SSE links forever, churning connections for a client that can no
+// longer consume events.
+const sseMaxWriteFailures = 3
+
 // handleStream relays the upstream OpenCode global SSE event stream to the
 // client verbatim. It exists so the APP talks to one stable connection (this
 // backend) instead of reaching across networks to OpenCode directly — the
@@ -77,22 +84,45 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 	fl.Flush()
 
 	// Retry loop: re-open upstream SSE with backoff if it drops.
+	//
+	// lastWriteErr distinguishes a client-side write failure (wedged client, not
+	// draining) from an upstream drop: onEvent returning the write error is the
+	// only way it gets set. Such failures accumulate across reconnects — a
+	// client that never acknowledges a write is dead weight, so past
+	// sseMaxWriteFailures we break out instead of reconnecting upstream
+	// forever. A successful write resets the counter so transient timeouts
+	// recover on their own.
+	var (
+		lastWriteErr  error
+		writeFailures int
+	)
 	backoff := time.Second
 	for {
 		err := s.openCode.StreamEvents(ctx, func(ev opencode.SSEEvent) error {
 			_ = rc.SetWriteDeadline(time.Now().Add(sseIdleTimeout))
 			if _, werr := fmt.Fprintf(w, "data: %s\n\n", ev.Data); werr != nil {
-				return werr // client gone; stop streaming
+				lastWriteErr = werr
+				return werr // client write failed; stop forwarding
 			}
+			writeFailures = 0
 			fl.Flush()
 			return nil
 		})
+		if ctx.Err() != nil {
+			return // client disconnected
+		}
 		if err != nil {
-			// Distinguish client-side vs upstream-side failure.
-			if ctx.Err() != nil {
-				return // client disconnected
+			if lastWriteErr != nil {
+				lastWriteErr = nil
+				writeFailures++
+				if writeFailures >= sseMaxWriteFailures {
+					log.Printf("stream: client not draining writes, giving up after %d consecutive failures", writeFailures)
+					return
+				}
+				log.Printf("stream: client write failed (%d/%d): %v", writeFailures, sseMaxWriteFailures, err)
+			} else {
+				log.Printf("stream: upstream event stream dropped: %v", err)
 			}
-			log.Printf("stream: upstream event stream dropped: %v", err)
 		}
 		select {
 		case <-ctx.Done():
