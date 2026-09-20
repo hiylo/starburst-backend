@@ -275,7 +275,19 @@ func (s *Server) runIntelAnalyze(ctx context.Context, projectID int64) error {
 		log.Printf("intel security scan project %d: %v", projectID, err)
 	}
 	s.recordImpact(ctx, projectID, p, root, sha)
-	return s.store.MarkIntelProjectAnalyzed(ctx, projectID, sha)
+	if err := s.store.MarkIntelProjectAnalyzed(ctx, projectID, sha); err != nil {
+		return err
+	}
+	// 依赖链（dependsOn 的轻量版）：分析完成后若开启 intel.auto_run，自动触发
+	// 全量回归，避免「改代码→分析→手动点运行」的往返。
+	if v, err := s.store.GetSetting(ctx, "intel.auto_run"); err == nil && v == "1" {
+		if run, err := s.enqueueIntelRunAll(context.Background(), projectID, false); err != nil {
+			log.Printf("intel analyze->run project %d: %v", projectID, err)
+		} else {
+			log.Printf("intel analyze->run project %d enqueued run %d", projectID, run.ID)
+		}
+	}
+	return nil
 }
 
 // runIntelAnalyzeIncremental refreshes a project's analysis without a full

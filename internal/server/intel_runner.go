@@ -159,6 +159,11 @@ func (s *Server) enqueueIntelRun(ctx context.Context, projectID, moduleID, nodeI
 	return run, nil
 }
 
+// intelMaxRunAttempts bounds automatic retries of a module run whose execution
+// itself failed (command error, timeout, build failure) — a bounded substitute
+// for the full task-state-machine retry while intel stays on its own runner.
+const intelMaxRunAttempts = 2
+
 // runIntelJob executes one queued module run under the per-project lock and
 // the global concurrency cap.
 func (s *Server) runIntelJob(projectID, moduleID, nodeID int64, force bool, run *store.TestRun) {
@@ -193,6 +198,29 @@ func (s *Server) runIntelJob(projectID, moduleID, nodeID int64, force bool, run 
 		if execCtx.Err() != nil {
 			s.failIntelRun(projectID, run, "执行超时或已取消："+execCtx.Err().Error())
 			return
+		}
+		// 执行异常（命令失败/构建失败）自动重试，最多 intelMaxRunAttempts 次。
+		// 测试用例失败走 run.Status=failed 且 err==nil 路径，不重试。
+		if run.Attempts < intelMaxRunAttempts {
+			retry := &store.TestRun{
+				ProjectID: projectID,
+				ModuleID:  moduleID,
+				Scope:     "module",
+				Status:    "queued",
+				Progress:  fmt.Sprintf("自动重试（第 %d 次）", run.Attempts+1),
+				Attempts:  run.Attempts + 1,
+			}
+			if cerr := s.store.CreateIntelTestRun(context.Background(), retry); cerr == nil {
+				s.pushIntelRunEvent(retry)
+				run.Progress = fmt.Sprintf("执行失败，已自动重试（原因为 %s）", err.Error())
+				if uerr := s.store.UpdateIntelTestRun(context.Background(), run); uerr != nil {
+					log.Printf("intel run %d retry note update: %v", run.ID, uerr)
+				}
+				go s.runIntelJob(projectID, moduleID, nodeID, force, retry)
+				return
+			} else {
+				log.Printf("intel run %d retry create failed: %v", run.ID, cerr)
+			}
 		}
 		s.failIntelRun(projectID, run, err.Error())
 		return

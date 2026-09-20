@@ -43,6 +43,7 @@ type TestRun struct {
 	Kind       string     `json:"kind"`
 	Command    string     `json:"command"`
 	Status     string     `json:"status"`
+	Attempts   int        `json:"attempts"`
 	StartedAt  *time.Time `json:"startedAt"`
 	FinishedAt *time.Time `json:"finishedAt"`
 	LogPath    string     `json:"logPath"`
@@ -249,19 +250,19 @@ func (s *sqlStore) CreateIntelTestRun(ctx context.Context, run *TestRun) error {
 	if isPostgres(s.driver) {
 		return s.db.QueryRowContext(ctx, s.q(`
 			INSERT INTO test_runs (project_id, module_id, scope, kind, command, status,
-				started_at, finished_at, log_path, progress, output, created_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+				attempts, started_at, finished_at, log_path, progress, output, created_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
 			RETURNING id`),
 			run.ProjectID, run.ModuleID, run.Scope, run.Kind, run.Command, run.Status,
-			run.StartedAt, run.FinishedAt, run.LogPath, run.Progress, run.Output,
+			run.Attempts, run.StartedAt, run.FinishedAt, run.LogPath, run.Progress, run.Output,
 		).Scan(&run.ID)
 	}
 	res, err := s.db.ExecContext(ctx, s.q(`
 		INSERT INTO test_runs (project_id, module_id, scope, kind, command, status,
-			started_at, finished_at, log_path, progress, output, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`),
+			attempts, started_at, finished_at, log_path, progress, output, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`),
 		run.ProjectID, run.ModuleID, run.Scope, run.Kind, run.Command, run.Status,
-		run.StartedAt, run.FinishedAt, run.LogPath, run.Progress, run.Output,
+		run.Attempts, run.StartedAt, run.FinishedAt, run.LogPath, run.Progress, run.Output,
 	)
 	if err != nil {
 		return err
@@ -277,7 +278,7 @@ func (s *sqlStore) CreateIntelTestRun(ctx context.Context, run *TestRun) error {
 // GetIntelTestRun loads a single test run.
 func (s *sqlStore) GetIntelTestRun(ctx context.Context, id int64) (*TestRun, error) {
 	row := s.db.QueryRowContext(ctx, s.q(`
-		SELECT id, project_id, module_id, scope, kind, command, status,
+		SELECT id, project_id, module_id, scope, kind, command, status, attempts,
 			started_at, finished_at, log_path, progress, output, created_at FROM test_runs WHERE id = ?`), id)
 	run, err := scanIntelTestRun(row)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -291,7 +292,7 @@ func (s *sqlStore) GetIntelTestRun(ctx context.Context, id int64) (*TestRun, err
 // the full log.
 func (s *sqlStore) ListIntelTestRuns(ctx context.Context, projectID int64) ([]*TestRun, error) {
 	rows, err := s.db.QueryContext(ctx, s.q(`
-		SELECT id, project_id, module_id, scope, kind, command, status,
+		SELECT id, project_id, module_id, scope, kind, command, status, attempts,
 			started_at, finished_at, log_path, progress, '', created_at
 		FROM test_runs WHERE project_id = ? ORDER BY created_at DESC`), projectID)
 	if err != nil {
@@ -614,7 +615,7 @@ func scanIntelTestRun(row rowScanner) (*TestRun, error) {
 	run := &TestRun{}
 	var started, finished *time.Time
 	err := row.Scan(&run.ID, &run.ProjectID, &run.ModuleID, &run.Scope, &run.Kind, &run.Command,
-		&run.Status, &started, &finished, &run.LogPath, &run.Progress, &run.Output, &run.CreatedAt)
+		&run.Status, &run.Attempts, &started, &finished, &run.LogPath, &run.Progress, &run.Output, &run.CreatedAt)
 	if err != nil {
 		return nil, err
 	}

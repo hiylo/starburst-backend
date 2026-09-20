@@ -128,6 +128,7 @@ var migrations = []migration{
 	{name: "intel_flaky_quarantine", apply: migrationIntelFlakyQuarantine},
 	{name: "intel_rule_project", apply: migrationIntelRuleProject},
 	{name: "intel_project_git_creds", apply: migrationIntelProjectGitCreds},
+	{name: "intel_run_attempts", apply: migrationIntelRunAttempts},
 }
 
 // migrationIntel creates the Test Intelligence subsystem tables: flat project
@@ -1296,6 +1297,17 @@ func migrationIntelProjectGitCreds(ctx context.Context, driver string, db *sql.D
 			!strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
 			return err
 		}
+	}
+	return nil
+}
+
+// migrationIntelRunAttempts lets a module test run track its auto-retry count so
+// a failed execution (command error, timeout) can be retried a bounded number of
+// times without a task-state-machine migration.
+func migrationIntelRunAttempts(ctx context.Context, driver string, db *sql.DB) error {
+	_, err := db.ExecContext(ctx, `ALTER TABLE test_runs ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0`)
+	if err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+		return err
 	}
 	return nil
 }
