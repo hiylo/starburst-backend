@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log"
 	"net/http"
 	"os"
@@ -382,7 +383,7 @@ func (s *Server) runIntelTests(ctx context.Context, projectID, moduleID, nodeID 
 		}
 	}
 	cmdArgs, reportKind := testCommandFor(module.BuildTool, module.KindType)
-	if len(cmdArgs) == 0 {
+	if len(cmdArgs) == 0 && reportKind == "" {
 		return fmt.Errorf("unsupported build tool %q for module %s", module.BuildTool, module.RelPath)
 	}
 	// Honor the human-reviewed project-level command whitelist
@@ -416,6 +417,12 @@ func (s *Server) runIntelTests(ctx context.Context, projectID, moduleID, nodeID 
 	if reportKind == "npm" && !commandSpecified && detectPlaywright(dir) {
 		cmdArgs = []string{"npx", "playwright", "test", "--reporter=json"}
 		reportKind = "playwright"
+	}
+	// 默认无确定性命令的工具（xcode 需 -scheme 等）：依赖命令白名单/测试计划
+	// 提供；仍未配置时明确报错，避免空命令执行。
+	if len(cmdArgs) == 0 {
+		return fmt.Errorf("module %s (build tool %q) 未配置测试命令：请在命令白名单或测试计划中指定",
+			module.RelPath, module.BuildTool)
 	}
 
 	run.ModuleID = module.ID
@@ -572,6 +579,12 @@ func testCommandFor(buildTool, kindType string) ([]string, string) {
 		return []string{"./gradlew", "test"}, "surefire"
 	case "npm":
 		return []string{"npm", "test"}, "npm"
+	case "xcode":
+		// xcodebuild 需要 -scheme 等参数，无法确定性默认；命令由命令白名单或
+		// 测试计划提供，reportKind 固定为 xctest 以解析 JUnit 报告。
+		return nil, "xctest"
+	case "pytest":
+		return []string{"pytest", "-q", "--junitxml=junit.xml"}, "pytest"
 	}
 	return nil, ""
 }
@@ -639,6 +652,10 @@ func whitelistedTestCommand(commandsJSON, buildTool, kindType string) []string {
 			matched = argv[0] == "./gradlew" && hasTestIntent(argv)
 		case "npm":
 			matched = argv[0] == "npm" && hasTestIntent(argv)
+		case "xcode":
+			matched = argv[0] == "xcodebuild" && hasTestIntent(argv)
+		case "pytest":
+			matched = argv[0] == "pytest" && hasTestIntent(argv)
 		}
 		if matched {
 			return argv
@@ -821,6 +838,24 @@ func parseReport(reportKind, dir string, output []byte) []*store.TestResult {
 				}
 			}
 		}
+	case "xctest":
+		// XCTest JUnit（xcodebuild/fastlane 导出）：stdout 可能是报告本身，
+		// 否则在模块下递归找 junit XML 文件（命令可能落盘）。
+		if c, err := report.ParseXCTestJUnit(output); err == nil && len(c) > 0 {
+			cases = c
+			break
+		}
+		for _, f := range collectJUnitXML(dir, 3) {
+			if data, err := os.ReadFile(f); err == nil {
+				if c, err := report.ParseXCTestJUnit(data); err == nil {
+					cases = append(cases, c...)
+				}
+			}
+		}
+	case "pytest":
+		if data, err := os.ReadFile(filepath.Join(dir, "junit.xml")); err == nil {
+			cases, _ = report.ParsePytestJUnit(data)
+		}
 	}
 	out := make([]*store.TestResult, 0, len(cases))
 	for _, c := range cases {
@@ -897,4 +932,29 @@ func encodeJSON(v any) string {
 		return ""
 	}
 	return string(b)
+}
+
+// collectJUnitXML walks dir (bounded depth) collecting JUnit-style XML report
+// files (name contains "junit" and ends in .xml) written to disk by an XCTest
+// or pytest command that doesn't print the report to stdout.
+func collectJUnitXML(dir string, maxDepth int) []string {
+	var out []string
+	_ = filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if d.IsDir() {
+			rel, _ := filepath.Rel(dir, path)
+			if rel != "." && strings.Count(rel, string(filepath.Separator)) >= maxDepth {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		base := strings.ToLower(d.Name())
+		if strings.Contains(base, "junit") && strings.HasSuffix(base, ".xml") {
+			out = append(out, path)
+		}
+		return nil
+	})
+	return out
 }

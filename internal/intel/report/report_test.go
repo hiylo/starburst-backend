@@ -305,3 +305,126 @@ FAIL
 		t.Errorf("build failure = %+v, want no cases", got)
 	}
 }
+
+func TestParseXCTestJUnit(t *testing.T) {
+	const multi = `<testsuites>
+  <testsuite name="LoginTests" tests="6" failures="1" errors="1" skipped="1">
+    <testcase classname="LoginTests.testValidLogin" name="testValidLogin" time="0.123"/>
+    <testcase classname="LoginTests.testWrongPassword" name="testWrongPassword" time="0.200">
+      <failure message="XCTAssertTrue failed">LoginTests.swift:42: XCTAssertTrue failed: wrong password</failure>
+    </testcase>
+    <testcase classname="LoginTests.testNoUser" name="testNoUser" time="0.010">
+      <error message="API unavailable">network timeout</error>
+    </testcase>
+    <testcase classname="LoginTests.testSkipOnSim" name="testSkipOnSim" time="0.0">
+      <skipped message="simulator only"/>
+    </testcase>
+    <testcase classname="nodot" name="nodot" time=""/>
+  </testsuite>
+  <testsuite name="ProfileTests" tests="1" failures="0" errors="0" skipped="0">
+    <testcase classname="ProfileTests.testAvatar" name="testAvatar" time="0.5"/>
+  </testsuite>
+</testsuites>`
+	got, err := ParseXCTestJUnit([]byte(multi))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 6 {
+		t.Fatalf("ParseXCTestJUnit() returned %d results, want 6", len(got))
+	}
+	byName := map[string]CaseResult{}
+	for _, r := range got {
+		byName[r.Name] = r
+	}
+	if r := byName["testValidLogin"]; r.Suite != "LoginTests" || r.Class != "LoginTests" ||
+		r.Name != "testValidLogin" || r.Status != "passed" || r.DurationMs != 123 || r.ErrorXML != "" {
+		t.Errorf("testValidLogin = %+v, want passed/123ms LoginTests.testValidLogin in LoginTests", r)
+	}
+	if r := byName["testWrongPassword"]; r.Class != "LoginTests" || r.Name != "testWrongPassword" ||
+		r.Status != "failed" || r.DurationMs != 200 ||
+		!strings.Contains(r.ErrorXML, "XCTAssertTrue failed") || !strings.Contains(r.ErrorXML, "LoginTests.swift:42") {
+		t.Errorf("testWrongPassword = %+v, want failed with message+body extracted", r)
+	}
+	if r := byName["testNoUser"]; r.Status != "error" || r.DurationMs != 10 || !strings.Contains(r.ErrorXML, "API unavailable") {
+		t.Errorf("testNoUser = %+v, want error with error message", r)
+	}
+	if r := byName["testSkipOnSim"]; r.Status != "skipped" || r.DurationMs != 0 || !strings.Contains(r.ErrorXML, "simulator only") {
+		t.Errorf("testSkipOnSim = %+v, want skipped with skip message", r)
+	}
+	if r := byName["nodot"]; r.Class != "" || r.Name != "nodot" || r.Status != "passed" || r.DurationMs != 0 {
+		t.Errorf("nodot = %+v, want empty class/passed/0ms falling back to name attr", r)
+	}
+	if r := byName["testAvatar"]; r.Suite != "ProfileTests" || r.Class != "ProfileTests" || r.DurationMs != 500 {
+		t.Errorf("testAvatar = %+v, want ProfileTests.testAvatar at 500ms from the second suite", r)
+	}
+
+	// A bare <testsuite> root is accepted as well.
+	single := `<testsuite name="ProfileTests" tests="1" failures="0" errors="0" skipped="0">
+  <testcase classname="ProfileTests.testAvatar" name="testAvatar" time="0.5"/>
+</testsuite>`
+	got, err = ParseXCTestJUnit([]byte(single))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].Class != "ProfileTests" || got[0].Name != "testAvatar" || got[0].DurationMs != 500 {
+		t.Errorf("bare <testsuite> root = %+v, want ProfileTests.testAvatar at 500ms", got)
+	}
+
+	if _, err := ParseXCTestJUnit([]byte("<testsuites><unclosed>")); err == nil {
+		t.Fatal("ParseXCTestJUnit() = nil error, want error for malformed XML")
+	}
+}
+
+func TestParsePytestJUnit(t *testing.T) {
+	const xml = `<testsuite name="pytest" tests="6" errors="1" skipped="1" failures="1">
+  <testcase classname="tests.test_math" name="test_add" time="0.01"/>
+  <testcase classname="tests.test_math" name="test_div" time="0.02">
+    <failure message="assert 1 == 2">tests/test_math.py:10: in test_div
+assert 1 == 2</failure>
+  </testcase>
+  <testcase classname="tests.test_db" name="test_conn" time="0.03">
+    <error message="ConnectionError">connection refused</error>
+  </testcase>
+  <testcase classname="tests.test_os" name="test_win" time="0.0">
+    <skipped message="requires windows">platform mismatch</skipped>
+  </testcase>
+  <testcase name="test_module_level" time="0.004"/>
+  <testcase name="test_no_time"/>
+</testsuite>`
+	got, err := ParsePytestJUnit([]byte(xml))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 6 {
+		t.Fatalf("ParsePytestJUnit() returned %d results, want 6", len(got))
+	}
+	byName := map[string]CaseResult{}
+	for _, r := range got {
+		byName[r.Name] = r
+	}
+	if r := byName["test_add"]; r.Suite != "pytest" || r.Class != "tests.test_math" ||
+		r.Status != "passed" || r.DurationMs != 10 || r.ErrorXML != "" {
+		t.Errorf("test_add = %+v, want passed/10ms in pytest with class tests.test_math", r)
+	}
+	if r := byName["test_div"]; r.Status != "failed" || r.DurationMs != 20 ||
+		!strings.Contains(r.ErrorXML, "assert 1 == 2") {
+		t.Errorf("test_div = %+v, want failed/20ms with failure text", r)
+	}
+	if r := byName["test_conn"]; r.Status != "error" || r.DurationMs != 30 ||
+		!strings.Contains(r.ErrorXML, "ConnectionError") || !strings.Contains(r.ErrorXML, "connection refused") {
+		t.Errorf("test_conn = %+v, want error/30ms with error text", r)
+	}
+	if r := byName["test_win"]; r.Status != "skipped" || r.DurationMs != 0 || !strings.Contains(r.ErrorXML, "requires windows") {
+		t.Errorf("test_win = %+v, want skipped with skip message", r)
+	}
+	if r := byName["test_module_level"]; r.Class != "" || r.Status != "passed" || r.DurationMs != 4 {
+		t.Errorf("test_module_level = %+v, want passed/4ms with empty class", r)
+	}
+	if r := byName["test_no_time"]; r.Status != "passed" || r.DurationMs != 0 {
+		t.Errorf("test_no_time = %+v, want passed/0ms when time is missing", r)
+	}
+
+	if _, err := ParsePytestJUnit([]byte("<testsuite><unclosed>")); err == nil {
+		t.Fatal("ParsePytestJUnit() = nil error, want error for malformed XML")
+	}
+}

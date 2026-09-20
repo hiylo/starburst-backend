@@ -148,6 +148,8 @@ func buildToolForNames(anchors []string) string {
 			return "xcode"
 		case a == "schema.graphqls":
 			return "graphql"
+		case a == "pyproject.toml" || a == "setup.py" || a == "requirements.txt" || a == "pytest.ini":
+			return "pytest"
 		}
 	}
 	return ""
@@ -178,7 +180,7 @@ func roleForType(t string) string {
 	switch t {
 	case "android", "ios":
 		return "app"
-	case "java", "go", "node":
+	case "java", "go", "node", "python":
 		return "backend"
 	case "web":
 		return "web"

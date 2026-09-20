@@ -31,6 +31,7 @@ var profiles = []*Profile{
 	{Type: "web", Role: "web", Anchors: []string{"package.json"}},
 	{Type: "node", Role: "service", Anchors: []string{"package.json"}},
 	{Type: "bff", Role: "bff", Anchors: []string{"schema.graphqls"}},
+	{Type: "python", Role: "backend", Anchors: []string{"pyproject.toml", "setup.py", "requirements.txt", "pytest.ini"}},
 }
 
 // hasAnchor reports whether any file in files (relative paths) matches the

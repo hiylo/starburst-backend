@@ -182,6 +182,89 @@ func (c *surefireCase) errorXML() string {
 	}
 }
 
+// junitTestSuites mirrors a <testsuites> root element that wraps one or more
+// <testsuite> elements, as emitted by Xcode XCTest tooling and fastlane/scan.
+// The inner suites reuse surefireSuite because the element layout is shared.
+type junitTestSuites struct {
+	Suites []surefireSuite `xml:"testsuite"`
+}
+
+// ParseXCTestJUnit parses an Xcode XCTest JUnit XML report (fastlane/scan or
+// xcresulttool exports) into normalized case results. Both a <testsuites>
+// root wrapping multiple suites and a bare <testsuite> root are accepted.
+// XCTest encodes the owning class and method in classname as "Class.method",
+// so Class holds the part before the first dot and Name the part after it; a
+// classname without a dot falls back to the name attribute. Status is derived
+// from the <failure>/<error>/<skipped> child elements.
+func ParseXCTestJUnit(data []byte) ([]CaseResult, error) {
+	var ts junitTestSuites
+	if err := xml.Unmarshal(data, &ts); err != nil {
+		return nil, err
+	}
+	if len(ts.Suites) == 0 {
+		var s surefireSuite
+		if err := xml.Unmarshal(data, &s); err != nil {
+			return nil, err
+		}
+		ts.Suites = []surefireSuite{s}
+	}
+	var results []CaseResult
+	for _, s := range ts.Suites {
+		for _, c := range s.Cases {
+			class, name := splitXCTestName(c.Classname, c.Name)
+			r := CaseResult{
+				Suite:      s.Name,
+				Class:      class,
+				Name:       name,
+				Status:     c.status(),
+				DurationMs: secondsToMillis(c.Time),
+			}
+			if r.Status != "passed" {
+				r.ErrorXML = truncate(c.errorXML())
+			}
+			results = append(results, r)
+		}
+	}
+	return results, nil
+}
+
+// splitXCTestName maps XCTest's "Class.method" classname into (Class, Name).
+// A classname without a dot yields an empty Class and uses the name attribute
+// as the Name fallback.
+func splitXCTestName(classname, fallback string) (class, name string) {
+	if before, after, ok := strings.Cut(classname, "."); ok {
+		return before, after
+	}
+	return "", fallback
+}
+
+// ParsePytestJUnit parses a pytest --junitxml report into normalized case
+// results. The structure matches Maven Surefire, but pytest may omit
+// classname (module-level tests), in which case Class stays empty and Name
+// carries the test name. Status is derived from the child elements: <failure>
+// → failed, <error> → error, <skipped> → skipped, otherwise passed.
+func ParsePytestJUnit(data []byte) ([]CaseResult, error) {
+	var suite surefireSuite
+	if err := xml.Unmarshal(data, &suite); err != nil {
+		return nil, err
+	}
+	results := make([]CaseResult, 0, len(suite.Cases))
+	for _, c := range suite.Cases {
+		r := CaseResult{
+			Suite:      suite.Name,
+			Class:      c.Classname,
+			Name:       c.Name,
+			Status:     c.status(),
+			DurationMs: secondsToMillis(c.Time),
+		}
+		if r.Status != "passed" {
+			r.ErrorXML = truncate(c.errorXML())
+		}
+		results = append(results, r)
+	}
+	return results, nil
+}
+
 // goTestEvent is one line of `go test -json` output. Package-level events have
 // an empty Test field.
 type goTestEvent struct {
