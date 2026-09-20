@@ -6,6 +6,8 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/hiylo/starburst-backend/internal/intel/android"
+	"github.com/hiylo/starburst-backend/internal/intel/web"
 	"github.com/hiylo/starburst-backend/internal/store"
 )
 
@@ -217,10 +219,20 @@ func ScanModule(root, relPath string) (*scanSummary, error) {
 	pom, _ := filepath.Glob(filepath.Join(dir, "pom.xml"))
 	gradle, _ := filepath.Glob(filepath.Join(dir, "build.gradle*"))
 	goMod, _ := filepath.Glob(filepath.Join(dir, "go.mod"))
+	pkgJSON, _ := filepath.Glob(filepath.Join(dir, "package.json"))
+	// Web/Node 前端（package.json）：契约来自 axios/fetch API 调用。
+	if len(pkgJSON) > 0 {
+		eps, err := web.ScanWeb(dir)
+		if err != nil {
+			return &scanSummary{}, nil
+		}
+		return &scanSummary{Endpoints: eps}, nil
+	}
 	if len(pom) == 0 && len(gradle) == 0 && len(goMod) == 0 {
 		return &scanSummary{}, nil
 	}
 	files := make([]string, 0)
+	ktFiles := make([]string, 0)
 	_ = filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return nil
@@ -233,6 +245,8 @@ func ScanModule(root, relPath string) (*scanSummary, error) {
 		}
 		if strings.HasSuffix(path, ".java") {
 			files = append(files, path)
+		} else if strings.HasSuffix(path, ".kt") {
+			ktFiles = append(ktFiles, path)
 		}
 		return nil
 	})
@@ -255,6 +269,20 @@ func ScanModule(root, relPath string) (*scanSummary, error) {
 			return nil
 		})
 		ents, eps := scanGoFiles(goFiles)
+		return &scanSummary{Entities: ents, Endpoints: eps}, nil
+	}
+	// Android/Kotlin 模块（build.gradle + .kt）：Kotlin 实体 + Retrofit 端点；
+	// 纯 Java 模块走 scanJavaFiles。混合模块合并两者结果。
+	if len(ktFiles) > 0 {
+		ents, eps, err := android.ScanKotlin(dir)
+		if err != nil {
+			return &scanSummary{}, nil
+		}
+		if len(files) > 0 {
+			jEnts, jEps := scanJavaFiles(files, classIndexFor(root))
+			ents = append(ents, jEnts...)
+			eps = append(eps, jEps...)
+		}
 		return &scanSummary{Entities: ents, Endpoints: eps}, nil
 	}
 	if len(files) == 0 {
