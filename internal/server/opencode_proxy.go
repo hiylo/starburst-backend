@@ -9,6 +9,7 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"time"
 	"unicode"
 )
 
@@ -71,7 +72,8 @@ func proxyIsSensitive(method, path string) bool {
 // 读——所以访问控制上不能封，只能在回程把凭据字段抹掉。/auth/* 不在此列：那里
 // 存的就是密钥本身，且已被 proxyIsSensitive 限制为管理员专属。
 func providerCredentialPath(path string) bool {
-	for _, prefix := range []string{"/config", "/provider"} {
+	// /mcp 的配置（含第三方 API 的 Authorization 头）同样是明文密钥，一并走剥离。
+	for _, prefix := range []string{"/config", "/provider", "/mcp"} {
 		if path == prefix || strings.HasPrefix(path, prefix+"/") {
 			return true
 		}
@@ -210,6 +212,15 @@ func (s *Server) handleOpenCodeProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 目录约束：透传的 x-starburst-directory / x-opencode-directory 头与 directory
+	// query 必须通过 validateWorkDirectory，避免 APP token（或普通调用方）指定
+	// /etc、/root 等系统目录再走 /session/{id}/shell、/file/content 等越界。
+	// 与 /api/tasks、/api/rules 共用同一套判据，缺失目录则不构成越权（nil）。
+	if err := validateRequestDirectories(r); err != nil {
+		writeErr(w, http.StatusForbidden, "directory out of scope: "+err.Error())
+		return
+	}
+
 	// 原接口增强（endpoint 不变）：GET /session/status 时合并上游快照与采集器
 	// 事件聚合状态——上游快照偶发漏掉部分 busy 会话，事件聚合更完整准确。
 	if r.Method == http.MethodGet && upstreamPath == "/session/status" {
@@ -285,14 +296,19 @@ func (s *Server) handleOpenCodeProxy(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(resp.StatusCode)
 
 	// SSE: stream with a flush per read so events are delivered immediately.
-	// Non-SSE responses just copy through.
+	// Non-SSE responses just copy through. 每次写前设写 deadline：客户端停读
+	// （不消费但 TCP 未断）时写会超时失败并立即退出，避免 handler 无限阻塞挂起。
+	// 依赖 statusWriter.Unwrap 让 NewResponseController 能触达底层连接；即使拿
+	// 不到 deadline 能力，写失败路径仍能保证断开。不改动响应头/压缩语义。
 	if fl, ok := w.(http.Flusher); ok && isSSE {
+		rc := http.NewResponseController(w)
 		buf := make([]byte, 32*1024)
 		for {
 			n, rerr := resp.Body.Read(buf)
 			if n > 0 {
+				_ = rc.SetWriteDeadline(time.Now().Add(sseIdleTimeout))
 				if _, werr := w.Write(buf[:n]); werr != nil {
-					return // client gone
+					return // client gone or not draining; stop relaying
 				}
 				fl.Flush()
 			}

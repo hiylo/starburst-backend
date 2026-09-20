@@ -40,10 +40,16 @@ func (s *Server) handleUnreadMarkRead(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
-	id := strings.TrimPrefix(r.URL.Path, "/api/unread/")
-	if id == "" || id == r.URL.Path || strings.Contains(id, "/") {
+	id := strings.TrimSpace(strings.TrimPrefix(r.URL.Path, "/api/unread/"))
+	if id == "" || id == r.URL.Path || strings.Contains(id, "/") || len(id) > 128 {
 		writeErr(w, http.StatusBadRequest, "invalid session id")
 		return
+	}
+	for _, c := range id {
+		if c < 0x21 || c == 0x7f {
+			writeErr(w, http.StatusBadRequest, "invalid session id")
+			return
+		}
 	}
 	if err := s.store.MarkSessionRead(r.Context(), id); err != nil {
 		writeErr(w, http.StatusInternalServerError, "mark read failed")

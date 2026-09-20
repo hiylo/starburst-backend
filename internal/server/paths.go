@@ -11,6 +11,7 @@ package server
 import (
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -57,6 +58,23 @@ func validateWorkDirectory(raw string) error {
 	}
 	_, err := resolveSystemScopedPath(raw)
 	return err
+}
+
+// validateRequestDirectories 给镜像代理透传的目录作用域补校验：x-starburst-directory /
+// x-opencode-directory 头与 directory query 任一命中系统敏感目录即拒绝（403 由调用方返回）。
+// 缺失目录不算越权；头可能多值（Header.Values 逐个校验）。
+func validateRequestDirectories(r *http.Request) error {
+	for _, k := range []string{"x-starburst-directory", "x-opencode-directory"} {
+		for _, v := range r.Header.Values(k) {
+			if err := validateWorkDirectory(v); err != nil {
+				return err
+			}
+		}
+	}
+	if q := strings.TrimSpace(r.URL.Query().Get("directory")); q != "" {
+		return validateWorkDirectory(q)
+	}
+	return nil
 }
 
 // validateIntelLocalPath 额外要求绝对路径 + 真实存在的目录 + 不是整棵顶层目录：

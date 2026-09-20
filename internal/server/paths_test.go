@@ -6,6 +6,7 @@ package server
 
 import (
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
@@ -111,5 +112,30 @@ func TestDirectoryParamRejectedOnWriteEndpoints(t *testing.T) {
 	rec = s.do(t, http.MethodPost, "/api/tasks", `{"prompt":"x"}`, th)
 	if rec.Code != http.StatusCreated {
 		t.Errorf("empty directory task: want 201, got %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestValidateRequestDirectories(t *testing.T) {
+	// 合法目录（头 + query）与缺失目录都放行。
+	req := httptest.NewRequest(http.MethodGet, "/api/opencode/session/x/shell?directory=%2Fworkspaces%2Fecho", nil)
+	req.Header.Set("x-starburst-directory", "/workspaces/echo")
+	if err := validateRequestDirectories(req); err != nil {
+		t.Errorf("valid directories rejected: %v", err)
+	}
+	req = httptest.NewRequest(http.MethodGet, "/x", nil)
+	if err := validateRequestDirectories(req); err != nil {
+		t.Errorf("missing directory rejected: %v", err)
+	}
+	// 系统目录（头或 query 任一）拒绝。
+	for _, d := range []string{"/etc", "/etc/ssh", "/root/.ssh", "/proc"} {
+		req := httptest.NewRequest(http.MethodGet, "/x", nil)
+		req.Header.Set("x-starburst-directory", d)
+		if err := validateRequestDirectories(req); err == nil {
+			t.Errorf("system dir via header accepted: %s", d)
+		}
+	}
+	req = httptest.NewRequest(http.MethodGet, "/x?directory=%2Fetc", nil)
+	if err := validateRequestDirectories(req); err == nil {
+		t.Errorf("system dir via query accepted: /etc")
 	}
 }

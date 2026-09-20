@@ -56,6 +56,9 @@ func (f *FS) Serve(w http.ResponseWriter, r *http.Request, p string) {
 	w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
 	w.Header().Set("Pragma", "no-cache")
 	w.Header().Set("Expires", "0")
+	// 安全头：防 MIME 嗅探执行（页面公开可访问，兜一层）。
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("X-Frame-Options", "DENY")
 	// index.html 里的 ?v=__BUILD__ 换成进程构建戳，强制静态资源走新版本。
 	if name == "index.html" && strings.Contains(string(data), "__BUILD__") {
 		data = []byte(strings.ReplaceAll(string(data), "__BUILD__", f.buildStamp))

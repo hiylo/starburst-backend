@@ -18,8 +18,8 @@ import (
 // connection if no pong arrives within wsPongWait. Writes must complete within
 // wsWriteWait. These mirror the gorilla chat example's recommended values.
 const (
-	wsWriteWait  = 10 * time.Second
-	wsPongWait   = 60 * time.Second
+	wsWriteWait    = 10 * time.Second
+	wsPongWait     = 60 * time.Second
 	wsPingInterval = (wsPongWait * 9) / 10
 )
 
@@ -50,7 +50,9 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	if err := s.openCode.Ping(ctx); err == nil {
 		ocHealthy = true
 	} else {
-		ocErr = err.Error()
+		// 无鉴权端点：不回传 Ping 的原始错误（形如 `Get "http://127.0.0.1:4096/…"`
+		// 会泄露内网上游地址），只给泛化描述。
+		ocErr = "upstream check failed"
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
