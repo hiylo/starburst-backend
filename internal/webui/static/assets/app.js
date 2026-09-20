@@ -1739,7 +1739,7 @@ async function wbModelChangeValue(v) {
   if (!providerID || !modelID) return;
   const dir = wbCurrentDir();
   const url = `/api/opencode/api/session/${encodeURIComponent(id)}/model` + (dir ? "?directory=" + encodeURIComponent(dir) : "");
-  const body = JSON.stringify({ providerID, modelID, variant: variant || "default" });
+  const body = JSON.stringify({ model: { id: modelID, providerID, variant: variant || "default" } });
   const res = await api(url, { method: "POST", headers: appHeaders(), body }).catch(() => null);
   if (!res || !res.ok) {
     toast("切换失败", `模型切换未生效 (${res ? res.status : "网络错误"})`, "crit");
