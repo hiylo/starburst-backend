@@ -312,20 +312,30 @@ function fmtTok(n) {
 
 async function api(path, opts) {
   opts = opts || {};
-  const res = await fetch(path, opts);
-  // 仅在请求携带 web session 头（即该请求本就依赖管理员会话）且收到 401
-  // 时才判定会话过期。用 APP token 的请求失败（如 token 被撤销）不应连坐
-  // 清掉仍有效的 web session，否则切菜单时任何一个 token 请求失败都会把
-  // 用户踢回登录页。
-  const usesWebSession = !!(opts.headers && (opts.headers["X-Web-Session"] || opts.headers["x-web-session"]));
-  if (res.status === 401 && session && usesWebSession) {
-    session = "";
-    localStorage.removeItem(SESSION_KEY);
-    show(document.getElementById("loginMsg"), "会话已过期，请重新登录");
-    renderAuth();
-    throw new Error("unauthorized");
+  // 请求兜底超时：上游挂起 / 网络抖动时不能永久 pending——否则聊天区会一直
+  // 卡在「加载对话…」。默认 30s，个别大上传/长操作可传 opts.timeout 覆盖。
+  const ctrl = new AbortController();
+  const timeoutMs = opts.timeout || 30000;
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  opts.signal = ctrl.signal;
+  try {
+    const res = await fetch(path, opts);
+    // 仅在请求携带 web session 头（即该请求本就依赖管理员会话）且收到 401
+    // 时才判定会话过期。用 APP token 的请求失败（如 token 被撤销）不应连坐
+    // 清掉仍有效的 web session，否则切菜单时任何一个 token 请求失败都会把
+    // 用户踢回登录页。
+    const usesWebSession = !!(opts.headers && (opts.headers["X-Web-Session"] || opts.headers["x-web-session"]));
+    if (res.status === 401 && session && usesWebSession) {
+      session = "";
+      localStorage.removeItem(SESSION_KEY);
+      show(document.getElementById("loginMsg"), "会话已过期，请重新登录");
+      renderAuth();
+      throw new Error("unauthorized");
+    }
+    return res;
+  } finally {
+    clearTimeout(timer);
   }
-  return res;
 }
 
 /* ---------- 路由 ---------- */

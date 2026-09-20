@@ -687,6 +687,12 @@ ChatView.prototype.fetchPage = async function (limit, older) {
       this.cursor = next || (raw.length >= limit ? msgIdOf(raw[0]) : null);
       this.reindex(); this.render(); this.scrollToBottom(true);
     }
+  } catch (e) {
+    // 请求超时/网络错误不再让「加载对话…」永久占位：转成可见的失败态。
+    if (this.sessionId === sid && !older) {
+      const why = e && e.name === "AbortError" ? "请求超时" : "网络错误";
+      this.el("list").innerHTML = `<div class="wb-placeholder">对话加载失败（${esc(why)}）<br><span class="muted" style="font-size:12px">点「重新加载」重试</span></div>`;
+    }
   } finally {
     if (this.sessionId === sid) this.loading = false;
   }

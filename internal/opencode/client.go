@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -49,7 +50,24 @@ func New(baseURL string) *Client {
 		httpClient: &http.Client{
 			Timeout: 30 * time.Second,
 		},
-		streamClient: &http.Client{},
+		// streamClient 负责镜像代理（/api/opencode/*，含 SSE 与普通请求），
+		// 不能设整体 Timeout（否则 SSE 长连会被误杀）。改用 Transport 的
+		// ResponseHeaderTimeout 兜底：上游必须在 30s 内回出响应头，否则视为
+		// 挂起直接失败——普通请求（message/status）不会被上游静默挂起拖成
+		// 永久等待，而 SSE 响应头很快、流式 body 不受此超时影响。
+		streamClient: &http.Client{
+			Transport: &http.Transport{
+				Proxy: http.ProxyFromEnvironment,
+				DialContext: (&net.Dialer{
+					Timeout:   10 * time.Second,
+					KeepAlive: 30 * time.Second,
+				}).DialContext,
+				TLSHandshakeTimeout:   10 * time.Second,
+				ResponseHeaderTimeout: 30 * time.Second,
+				IdleConnTimeout:       90 * time.Second,
+				MaxIdleConnsPerHost:   16,
+			},
+		},
 	}
 }
 
