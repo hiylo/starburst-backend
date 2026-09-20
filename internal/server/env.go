@@ -7,11 +7,13 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/hiylo/starburst-backend/internal/intel/envagent"
+	"github.com/hiylo/starburst-backend/internal/intel/envdetect"
 	"github.com/hiylo/starburst-backend/internal/intel/schemainit"
 	"github.com/hiylo/starburst-backend/internal/store"
 )
@@ -417,6 +419,27 @@ func (s *Server) handleIntelEnvSchemaInit(w http.ResponseWriter, r *http.Request
 		return
 	}
 	scripts := schemainit.Discover(root)
+	// 人工 intel-env.yaml 声明的 init_scripts（针对当前 service）补充进迁移列表。
+	if path, ok := envdetect.ManifestAt(root); ok {
+		if data, err := os.ReadFile(path); err == nil {
+			if _, inits, err := envdetect.ParseManifest(data, "intel-env.yaml"); err == nil {
+				seen := make(map[string]bool, len(scripts))
+				for _, sc := range scripts {
+					seen[sc.Rel] = true
+				}
+				for _, is := range inits {
+					if is.Script == "" || seen[is.Script] {
+						continue
+					}
+					if is.Service != "" && is.Service != req.Service {
+						continue
+					}
+					seen[is.Script] = true
+					scripts = append(scripts, schemainit.Script{Rel: is.Script, Abs: filepath.Join(root, is.Script)})
+				}
+			}
+		}
+	}
 	if len(scripts) == 0 {
 		writeJSON(w, http.StatusOK, map[string]any{"scripts": []any{}, "executed": 0, "note": "未发现 SQL 迁移脚本（Flyway/Liquibase/*.sql）"})
 		return

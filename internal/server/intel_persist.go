@@ -447,15 +447,24 @@ func (s *Server) persistOverview(ctx context.Context, projectID int64, p *store.
 	}
 }
 
-// detectRequirements runs env detection across every scan root and merges the
-// per-repo requirement lists (deduplicated by service+category).
+// detectRequirements runs env detection across every scan root, overlaying any
+// manual intel-env.yaml manifest, and merges the per-repo requirement lists
+// (deduplicated by service+category).
 func detectRequirements(roots []string) []envdetect.Requirement {
 	seen := make(map[string]bool)
 	out := make([]envdetect.Requirement, 0)
 	for _, root := range roots {
 		found, err := envdetect.Detect(root, "")
 		if err != nil {
-			continue
+			found = nil
+		}
+		// 人工 manifest（intel-env.yaml）覆盖/补充自动探测结果。
+		if path, ok := envdetect.ManifestAt(root); ok {
+			if data, err := os.ReadFile(path); err == nil {
+				if mreqs, _, err := envdetect.ParseManifest(data, "intel-env.yaml"); err == nil {
+					found = envdetect.MergeWithDetect(found, mreqs)
+				}
+			}
 		}
 		for _, r := range found {
 			key := r.Service
