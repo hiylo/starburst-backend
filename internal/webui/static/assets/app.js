@@ -313,9 +313,11 @@ function fmtTok(n) {
 async function api(path, opts) {
   opts = opts || {};
   // 请求兜底超时：上游挂起 / 网络抖动时不能永久 pending——否则聊天区会一直
-  // 卡在「加载对话…」。默认 30s，个别大上传/长操作可传 opts.timeout 覆盖。
+  // 卡在「加载对话…」。默认 120s：既覆盖 LLM 生成/分析类长操作（rules/generate、
+  // fixes/generate、summarize、resummarize 等通常 60-120s），又对「永久挂起」有
+  // 兜底；个别超大上传/更久操作可传 opts.timeout 覆盖。
   const ctrl = new AbortController();
-  const timeoutMs = opts.timeout || 30000;
+  const timeoutMs = opts.timeout || 120000;
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   opts.signal = ctrl.signal;
   try {
@@ -917,7 +919,7 @@ async function generateRule() {
   if (!desc) { show(msg, "请填写自动化需求描述"); return; }
   hint.textContent = "生成中…（可能需要数秒）";
   try {
-    const res = await api("/api/rules/generate", { method: "POST", headers: hdr(), body: JSON.stringify({ description: desc }) });
+    const res = await api("/api/rules/generate", { method: "POST", headers: hdr(), timeout: 300000, body: JSON.stringify({ description: desc }) });
     const data = await res.json();
     hint.textContent = "";
     if (!res.ok) {
@@ -2995,6 +2997,7 @@ async function wbCompactSession(id) {
     const res = await api(`/api/opencode/session/${encodeURIComponent(id)}/summarize`, {
       method: "POST",
       headers,
+      timeout: 300000,
       body: JSON.stringify({ providerID, modelID }),
     });
     if (!res.ok) { toast("压缩失败", "压缩未生效 (" + res.status + ")", "crit"); return; }
@@ -3784,7 +3787,7 @@ async function showIntelModuleDetail(moduleId) {
 async function reSummarizeIntelModule(moduleId) {
   const box = document.getElementById("intelModuleDetail");
   if (box) box.innerHTML = `<div class="muted" style="padding:8px">AI 重新生成中…</div>`;
-  const res = await api("/api/intel/modules/" + moduleId + "/resummarize", { method: "POST", headers: appHeaders(), body: "{}" });
+  const res = await api("/api/intel/modules/" + moduleId + "/resummarize", { method: "POST", headers: appHeaders(), timeout: 300000, body: "{}" });
   const data = await res.json();
   if (!res.ok) { if (box) box.innerHTML = `<div class="muted" style="padding:8px">${escapeHtml(data.error || "重新生成失败")}</div>`; return; }
   showIntelModuleDetail(moduleId);
@@ -4290,7 +4293,7 @@ async function suggestIntelOverride() {
 async function scanIntelRules() {
   if (!intelCurrentProject) return;
   if (!confirm("用全部启用的 AI 建议规则扫描本项目的知识块（接口契约/文档/绑定），命中将落库为审计问题（ai-rule）？")) return;
-  const res = await api("/api/intel/scan/rules", { method: "POST", headers: appHeaders(), body: JSON.stringify({ projectId: intelCurrentProject }) });
+  const res = await api("/api/intel/scan/rules", { method: "POST", headers: appHeaders(), timeout: 300000, body: JSON.stringify({ projectId: intelCurrentProject }) });
   const data = await res.json();
   if (!res.ok) { alert(data.error || "扫描失败"); return; }
   alert(`扫描完成：命中 ${data.created || 0} 条问题（审计 Tab 查看）`);
@@ -4674,7 +4677,7 @@ async function loadIntelFindings(id) {
 
 async function generateIntelFix(findingId) {
   const id = intelCurrentProject;
-  const res = await api("/api/intel/fixes/generate", { method: "POST", headers: appHeaders(), body: JSON.stringify({ projectId: id, findingId }) });
+  const res = await api("/api/intel/fixes/generate", { method: "POST", headers: appHeaders(), timeout: 300000, body: JSON.stringify({ projectId: id, findingId }) });
   const data = await res.json();
   if (!res.ok) { show(document.getElementById("intelMsg"), data.error || "生成失败"); return; }
   show(document.getElementById("intelMsg"), "已生成修复建议，见「修复建议」Tab");
