@@ -53,19 +53,26 @@ func (s *Server) listRules(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) createRule(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Name      string `json:"name"`
-		Kind      string `json:"kind"`
-		Schedule  string `json:"schedule"`
-		Directory string `json:"directory"`
-		SessionID string `json:"sessionId"`
-		Prompt    string `json:"prompt"`
-		Enabled   bool   `json:"enabled"`
+		Name           string `json:"name"`
+		Kind           string `json:"kind"`
+		Schedule       string `json:"schedule"`
+		Directory      string `json:"directory"`
+		SessionID      string `json:"sessionId"`
+		Prompt         string `json:"prompt"`
+		IntelProjectID int64  `json:"intelProjectId"`
+		Enabled        bool   `json:"enabled"`
 	}
 	if !readBody(w, r, &req) {
 		return
 	}
-	if req.Kind == "" || req.Prompt == "" {
-		writeErr(w, http.StatusBadRequest, "kind and prompt are required")
+	if req.Kind == "" {
+		writeErr(w, http.StatusBadRequest, "kind is required")
+		return
+	}
+	// intel-run 规则：指定 intelProjectId，prompt 可空（触发测试智能回归而非 agent）。
+	// prompt 规则：必须有 prompt。
+	if req.IntelProjectID == 0 && req.Prompt == "" {
+		writeErr(w, http.StatusBadRequest, "prompt or intelProjectId is required")
 		return
 	}
 	switch req.Kind {
@@ -89,14 +96,15 @@ func (s *Server) createRule(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	rule := &store.Rule{
-		ID:        newRuleID(),
-		Name:      req.Name,
-		Kind:      req.Kind,
-		Schedule:  req.Schedule,
-		Directory: req.Directory,
-		SessionID: req.SessionID,
-		Prompt:    req.Prompt,
-		Enabled:   req.Enabled,
+		ID:             newRuleID(),
+		Name:           req.Name,
+		Kind:           req.Kind,
+		Schedule:       req.Schedule,
+		Directory:      req.Directory,
+		SessionID:      req.SessionID,
+		Prompt:         req.Prompt,
+		IntelProjectID: req.IntelProjectID,
+		Enabled:        req.Enabled,
 	}
 	if err := s.store.CreateRule(r.Context(), rule); err != nil {
 		writeErr(w, http.StatusInternalServerError, "create rule failed")

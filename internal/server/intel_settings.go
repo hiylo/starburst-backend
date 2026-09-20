@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"net/http"
 	"strconv"
 )
@@ -11,6 +12,14 @@ const intelWorkersSetting = "intel.workers"
 // intelWorkersMax bounds the adjustable concurrency so a misconfiguration cannot
 // saturate the host with a flood of parallel test processes.
 const intelWorkersMax = 16
+
+// TriggerIntelRunAll is the callback entry point used by the automation engine
+// when an intel-run automation rule fires: it enqueues a full regression
+// (scope=all) run for the project after passing the environment gate.
+func (s *Server) TriggerIntelRunAll(ctx context.Context, projectID int64) error {
+	_, err := s.enqueueIntelRunAll(ctx, projectID, false)
+	return err
+}
 
 // SetIntelWorkers applies a runtime test-execution concurrency cap (clamped to
 // >= 1). Used at startup to restore the persisted intel.workers setting.

@@ -126,6 +126,7 @@ var migrations = []migration{
 	{name: "test_runs_progress", apply: migrationTestRunsProgress},
 	{name: "intel_analysis_status", apply: migrationIntelAnalysisStatus},
 	{name: "intel_flaky_quarantine", apply: migrationIntelFlakyQuarantine},
+	{name: "intel_rule_project", apply: migrationIntelRuleProject},
 }
 
 // migrationIntel creates the Test Intelligence subsystem tables: flat project
@@ -1250,6 +1251,17 @@ func migrationIntelAnalysisStatus(ctx context.Context, driver string, db *sql.DB
 // retries and issue creation) and later released from the web UI.
 func migrationIntelFlakyQuarantine(ctx context.Context, driver string, db *sql.DB) error {
 	_, err := db.ExecContext(ctx, `ALTER TABLE test_cases ADD COLUMN quarantined INTEGER NOT NULL DEFAULT 0`)
+	if err != nil && strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+		return nil // 已存在（并发迁移重入）
+	}
+	return err
+}
+
+// migrationIntelRuleProject lets an automation rule trigger a test-intelligence
+// regression run (run-all) instead of a prompt task when intel_project_id is
+// non-zero.
+func migrationIntelRuleProject(ctx context.Context, driver string, db *sql.DB) error {
+	_, err := db.ExecContext(ctx, `ALTER TABLE rules ADD COLUMN intel_project_id INTEGER NOT NULL DEFAULT 0`)
 	if err != nil && strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
 		return nil // 已存在（并发迁移重入）
 	}

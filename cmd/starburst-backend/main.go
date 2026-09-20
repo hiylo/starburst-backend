@@ -168,6 +168,7 @@ func main() {
 	// Automation engine: evaluates cron rules and handles webhook triggers.
 	// Fired rules enqueue tasks which the executor above picks up.
 	eng := automation.NewEngine(st, 15*time.Second)
+	eng.SetIntelRunner(srv.TriggerIntelRunAll)
 	srv.SetAutomation(eng)
 	go eng.Run(ctx)
 

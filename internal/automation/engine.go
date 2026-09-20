@@ -24,6 +24,9 @@ type Engine struct {
 	now func() time.Time
 	// gitHeads caches the last seen HEAD per git rule (ruleID -> commit).
 	gitHeads map[string]string
+	// onIntelRun, when set, is invoked instead of creating a prompt task for a
+	// rule whose IntelProjectID is non-zero (test-intelligence run-all).
+	onIntelRun func(ctx context.Context, projectID int64) error
 }
 
 // NewEngine creates an automation engine polling cron rules every interval.
@@ -32,6 +35,12 @@ func NewEngine(st store.Store, interval time.Duration) *Engine {
 		interval = 15 * time.Second
 	}
 	return &Engine{store: st, interval: interval, now: time.Now, gitHeads: make(map[string]string)}
+}
+
+// SetIntelRunner installs a callback used to trigger a test-intelligence
+// run-all regression for rules whose IntelProjectID is non-zero.
+func (e *Engine) SetIntelRunner(fn func(ctx context.Context, projectID int64) error) {
+	e.onIntelRun = fn
 }
 
 // Run polls enabled cron rules and git repositories and fires any that are
@@ -136,6 +145,19 @@ func (e *Engine) Fire(ctx context.Context, ruleID string) error {
 	}
 	if !rule.Enabled {
 		return nil
+	}
+	// intel-run 规则：触发测试智能 run-all 回归，而非 prompt 任务。
+	if rule.IntelProjectID != 0 {
+		if e.onIntelRun == nil {
+			return fmt.Errorf("rule %s: intel-run 回调未配置", ruleID)
+		}
+		if err := e.onIntelRun(ctx, rule.IntelProjectID); err != nil {
+			return err
+		}
+		if err := e.store.RecordRuleExecution(ctx, ruleID, fmt.Sprintf("intel-run-%d", rule.IntelProjectID)); err != nil {
+			log.Printf("automation: record execution for %s: %v", ruleID, err)
+		}
+		return e.store.MarkRuleFired(ctx, ruleID)
 	}
 	t := &store.Task{
 		ID:        newRuleTaskID(ruleID),
