@@ -42,6 +42,10 @@ func (f *FS) Serve(w http.ResponseWriter, r *http.Request, p string) {
 	if p == "/" || p == "" {
 		p = "/index.html"
 	}
+	// 隐藏的移动端入口：/mobile 映射到移动端壳页，独立于后台控制台导航。
+	if p == "/mobile" {
+		p = "/mobile.html"
+	}
 	// fs.FS paths must be relative (no leading slash).
 	name := strings.TrimPrefix(p, "/")
 	data, err := fs.ReadFile(f.sub, name)
@@ -67,8 +71,8 @@ func (f *FS) Serve(w http.ResponseWriter, r *http.Request, p string) {
 			"font-src 'self' https://fonts.gstatic.com data:; "+
 			"img-src 'self' data: blob:; connect-src 'self' ws: wss:; "+
 			"object-src 'none'; base-uri 'self'")
-	// index.html 里的 ?v=__BUILD__ 换成进程构建戳，强制静态资源走新版本。
-	if name == "index.html" && strings.Contains(string(data), "__BUILD__") {
+	// index.html / mobile.html 里的 ?v=__BUILD__ 换成进程构建戳，强制静态资源走新版本。
+	if (name == "index.html" || name == "mobile.html") && strings.Contains(string(data), "__BUILD__") {
 		data = []byte(strings.ReplaceAll(string(data), "__BUILD__", f.buildStamp))
 	}
 	w.WriteHeader(http.StatusOK)

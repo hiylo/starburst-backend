@@ -1,0 +1,309 @@
+/* ============================================================================
+ * StarBurst Mobile — 移动端专用样式
+ * 复用 style.css 的主题令牌 / 聊天渲染 / 问题卡片样式，这里定义移动端壳：
+ * 品牌登录页、卡片化会话列表、胶囊筛选、底部抽屉、触控反馈与安全区。
+ * 入口 /mobile 不在后台控制台导航中。
+ * ========================================================================== */
+
+html, body { height: 100%; }
+body { overflow: hidden; -webkit-tap-highlight-color: transparent; }
+
+.m-view {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  height: 100dvh;
+  background: var(--canvas);
+}
+
+/* ============================ 顶栏 ============================ */
+.m-head {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: calc(10px + env(safe-area-inset-top)) 14px 10px;
+  background: var(--topbar-glass);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  border-bottom: 1px solid var(--hairline);
+  z-index: 10;
+}
+.m-head-brand { display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0; }
+.m-head-title {
+  flex: 1;
+  min-width: 0;
+  font-size: 17px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.m-brand-mark {
+  width: 26px; height: 26px; border-radius: 8px; flex-shrink: 0;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--brand-gradient); color: #fff;
+  box-shadow: 0 4px 14px rgba(99, 102, 241, 0.45);
+}
+.m-brand-mark svg { width: 14px; height: 14px; }
+.m-status-dot { margin-right: 6px; }
+
+.m-icon-btn {
+  width: 36px; height: 36px; padding: 0; border-radius: 50%; flex-shrink: 0;
+  background: var(--surface-2); border: 1px solid var(--hairline);
+  color: var(--ink-muted); box-shadow: none; display: inline-flex;
+  align-items: center; justify-content: center;
+}
+.m-icon-btn:active { background: var(--surface-3); color: var(--ink); }
+.m-add-btn {
+  width: 36px; height: 36px; padding: 0; border-radius: 50%; flex-shrink: 0;
+  background: var(--brand-gradient); color: #fff; font-size: 20px; line-height: 1;
+  border: 0; box-shadow: 0 4px 16px rgba(99, 102, 241, 0.4);
+}
+.m-add-btn:active { transform: scale(0.92); }
+
+/* ============================ 搜索 / 筛选 ============================ */
+.m-search { flex-shrink: 0; position: relative; padding: 10px 14px 2px; }
+.m-search .m-search-ico {
+  position: absolute; left: 26px; top: 50%; transform: translateY(-50%);
+  color: var(--ink-tertiary); pointer-events: none;
+}
+.m-search input {
+  border-radius: var(--r-pill); padding: 9px 16px 9px 38px;
+  background: var(--surface-1); border: 1px solid var(--hairline);
+}
+.m-filters, .m-tagfilters {
+  flex-shrink: 0; display: flex; gap: 6px; flex-wrap: wrap; padding: 8px 14px 2px;
+}
+.m-filters:empty, .m-tagfilters:empty { display: none; }
+.m-filters .wb-filter, .m-tagfilters .wb-tagfilter {
+  min-height: 30px; padding: 4px 12px; border-radius: var(--r-pill); font-size: 12px;
+}
+
+/* ============================ 会话列表 ============================ */
+.m-list {
+  flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain;
+  padding: 6px 12px calc(16px + env(safe-area-inset-bottom));
+  display: flex; flex-direction: column; gap: 6px;
+}
+.m-list::-webkit-scrollbar, #chat .chat-list::-webkit-scrollbar { width: 0; display: none; }
+.m-list .wb-group-title {
+  padding: 10px 6px 2px; font-size: 11px; font-weight: 600; color: var(--ink-tertiary);
+  letter-spacing: 0.04em;
+}
+
+.m-item {
+  display: flex; gap: 10px; align-items: flex-start;
+  background: var(--surface-1); border: 1px solid var(--hairline);
+  border-radius: var(--r-lg); padding: 12px 14px; margin-bottom: 0;
+  transition: border-color 120ms ease, background 120ms ease, transform 120ms ease;
+}
+.m-item:hover { background: var(--surface-1); }
+.m-item:active { transform: scale(0.985); border-color: var(--hairline-strong); }
+.m-item.active { border-color: var(--primary); background: var(--surface-2); }
+.m-item .dot { margin-top: 6px; }
+.m-item-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+.m-item-line1 { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.m-item-title {
+  flex: 1; min-width: 0; font-size: 14px; font-weight: 600; color: var(--ink);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.m-item-time { flex-shrink: 0; font-size: 11px; color: var(--ink-tertiary); font-family: var(--font-mono); }
+.m-item-line2 { display: flex; align-items: center; gap: 6px; min-width: 0; font-size: 12px; }
+.m-item-dir { flex: 1; min-width: 0; color: var(--ink-subtle); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.m-item-model { flex-shrink: 0; color: var(--ink-muted); font-family: var(--font-mono); font-size: 11px; }
+.m-item .wb-star { margin-left: auto; flex-shrink: 0; }
+.m-item .qbadge { flex-shrink: 0; }
+.m-item .newdot { flex-shrink: 0; }
+.m-item-tags { display: flex; gap: 4px; flex-wrap: wrap; margin-top: 1px; }
+
+/* ============================ 聊天页 ============================ */
+#chatView .m-shell {
+  flex-shrink: 0; max-height: 38dvh; overflow-y: auto; padding: 8px 14px 0;
+}
+#chatView .m-shell:empty { display: none; }
+.m-meta { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+#chat { flex: 1 1 0; min-height: 0; padding: 6px 10px calc(10px + env(safe-area-inset-bottom)); }
+#chat .chat-compose { border-radius: var(--r-lg); margin: 0 2px; }
+
+/* ============================ 登录页 ============================ */
+.m-login {
+  position: fixed; inset: 0;
+  display: flex; align-items: center; justify-content: center;
+  padding: 24px; background: var(--canvas);
+}
+.m-login-card {
+  width: 100%; max-width: 340px;
+  display: flex; flex-direction: column; align-items: center; gap: 14px;
+}
+.m-brand-logo {
+  width: 68px; height: 68px; border-radius: 22px;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--brand-gradient); color: #fff;
+  box-shadow: 0 12px 40px rgba(99, 102, 241, 0.5);
+  margin-bottom: 4px;
+}
+.m-brand-logo svg { width: 34px; height: 34px; }
+.m-login-brand { font-size: 24px; font-weight: 700; letter-spacing: -0.02em; }
+.m-login-sub { color: var(--ink-subtle); font-size: 13px; margin-top: -8px; }
+.m-login-field { width: 100%; }
+.m-login-field input { border-radius: var(--r-lg); padding: 12px 14px; }
+.m-login-btn {
+  width: 100%; padding: 12px; border-radius: var(--r-lg); border: 0;
+  background: var(--brand-gradient); color: #fff;
+  font-size: 15px; font-weight: 600;
+  box-shadow: 0 8px 24px rgba(99, 102, 241, 0.4);
+}
+.m-login-btn:active { transform: scale(0.98); }
+.m-login .msg { text-align: center; }
+
+/* ============================ 弹层 / 底部抽屉 ============================ */
+.m-modal {
+  position: fixed; inset: 0; z-index: 80;
+  display: flex; align-items: flex-end; justify-content: center;
+  background: var(--overlay);
+  animation: mFadeIn 0.16s ease;
+}
+@keyframes mFadeIn { from { opacity: 0; } to { opacity: 1; } }
+.m-modal-card {
+  width: 100%; max-width: 520px; max-height: 86dvh;
+  display: flex; flex-direction: column;
+  background: var(--surface-1); border: 1px solid var(--hairline-strong); border-bottom: 0;
+  border-radius: var(--r-xl) var(--r-xl) 0 0; overflow: hidden;
+  animation: mSlideUp 0.22s cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+.m-sheet {
+  width: 100%; max-width: 520px;
+  background: var(--surface-1); border: 1px solid var(--hairline-strong); border-bottom: 0;
+  border-radius: var(--r-xl) var(--r-xl) 0 0;
+  padding: 18px 16px calc(18px + env(safe-area-inset-bottom));
+  display: flex; flex-direction: column; gap: 10px;
+  animation: mSlideUp 0.22s cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+@keyframes mSlideUp { from { transform: translateY(28px); opacity: 0.5; } to { transform: translateY(0); opacity: 1; } }
+.m-sheet-title { font-weight: 700; font-size: 16px; margin-bottom: 4px; }
+.m-sheet button { width: 100%; min-height: 46px; justify-content: center; border-radius: var(--r-md); }
+.m-sheet .m-sheet-danger { color: var(--danger); background: transparent; border: 1px solid var(--danger-dim); }
+.m-sheet .m-sheet-danger:hover { background: var(--danger-dim); }
+.m-sheet hr { width: 100%; border: 0; border-top: 1px solid var(--hairline); margin: 2px 0; }
+.m-field { display: flex; flex-direction: column; gap: 6px; }
+.m-field label { margin: 0; font-size: 12.5px; color: var(--ink-subtle); }
+.m-sheet-actions { display: flex; flex-direction: column; gap: 8px; margin-top: 4px; }
+.m-primary {
+  background: var(--primary); color: var(--on-primary); border: 0;
+}
+.m-modal-head {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 16px 18px 12px; border-bottom: 1px solid var(--hairline);
+  font-weight: 600; font-size: 15px;
+}
+.m-modal-body {
+  padding: 16px 18px calc(18px + env(safe-area-inset-bottom));
+  overflow-y: auto; -webkit-overflow-scrolling: touch;
+}
+.m-close {
+  width: 30px; height: 30px; padding: 0; border-radius: 50%;
+  background: var(--surface-2); border: 0; color: var(--ink-subtle);
+  font-size: 18px; line-height: 1; box-shadow: none;
+}
+
+/* ============================ 通知 toast ============================ */
+.toast-wrap { left: 12px; right: 12px; max-width: none; top: calc(10px + env(safe-area-inset-top)); align-items: center; }
+.toast { width: 100%; }
+
+/* ============================ 品牌增强 ============================ */
+/* 登录页顶部品牌渐变光晕，强化品牌氛围 */
+.m-login::before {
+  content: "";
+  position: absolute;
+  width: 460px; height: 460px;
+  top: -140px; left: 50%; transform: translateX(-50%);
+  background: radial-gradient(circle, rgba(99, 102, 241, 0.30) 0%, rgba(139, 92, 246, 0.16) 45%, transparent 70%);
+  pointer-events: none;
+}
+/* 登录表单卡片化，与列表/聊天卡片一致的语言 */
+.m-login-card {
+  background: var(--surface-1);
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-xl);
+  padding: 34px 26px 28px;
+  box-shadow: var(--shadow-card), var(--shadow-lift);
+  position: relative;
+}
+
+/* 列表卡片选中态：左侧品牌渐变条 + 状态点放大。
+   注意：不能用 overflow:hidden —— 会让 flex item 的 min-height:auto 失效，
+   在 .m-list（flex column）里被 flex-shrink 压缩，导致第二行被裁剪、会话名偏下。 */
+.m-item { position: relative; flex-shrink: 0; }
+.m-item.active::before {
+  content: "";
+  position: absolute; left: 0; top: 0; bottom: 0; width: 3px;
+  background: var(--brand-gradient);
+  border-radius: var(--r-lg) 0 0 var(--r-lg);
+}
+.m-item .dot { width: 9px; height: 9px; }
+
+/* 聊天输入框：贴底悬浮阴影，与消息区分离 */
+#chat .chat-compose {
+  box-shadow: 0 -6px 24px rgba(0, 0, 0, 0.12);
+}
+
+/* 修复 style.css @media(max-width:768px) 的 button{min-height:40px} 撑高问题：
+   移动端小尺寸圆形/方形按钮被撑成椭圆，这里恢复正方形；消息操作小按钮恢复紧凑。 */
+.m-icon-btn, .m-add-btn, .m-close, .m-brand-mark {
+  min-height: 0;
+  height: auto;
+  aspect-ratio: 1 / 1;
+}
+#chat .cc-btn, #chat .cc-send, #chat .chat-fab button {
+  min-height: 0;
+  aspect-ratio: 1 / 1;
+}
+#chat .cc-btn { width: 32px; height: auto; }
+#chat .cc-send { width: 32px; height: auto; }
+#chat .cacts button, #chat .iact-inline, #chat .ctx-click { min-height: 0; }
+
+/* 列表收藏星标同样被 style.css 的 button{min-height:40px} 撑到 40px 高，
+   把列表项第二行撑高、会话名相对卡片偏移（iPhone 上表现为会话名偏下）。
+   这里恢复紧凑正方形，列表项回到紧凑两行。 */
+.m-item .wb-star {
+  min-height: 0;
+  aspect-ratio: 1 / 1;
+  align-self: center;
+}
+/* 会话名/目录明确行高：消除 iPhone 中文字体默认行高造成的标题行内偏下 */
+.m-item-line1, .m-item-line2 { line-height: 1.3; }
+.m-item-title, .m-item-dir, .m-item-time, .m-item-model { line-height: 1.3; }
+.m-item .dot { margin-top: 5px; }
+
+/* ============================ iOS Safari 适配 ============================ */
+/* 动态视口回退：旧版 iOS 不支持 dvh */
+.m-view { height: 100vh; height: 100dvh; }
+html, body { width: 100%; overscroll-behavior: none; }
+
+/* 防止 iOS 聚焦输入框时自动放大页面：所有输入控件字号 ≥16px
+   （style.css 的媒体查询把聊天输入框压到 12.5px，iOS 聚焦会 zoom 整页）。 */
+.m-view input, .m-view textarea, .m-login input, .m-modal input, .m-modal textarea,
+#chat .cc-input {
+  font-size: 16px;
+}
+html, body, input, textarea, button {
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+}
+
+/* 去掉 iOS 控件默认外观，让按钮/输入框呈现自定义样式 */
+button, input[type="text"], input[type="password"], textarea {
+  -webkit-appearance: none;
+  appearance: none;
+}
+select { -webkit-appearance: auto; appearance: auto; }
+
+/* 惯性滚动 + 防橡皮筋 */
+.m-list, .m-modal-body, #chat .chat-list, .m-shell {
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
+}
+
