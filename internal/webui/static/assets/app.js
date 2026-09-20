@@ -3525,6 +3525,7 @@ async function loadIntelProjects() {
   document.getElementById("intelStatTotal").textContent = list.length;
   document.getElementById("intelStatAnalyzed").textContent = analyzed;
   document.getElementById("intelStatPending").textContent = list.length - analyzed;
+  loadIntelWorkersSetting();
 }
 
 async function createIntelProject() {
@@ -4601,6 +4602,9 @@ async function loadIntelCases(id) {
     const ls = c.lastStatus;
     const statusHtml = ls ? `<span class="intel-status ${ls === "passed" ? "analyzed" : ""}">${escapeHtml(ls)}</span>` : `<span class="muted" style="font-size:11px">-</span>`;
     const flaky = c.flakyCount > 0;
+    const quarantinedHtml = c.quarantined === 1
+      ? `<span class="intel-status" style="color:var(--red,#dc2626)">已隔离</span> <button class="ghost sm" onclick="unquarantineIntelCase(${c.projectId},${c.moduleId||0},'${escapeHtml(String(c.class||"")+"."+String(c.method||""))}')">解除</button>`
+      : `<span class="muted" style="font-size:11px">-</span>`;
     tb.insertAdjacentHTML("beforeend", `<tr>
       <td class="mono clip">${escapeHtml(c.module || "-")}</td>
       <td><span class="badge">${escapeHtml(c.kind || "-")}</span></td>
@@ -4609,9 +4613,36 @@ async function loadIntelCases(id) {
       <td class="mono muted clip" title="${escapeHtml(c.path || "")}">${escapeHtml(shortProv(c.path, 0))}</td>
       <td>${statusHtml}</td>
       <td>${flaky ? `<span class="intel-status" style="color:var(--red,#dc2626)">${c.flakyCount} 次</span>` : `<span class="muted" style="font-size:11px">-</span>`}</td>
+      <td>${quarantinedHtml}</td>
     </tr>`);
   }
-  if (!cases.length) tb.insertAdjacentHTML("beforeend", `<tr><td colspan="7" class="muted" style="text-align:center;padding:16px">暂无测试用例（分析后自动发现）</td></tr>`);
+  if (!cases.length) tb.insertAdjacentHTML("beforeend", `<tr><td colspan="8" class="muted" style="text-align:center;padding:16px">暂无测试用例（分析后自动发现）</td></tr>`);
+}
+
+async function unquarantineIntelCase(projectId, moduleId, endpoint) {
+  const res = await api("/api/intel/test-cases", { method: "POST", headers: appHeaders(), body: JSON.stringify({ projectId, moduleId, endpoint }) });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) { show(document.getElementById("intelMsg"), "解除失败: " + (data.error || res.status)); return; }
+  show(document.getElementById("intelMsg"), "已解除隔离");
+  loadIntelCases(intelCurrentProject);
+}
+
+async function loadIntelWorkersSetting() {
+  const res = await api("/api/intel/settings", { headers: appHeaders() });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) return;
+  const input = document.getElementById("intelWorkers");
+  if (input && data.workers != null) input.value = data.workers;
+}
+
+async function saveIntelWorkersSetting() {
+  const input = document.getElementById("intelWorkers");
+  const workers = Number(input?.value);
+  if (!workers || workers < 1 || workers > 16) { show(document.getElementById("intelMsg"), "并发数需在 1-16 之间"); return; }
+  const res = await api("/api/intel/settings", { method: "POST", headers: appHeaders(), body: JSON.stringify({ workers }) });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) { show(document.getElementById("intelMsg"), "并发更新失败: " + (data.error || res.status)); return; }
+  show(document.getElementById("intelMsg"), "并发已更新");
 }
 
 async function loadIntelFindings(id) {

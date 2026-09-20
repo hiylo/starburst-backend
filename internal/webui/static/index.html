@@ -442,6 +442,16 @@
             </table>
           </div>
         </div>
+
+        <!-- 测试执行并发 -->
+        <div class="card">
+          <h2><span class="dot"></span>测试执行并发</h2>
+          <div class="row">
+            <input type="number" id="intelWorkers" min="1" max="16" style="width:120px" title="同时运行的测试进程数">
+            <button class="ghost" onclick="saveIntelWorkersSetting()">保存</button>
+            <span class="muted" style="font-size:12px">并发调大加速 run-all，但会吃满 CPU/IO（1-16，重启保留）</span>
+          </div>
+        </div>
       </div>
 
       <!-- 智能测试 —— 项目详情（独立页面） -->
@@ -550,8 +560,9 @@
                 <div id="intelFeatureList" style="display:flex;flex-direction:column;gap:var(--sp-sm)"></div>
               </div>
               <div class="intel-panel hidden" id="intelPanel-cases">
+                <div class="muted" style="font-size:12px;margin-bottom:var(--sp-sm)">flaky 达 3 次自动隔离，不再参与重试与 issue 生成；点「解除」恢复参与回归。</div>
                 <div class="table-wrap">
-                  <table id="intelCaseTable"><thead><tr><th>模块</th><th>类型</th><th>框架</th><th>类 / 方法</th><th>路径</th><th>最近结果</th><th>flaky</th></tr></thead><tbody></tbody></table>
+                  <table id="intelCaseTable"><thead><tr><th>模块</th><th>类型</th><th>框架</th><th>类 / 方法</th><th>路径</th><th>最近结果</th><th>flaky</th><th>隔离</th></tr></thead><tbody></tbody></table>
                 </div>
               </div>
               <div class="intel-panel hidden" id="intelPanel-findings">
