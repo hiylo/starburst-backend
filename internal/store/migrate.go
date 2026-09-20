@@ -127,6 +127,7 @@ var migrations = []migration{
 	{name: "intel_analysis_status", apply: migrationIntelAnalysisStatus},
 	{name: "intel_flaky_quarantine", apply: migrationIntelFlakyQuarantine},
 	{name: "intel_rule_project", apply: migrationIntelRuleProject},
+	{name: "intel_project_git_creds", apply: migrationIntelProjectGitCreds},
 }
 
 // migrationIntel creates the Test Intelligence subsystem tables: flat project
@@ -1283,4 +1284,18 @@ func migrationIntelProjectSources(ctx context.Context, driver string, db *sql.DB
 		created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 	)`, idColumn(driver)))
 	return err
+}
+
+// migrationIntelProjectGitCreds adds encrypted git credential columns to the
+// intel projects table (HTTP token / SSH private key). Values are stored
+// AES-256-GCM encrypted (internal/store/crypto.go), never plaintext.
+func migrationIntelProjectGitCreds(ctx context.Context, driver string, db *sql.DB) error {
+	for _, col := range []string{"git_token", "ssh_key"} {
+		stmt := fmt.Sprintf(`ALTER TABLE projects ADD COLUMN %s TEXT NOT NULL DEFAULT ''`, col)
+		if _, err := db.ExecContext(ctx, stmt); err != nil &&
+			!strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+			return err
+		}
+	}
+	return nil
 }

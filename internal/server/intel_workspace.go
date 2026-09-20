@@ -32,13 +32,33 @@ func (s *Server) projectRoot(ctx context.Context, p *store.IntelProject) (string
 	}
 	reposDir, err := s.store.GetSetting(ctx, "intel.repos_dir")
 	if err != nil || reposDir == "" {
-		return "", errSettingMissing("intel.repos_dir not configured for git projects")
+		// 未配置时回退到默认缓存路径（~/.local/share/starburst-backend/intel-repos），
+		// 使 git 项目无需手工配置即可分析。
+		reposDir = intelDefaultReposDir()
 	}
 	target := filepath.Join(reposDir, safeName(p.Name))
 	if err := s.ensureGitClone(ctx, p, target); err != nil {
 		return "", err
 	}
 	return target, nil
+}
+
+// intelDefaultReposDir returns the default git-clone cache directory used when
+// the intel.repos_dir setting is unset.
+func intelDefaultReposDir() string {
+	if h, err := os.UserHomeDir(); err == nil && h != "" {
+		return filepath.Join(h, ".local", "share", "starburst-backend", "intel-repos")
+	}
+	return filepath.Join(os.TempDir(), "starburst-intel-repos")
+}
+
+// intelReposDir resolves the effective git-clone cache directory (setting or
+// the default fallback).
+func (s *Server) intelReposDir(ctx context.Context) string {
+	if d, err := s.store.GetSetting(ctx, "intel.repos_dir"); err == nil && d != "" {
+		return d
+	}
+	return intelDefaultReposDir()
 }
 
 // intelSourcePrefix builds the unique rel-path token prefix for modules that
@@ -87,7 +107,7 @@ func (s *Server) resolveIntelSourceRoot(ctx context.Context, p *store.IntelProje
 	}
 	reposDir, err := s.store.GetSetting(ctx, "intel.repos_dir")
 	if err != nil || reposDir == "" {
-		return "", errSettingMissing("intel.repos_dir not configured for git project sources")
+		reposDir = intelDefaultReposDir()
 	}
 	target := filepath.Join(reposDir, safeName(p.Name)+"-src-"+strconv.FormatInt(src.ID, 10))
 	clone := &store.IntelProject{Name: p.Name, GitURL: src.GitURL, GitRef: src.GitRef}
@@ -148,6 +168,10 @@ func (s *Server) ensureGitClone(ctx context.Context, p *store.IntelProject, targ
 		fetch.Args = append(fetch.Args, ref)
 	}
 	fetch.Dir = target
+	if env, cleanup := gitAuthEnv(p); len(env) > 0 {
+		defer cleanup()
+		fetch.Env = append(os.Environ(), env...)
+	}
 	if out, err := fetch.CombinedOutput(); err != nil {
 		return fmt.Errorf("git fetch: %w: %s", err, strings.TrimSpace(string(out)))
 	}
@@ -166,6 +190,7 @@ func (s *Server) ensureGitClone(ctx context.Context, p *store.IntelProject, targ
 // cloneGitRepo performs a shallow, all-branches clone so later GitRef changes
 // can be fetched without an origin URL mismatch. The URL is passed as a
 // positional arg after `--` so an option-prefixed URL cannot be smuggled.
+// Project credentials (token / ssh key) are injected via the environment.
 func (s *Server) cloneGitRepo(ctx context.Context, p *store.IntelProject, target string) error {
 	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 		return err
@@ -176,10 +201,50 @@ func (s *Server) cloneGitRepo(ctx context.Context, p *store.IntelProject, target
 	}
 	args = append(args, "--", p.GitURL, target)
 	cmd := exec.CommandContext(ctx, "git", args...)
+	env, cleanup := gitAuthEnv(p)
+	defer cleanup()
+	if len(env) > 0 {
+		cmd.Env = append(os.Environ(), env...)
+	}
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("git clone: %w: %s", err, strings.TrimSpace(string(out)))
 	}
 	return nil
+}
+
+// gitAuthEnv builds the environment needed to authenticate a git clone/fetch
+// using the project's decrypted credentials: HTTP token via a temp GIT_ASKPASS
+// script, SSH private key via GIT_SSH_COMMAND with a temp identity file. Both
+// temp files are removed by the returned cleanup func.
+func gitAuthEnv(p *store.IntelProject) ([]string, func()) {
+	var env []string
+	cleanups := make([]func(), 0, 2)
+	if p.GitToken != "" {
+		if f, err := os.CreateTemp("", "git-askpass-*"); err == nil {
+			_ = f.Chmod(0o700)
+			escaped := strings.ReplaceAll(p.GitToken, "'", `'\''`)
+			_, _ = f.WriteString("#!/bin/sh\nprintf '%s\\n' '" + escaped + "'\n")
+			_ = f.Close()
+			env = append(env, "GIT_ASKPASS="+f.Name(), "GIT_TERMINAL_PROMPT=0")
+			path := f.Name()
+			cleanups = append(cleanups, func() { _ = os.Remove(path) })
+		}
+	}
+	if p.SSHKey != "" {
+		if f, err := os.CreateTemp("", "git-key-*"); err == nil {
+			_ = f.Chmod(0o600)
+			_, _ = f.WriteString(p.SSHKey)
+			_ = f.Close()
+			env = append(env, "GIT_SSH_COMMAND=ssh -i "+f.Name()+" -o StrictHostKeyChecking=no -o IdentitiesOnly=yes")
+			path := f.Name()
+			cleanups = append(cleanups, func() { _ = os.Remove(path) })
+		}
+	}
+	return env, func() {
+		for _, c := range cleanups {
+			c()
+		}
+	}
 }
 
 func errNotDir(root string) error { return &pathErr{msg: "project path is not a directory: " + root} }

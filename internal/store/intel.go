@@ -27,6 +27,8 @@ type IntelProject struct {
 	// "ok", "failed". It lets the UI show "分析失败/进行中" instead of guessing
 	// from a nil AnalyzedAt.
 	AnalysisStatus string    `json:"analysisStatus"`
+	GitToken       string    `json:"-"` // HTTP token（AES-256-GCM 加密落库，API 不返回）
+	SSHKey         string    `json:"-"` // SSH 私钥（AES-256-GCM 加密落库，API 不返回）
 	CreatedAt      time.Time `json:"createdAt"`
 	UpdatedAt      time.Time `json:"updatedAt"`
 }
@@ -85,23 +87,32 @@ type IntelEndpoint struct {
 }
 
 // CreateIntelProject persists a new project and populates its auto-generated id.
+// Git credentials (token / ssh key) are AES-256-GCM encrypted before insert.
 func (s *sqlStore) CreateIntelProject(ctx context.Context, p *IntelProject) error {
+	tok, err := s.encryptSecret(ctx, p.GitToken)
+	if err != nil {
+		return err
+	}
+	key, err := s.encryptSecret(ctx, p.SSHKey)
+	if err != nil {
+		return err
+	}
 	if isPostgres(s.driver) {
 		return s.db.QueryRowContext(ctx, s.q(`
 			INSERT INTO projects (name, source, local_path, git_url, git_ref, description, last_tested_sha,
-				snapshot_sha, commands_json, env_name, analysis_status, analyzed_at, created_at, updated_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+				snapshot_sha, commands_json, env_name, analysis_status, git_token, ssh_key, analyzed_at, created_at, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
 			RETURNING id`),
 			p.Name, p.Source, p.LocalPath, p.GitURL, p.GitRef, p.Description, p.LastTestedSHA,
-			p.SnapshotSHA, p.CommandsJSON, p.EnvName, p.AnalysisStatus, p.AnalyzedAt,
+			p.SnapshotSHA, p.CommandsJSON, p.EnvName, p.AnalysisStatus, tok, key, p.AnalyzedAt,
 		).Scan(&p.ID)
 	}
 	res, err := s.db.ExecContext(ctx, s.q(`
 		INSERT INTO projects (name, source, local_path, git_url, git_ref, description, last_tested_sha,
-			snapshot_sha, commands_json, env_name, analysis_status, analyzed_at, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`),
+			snapshot_sha, commands_json, env_name, analysis_status, git_token, ssh_key, analyzed_at, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`),
 		p.Name, p.Source, p.LocalPath, p.GitURL, p.GitRef, p.Description, p.LastTestedSHA,
-		p.SnapshotSHA, p.CommandsJSON, p.EnvName, p.AnalysisStatus, p.AnalyzedAt,
+		p.SnapshotSHA, p.CommandsJSON, p.EnvName, p.AnalysisStatus, tok, key, p.AnalyzedAt,
 	)
 	if err != nil {
 		return err
@@ -114,11 +125,13 @@ func (s *sqlStore) CreateIntelProject(ctx context.Context, p *IntelProject) erro
 	return nil
 }
 
-// ListIntelProjects returns all registered projects, newest first.
+// ListIntelProjects returns all registered projects, newest first. Git
+// credentials are decrypted into the returned structs (handlers must not expose
+// them over the API).
 func (s *sqlStore) ListIntelProjects(ctx context.Context) ([]*IntelProject, error) {
 	rows, err := s.db.QueryContext(ctx, s.q(`
 		SELECT id, name, source, local_path, git_url, git_ref, description, last_tested_sha,
-			snapshot_sha, commands_json, env_name, analysis_status, analyzed_at, created_at, updated_at
+			snapshot_sha, commands_json, env_name, analysis_status, git_token, ssh_key, analyzed_at, created_at, updated_at
 		FROM projects ORDER BY created_at DESC`))
 	if err != nil {
 		return nil, err
@@ -130,33 +143,68 @@ func (s *sqlStore) ListIntelProjects(ctx context.Context) ([]*IntelProject, erro
 		if err != nil {
 			return nil, err
 		}
+		if err := s.decryptIntelProjectCreds(ctx, p); err != nil {
+			return nil, err
+		}
 		out = append(out, p)
 	}
 	return out, rows.Err()
 }
 
-// GetIntelProject loads a single project.
+// GetIntelProject loads a single project, credentials decrypted.
 func (s *sqlStore) GetIntelProject(ctx context.Context, id int64) (*IntelProject, error) {
 	row := s.db.QueryRowContext(ctx, s.q(`
 		SELECT id, name, source, local_path, git_url, git_ref, description, last_tested_sha,
-			snapshot_sha, commands_json, env_name, analysis_status, analyzed_at, created_at, updated_at
+			snapshot_sha, commands_json, env_name, analysis_status, git_token, ssh_key, analyzed_at, created_at, updated_at
 		FROM projects WHERE id = ?`), id)
 	p, err := scanIntelProject(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
+	if err == nil {
+		err = s.decryptIntelProjectCreds(ctx, p)
+	}
 	return p, err
 }
 
-// UpdateIntelProject persists the mutable project fields.
+// UpdateIntelProject persists the mutable project fields, re-encrypting git
+// credentials.
 func (s *sqlStore) UpdateIntelProject(ctx context.Context, p *IntelProject) error {
-	_, err := s.db.ExecContext(ctx, s.q(`
+	tok, err := s.encryptSecret(ctx, p.GitToken)
+	if err != nil {
+		return err
+	}
+	key, err := s.encryptSecret(ctx, p.SSHKey)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx, s.q(`
 		UPDATE projects SET name = ?, source = ?, local_path = ?, git_url = ?, git_ref = ?,
 			description = ?, last_tested_sha = ?, snapshot_sha = ?, commands_json = ?, env_name = ?,
-			analysis_status = ?, analyzed_at = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`),
+			analysis_status = ?, git_token = ?, ssh_key = ?, analyzed_at = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`),
 		p.Name, p.Source, p.LocalPath, p.GitURL, p.GitRef, p.Description, p.LastTestedSHA,
-		p.SnapshotSHA, p.CommandsJSON, p.EnvName, p.AnalysisStatus, p.AnalyzedAt, p.ID)
+		p.SnapshotSHA, p.CommandsJSON, p.EnvName, p.AnalysisStatus, tok, key, p.AnalyzedAt, p.ID)
 	return err
+}
+
+// decryptIntelProjectCreds decrypts GitToken/SSHKey in place (empty stays empty;
+// legacy plaintext passes through decryptSecret).
+func (s *sqlStore) decryptIntelProjectCreds(ctx context.Context, p *IntelProject) error {
+	if p.GitToken != "" {
+		t, err := s.decryptSecret(ctx, p.GitToken)
+		if err != nil {
+			return err
+		}
+		p.GitToken = t
+	}
+	if p.SSHKey != "" {
+		k, err := s.decryptSecret(ctx, p.SSHKey)
+		if err != nil {
+			return err
+		}
+		p.SSHKey = k
+	}
+	return nil
 }
 
 // MarkIntelAnalyzeStarted flags a project as analyzing so the UI can show the
@@ -501,7 +549,7 @@ func scanIntelProject(row rowScanner) (*IntelProject, error) {
 	var analyzed *time.Time
 	err := row.Scan(&p.ID, &p.Name, &p.Source, &p.LocalPath, &p.GitURL, &p.GitRef,
 		&p.Description, &p.LastTestedSHA, &p.SnapshotSHA, &p.CommandsJSON, &p.EnvName,
-		&p.AnalysisStatus, &analyzed, &p.CreatedAt, &p.UpdatedAt)
+		&p.AnalysisStatus, &p.GitToken, &p.SSHKey, &analyzed, &p.CreatedAt, &p.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}
