@@ -240,3 +240,89 @@ func TestStreamRelaysEvents(t *testing.T) {
 		t.Fatalf("missing connected preamble: %q", body)
 	}
 }
+
+// TestSessionStatusAggClearsStaleBusy verifies the aggregated /session/status
+// clears event-aggregation busy/retry residues for sessions the upstream
+// snapshot no longer reports, while keeping genuinely-active sessions busy.
+func TestSessionStatusAggClearsStaleBusy(t *testing.T) {
+	ctx := context.Background()
+	func() {
+		// Upstream only reports one truly-busy session; the other session was
+		// busy previously but is now gone from the snapshot.
+		upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/global/health":
+				_, _ = w.Write([]byte(`{"healthy":true}`))
+			case "/session/status":
+				_, _ = w.Write([]byte(`{"ses_snap":{"type":"busy"}}`))
+			case "/config":
+				_, _ = w.Write([]byte(`{}`))
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		t.Cleanup(upstream.Close)
+
+		dsn := store.SQLiteDSN(filepath.Join(t.TempDir(), "test.db"))
+		st, err := store.OpenFromConfig(ctx, "sqlite", dsn)
+		if err != nil {
+			t.Fatalf("open store: %v", err)
+		}
+		t.Cleanup(func() { st.Close() })
+		am := auth.NewManager(st)
+		if _, err := am.Initialize(ctx, "S3cureAdmin!"); err != nil {
+			t.Fatalf("init auth: %v", err)
+		}
+		cfg := &config.Config{ListenAddr: "127.0.0.1:0", OpenCodeURL: upstream.URL, DBDriver: "sqlite"}
+		hub := push.NewHub()
+		go hub.Run()
+		srv := New(cfg, st, am, opencode.New(upstream.URL), hub)
+
+		// Event aggregation residues: ses_snap (in snapshot), ses_stale_busy
+		// (was busy, now stale), ses_stale_retry (was retrying, now stale),
+		// and ses_active_busy (naively busy, has recent activity — must survive).
+		srv.sessionStatuses.Store("ses_snap", "busy")
+		srv.sessionStatuses.Store("ses_stale_busy", "busy")
+		srv.sessionStatuses.Store("ses_stale_retry", "retry")
+		srv.sessionStatuses.Store("ses_active_busy", "busy")
+		srv.sessionActivity.Store("ses_active_busy", time.Now())
+
+		rec := httptest.NewRecorder()
+		srv.handleSessionStatusAgg(rec)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
+		}
+		var out map[string]map[string]any
+		if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		typeOf := func(id string) string {
+			if m, ok := out[id]; ok {
+				if tt, ok := m["type"].(string); ok {
+					return tt
+				}
+			}
+			return ""
+		}
+		if got := typeOf("ses_snap"); got != "busy" {
+			t.Fatalf("ses_snap = %q, want busy (snapshot authoritative)", got)
+		}
+		if got := typeOf("ses_stale_busy"); got != "" {
+			t.Fatalf("ses_stale_busy = %q, want dropped", got)
+		}
+		if got := typeOf("ses_stale_retry"); got != "" {
+			t.Fatalf("ses_stale_retry = %q, want dropped", got)
+		}
+		// ses_active_busy: not in snapshot but has recent activity → kept busy.
+		if got := typeOf("ses_active_busy"); got != "busy" {
+			t.Fatalf("ses_active_busy = %q, want busy", got)
+		}
+		// Cleanup pass also prunes the stale map entries.
+		if _, ok := srv.sessionStatuses.Load("ses_stale_busy"); ok {
+			t.Fatal("ses_stale_busy residue not cleared from aggregation map")
+		}
+		if _, ok := srv.sessionStatuses.Load("ses_stale_retry"); ok {
+			t.Fatal("ses_stale_retry residue not cleared from aggregation map")
+		}
+	}()
+}

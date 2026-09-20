@@ -519,6 +519,11 @@ func (s *Server) handleSessionStatusAgg(w http.ResponseWriter) {
 		}
 		_ = resp.Body.Close()
 	}
+	// 上游 status 事件并不可靠：会话被标 idle 后仍可能继续流式输出。最近有消息
+	// 活动的会话若状态是 idle，纠正为 busy，避免「处理中显示空闲」。
+	// busy/retry 残留清除也用它：超过该窗口无任何消息输出即视为已结束。
+	const activeWindow = 30 * time.Second
+	const busyStaleWindow = activeWindow
 	now := time.Now()
 	s.sessionStatuses.Range(func(k, v any) bool {
 		id, ok := k.(string)
@@ -526,26 +531,48 @@ func (s *Server) handleSessionStatusAgg(w http.ResponseWriter) {
 			return true
 		}
 		if _, exists := out[id]; exists {
+			// 上游快照权威：命中即保留快照结果，事件聚合不透出。
 			return true
 		}
 		st, ok := v.(string)
-		if ok && st != "" {
-			out[id] = st
+		if !ok || st == "" {
+			return true
 		}
-		// 清理：已 idle 且无近期活动、也不在上游快照里的陈旧状态，否则 map 无界增长。
-		if st == "idle" {
-			if last, ok := s.sessionActivity.Load(id); ok {
-				if t, ok := last.(time.Time); ok && now.Sub(t) < time.Hour {
-					return true // 仍有近期活动，保留
-				}
+		last, hasActivity := s.sessionActivity.Load(id)
+		recent := false
+		if hasActivity {
+			if t, ok := last.(time.Time); ok {
+				recent = now.Sub(t) < busyStaleWindow
 			}
-			s.sessionStatuses.Delete(k)
+		}
+		switch st {
+		case "idle":
+			// 已 idle 且无近期活动、也不在上游快照里 → 陈旧，清除，避免 map 无界增长。
+			if !recent && !hasActivity {
+				s.sessionStatuses.Delete(k)
+				return true
+			}
+			if lastT, ok := last.(time.Time); ok && now.Sub(lastT) >= time.Hour {
+				s.sessionStatuses.Delete(k)
+				return true
+			}
+			out[id] = st
+		case "busy", "retry":
+			// 上游快照未覆盖（未在 /session/status 里）说明上游已认为该会话不再忙。
+			// 若事件聚合仍挂着 busy/retry，且超活动窗口无任何消息输出 → 判定已结束，
+			// 清除残留，避免「会话早已 stop 却永远显示处理中」的反向误报。
+			// 注意：保留上游快照偶发漏报、但确有近期消息活动的真忙会话（子 agent 场景）。
+			if !recent {
+				s.sessionStatuses.Delete(k)
+				return true
+			}
+			out[id] = st
+		default:
+			out[id] = st
 		}
 		return true
 	})
-	// 上游 status 事件并不可靠：会话被标 idle 后仍可能继续流式输出。最近有消息
-	// 活动的会话若状态是 idle，纠正为 busy，避免「处理中显示空闲」。
-	const activeWindow = 30 * time.Second
+	// 补充：最近有消息活动但上游快照与事件聚合都没标 busy 的会话，纠正为 busy。
 	s.sessionActivity.Range(func(k, v any) bool {
 		id, ok := k.(string)
 		if !ok {
