@@ -13,11 +13,17 @@ import (
 // brute-forced; bcrypt already raises the cost per guess, the limiter bounds
 // the total guesses. Attempts older than the window are discarded.
 type loginLimiter struct {
-	mu       sync.Mutex
-	attempts map[string][]time.Time
-	limit    int
-	window   time.Duration
+	mu        sync.Mutex
+	attempts  map[string][]time.Time
+	limit     int
+	window    time.Duration
+	lastPrune time.Time
 }
+
+// maxLoginAttemptKeys caps the distinct client keys the limiter tracks. Beyond
+// it we run an opportunistic prune sweep; the map cannot grow without bound
+// even if an attacker floods distinct X-Forwarded-For values.
+const maxLoginAttemptKeys = 10_000
 
 func newLoginLimiter(limit int, window time.Duration) *loginLimiter {
 	return &loginLimiter{
@@ -46,8 +52,13 @@ func (l *loginLimiter) allow(key string) bool {
 	}
 	l.attempts[key] = append(hits, now)
 	// 周期性清理已失去价值的 key，防止 attempts 无界增长（配合 clientKey
-	// 可被攻击者用大量 X-Forwarded-For 注入不同 key）。
-	l.prune(recent)
+	// 可被攻击者用大量 X-Forwarded-For 注入不同 key）。清理从「每次请求全表扫描」
+	// 降到「每窗口至多一次 + key 数超限时兜底」，避免对 map 做 O(n) 遍历成为
+	// 放大 CPU DoS 的路径。
+	if now.Sub(l.lastPrune) >= l.window || len(l.attempts) > maxLoginAttemptKeys {
+		l.prune(recent)
+		l.lastPrune = now
+	}
 	return true
 }
 

@@ -15,9 +15,9 @@ const (
 	TaskSucceeded = "succeeded"
 	TaskFailed    = "failed"
 	TaskCanceled  = "canceled"
-	TaskPending   = "pending"    // 等待前置依赖完成
-	TaskBlocked   = "blocked"    // 前置依赖最终失败被阻塞
-	TaskScheduled = "scheduled"  // 已排期：等待 scheduled_at 到期，或周期模板（cron 非空）
+	TaskPending   = "pending"   // 等待前置依赖完成
+	TaskBlocked   = "blocked"   // 前置依赖最终失败被阻塞
+	TaskScheduled = "scheduled" // 已排期：等待 scheduled_at 到期，或周期模板（cron 非空）
 )
 
 // taskColumns is the canonical SELECT/RETURNING column list, kept in a single
@@ -31,16 +31,16 @@ type Task struct {
 	Directory   string     `json:"directory"` // working directory hint for new sessions
 	Name        string     `json:"name"`      // user-facing task name ("" = derive from prompt)
 	Prompt      string     `json:"prompt"`
-	DependsOn   string     `json:"dependsOn"`  // 前置依赖任务 id（空表示无依赖）
+	DependsOn   string     `json:"dependsOn"` // 前置依赖任务 id（空表示无依赖）
 	Status      string     `json:"status"`
 	Error       string     `json:"error"`
 	Result      string     `json:"result"`
 	Progress    string     `json:"progress"`
 	AISummary   string     `json:"aiSummary"` // LLM result summary (success) or root-cause analysis (failure)
 	Attempts    int        `json:"attempts"`
-	Priority    int        `json:"priority"`        // 0-100，越高越先执行（默认 50）
-	TimeoutSec  int        `json:"timeoutSeconds"`  // 单次执行超时（秒），0=不限制
-	WorkflowID  string     `json:"workflowId"`      // 多步编排分组 id（空=独立任务）
+	Priority    int        `json:"priority"`       // 0-100，越高越先执行（默认 50）
+	TimeoutSec  int        `json:"timeoutSeconds"` // 单次执行超时（秒），0=不限制
+	WorkflowID  string     `json:"workflowId"`     // 多步编排分组 id（空=独立任务）
 	CreatedAt   time.Time  `json:"createdAt"`
 	UpdatedAt   time.Time  `json:"updatedAt"`
 	StartedAt   *time.Time `json:"startedAt"`
@@ -589,14 +589,14 @@ func (s *sqlStore) ListWorkflowSummaries(ctx context.Context, limit int) ([]*Wor
 // per-status counts, success rate and average run duration, plus a per-day
 // trend (created vs succeeded/failed) for the overview chart.
 type TaskStatsWindow struct {
-	StatusCounts map[string]int `json:"statusCounts"`
-	Total        int            `json:"total"`
-	Completed    int            `json:"completed"`
-	Succeeded    int            `json:"succeeded"`
-	Failed       int            `json:"failed"`
-	SuccessRate  float64        `json:"successRate"` // 0..1
-	AvgDurationSec float64      `json:"avgDurationSec"`
-	Trend        []DayTrend     `json:"trend"`
+	StatusCounts   map[string]int `json:"statusCounts"`
+	Total          int            `json:"total"`
+	Completed      int            `json:"completed"`
+	Succeeded      int            `json:"succeeded"`
+	Failed         int            `json:"failed"`
+	SuccessRate    float64        `json:"successRate"` // 0..1
+	AvgDurationSec float64        `json:"avgDurationSec"`
+	Trend          []DayTrend     `json:"trend"`
 }
 
 // DayTrend is one day bucket of the task volume/success trend.

@@ -70,7 +70,7 @@ func TestNextCronRanges(t *testing.T) {
 // change.
 func TestNextCronWeekendRange(t *testing.T) {
 	base := time.Date(2026, 9, 21, 0, 0, 0, 0, time.Local) // Monday
-	got, err := NextCron(base, "0 0 0 13 * 6,0")          // only the 13th that is also a weekend day
+	got, err := NextCron(base, "0 0 0 13 * 6,0")           // only the 13th that is also a weekend day
 	if err != nil {
 		t.Fatalf("NextCron: %v", err)
 	}

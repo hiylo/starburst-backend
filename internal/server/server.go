@@ -85,17 +85,17 @@ func (s *Server) SetMaxConcurrency(n int) { s.maxConcurrency = n }
 // New assembles the server with its dependencies.
 func New(cfg *config.Config, st store.Store, am *auth.Manager, oc *opencode.Client, hub *push.Hub) *Server {
 	return &Server{
-		cfg:          cfg,
-		store:        st,
-		auth:         am,
-		openCode:     oc,
-		hub:          hub,
-		loginLimit:   newLoginLimiter(5, 5*time.Minute),
-		genLimit:     newLoginLimiter(20, time.Minute),
-		touchSeen:    make(map[string]time.Time),
-		auditCh:      make(chan *store.AuditEntry, 512),
-		intelExecSem: make(chan struct{}, intelExecConcurrency),
-		intelCancels: make(map[int64]context.CancelFunc),
+		cfg:           cfg,
+		store:         st,
+		auth:          am,
+		openCode:      oc,
+		hub:           hub,
+		loginLimit:    newLoginLimiter(5, 5*time.Minute),
+		genLimit:      newLoginLimiter(20, time.Minute),
+		touchSeen:     make(map[string]time.Time),
+		auditCh:       make(chan *store.AuditEntry, 512),
+		intelExecSem:  make(chan struct{}, intelExecConcurrency),
+		intelCancels:  make(map[int64]context.CancelFunc),
 		intelAutoLast: make(map[int64]time.Time),
 	}
 }
@@ -320,7 +320,7 @@ func (s *Server) logMiddleware(next http.Handler) http.Handler {
 		// STT traffic would flood the audit table: a 10s recording at 200ms
 		// per chunk is 50 rows, and the app re-probes /api/stt on every chat
 		// screen open, so the whole subtree is skipped entirely.
-		if strings.HasPrefix(r.URL.Path, "/api/stt") {
+		if strings.HasPrefix(r.URL.Path, "/api/stt") || strings.HasPrefix(r.URL.Path, "/api/audit") {
 			return
 		}
 		if rec, ok := s.tokenFromRequest(r); ok {
@@ -337,8 +337,35 @@ func (s *Server) logMiddleware(next http.Handler) http.Handler {
 			default:
 				// 队列满则丢弃（审计是尽力而为的记账），不阻塞请求。
 			}
+		} else if sid := s.webSessionID(r); sid != "" {
+			// Web session（管理员）通道同样留痕：登录/改密码/建删 token/改配置等
+			// 最高危操作此前完全无审计记录。TokenName 固定标识通道，TokenID 存
+			// 会话 id（无敏感信息），无需加列/migration。
+			select {
+			case s.auditCh <- &store.AuditEntry{
+				TokenID:   sid,
+				TokenName: "web-session",
+				Method:    r.Method,
+				Path:      r.URL.Path,
+				Status:    ww.status,
+			}:
+			default:
+			}
 		}
 	})
+}
+
+// webSessionID returns the validated web session id from the request, or "" when
+// absent/invalid. Used by the audit middleware to record admin actions.
+func (s *Server) webSessionID(r *http.Request) string {
+	sid := r.Header.Get("X-Web-Session")
+	if sid == "" {
+		return ""
+	}
+	if _, err := s.store.GetWebSession(r.Context(), sid); err != nil {
+		return ""
+	}
+	return sid
 }
 
 // queryTokenPaths are the only endpoints that accept an APP token as ?token=.

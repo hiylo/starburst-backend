@@ -118,11 +118,11 @@ func TestMatch(t *testing.T) {
 
 func TestServiceFromURI(t *testing.T) {
 	cases := map[string]string{
-		"lb://payment-provider":        "payment-provider",
-		"http://localhost:8080":        "localhost",
-		"lb://admin":                   "admin",
-		"lb://frontend/":               "frontend",
-		"":                             "",
+		"lb://payment-provider": "payment-provider",
+		"http://localhost:8080": "localhost",
+		"lb://admin":            "admin",
+		"lb://frontend/":        "frontend",
+		"":                      "",
 	}
 	for in, want := range cases {
 		if got := serviceFromURI(in); got != want {

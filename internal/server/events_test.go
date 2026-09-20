@@ -38,7 +38,8 @@ func TestParseSessionEventV2DataAndCamelCase(t *testing.T) {
 // TestParseSessionEventV18Wrapped regresses the real opencode (>=1.18) global
 // event payload, where the event is wrapped in a top-level "payload" object:
 // {"payload":{"type":"message.part.delta","properties":{"sessionID":"ses_.."}},
-//  "project":"..","directory":".."}. The host name stays in the raw Data.
+//
+//	"project":"..","directory":".."}. The host name stays in the raw Data.
 func TestParseSessionEventV18Wrapped(t *testing.T) {
 	ev := opencode.SSEEvent{Data: []byte(`{"directory":"/w","project":"p","payload":{"id":"evt_x","type":"message.part.delta","properties":{"sessionID":"ses_wrapped","delta":"a"}}}`)}
 	se, ok := parseSessionEvent(ev)

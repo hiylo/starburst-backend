@@ -160,16 +160,16 @@ func (s *Server) listTasks(w http.ResponseWriter, r *http.Request) {
 // the new task is created as pending and is only re-queued once upstream succeeds.
 func (s *Server) createTask(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Name          string `json:"name"`
-		Prompt        string `json:"prompt"`
-		SessionID     string `json:"sessionId"`
-		Directory     string `json:"directory"`
-		DependsOn     string `json:"dependsOn"`
-		Priority      int    `json:"priority"`
-		TimeoutSec    int    `json:"timeoutSeconds"`
-		WorkflowID    string `json:"workflowId"`
-		ScheduledAt   string `json:"scheduledAt"`
-		Cron          string `json:"cron"`
+		Name        string `json:"name"`
+		Prompt      string `json:"prompt"`
+		SessionID   string `json:"sessionId"`
+		Directory   string `json:"directory"`
+		DependsOn   string `json:"dependsOn"`
+		Priority    int    `json:"priority"`
+		TimeoutSec  int    `json:"timeoutSeconds"`
+		WorkflowID  string `json:"workflowId"`
+		ScheduledAt string `json:"scheduledAt"`
+		Cron        string `json:"cron"`
 	}
 	if !readBody(w, r, &req) {
 		return

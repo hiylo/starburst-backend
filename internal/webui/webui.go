@@ -59,6 +59,14 @@ func (f *FS) Serve(w http.ResponseWriter, r *http.Request, p string) {
 	// 安全头：防 MIME 嗅探执行（页面公开可访问，兜一层）。
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("X-Frame-Options", "DENY")
+	// CSP：只允许同源 + 内联样式/脚本（前端 100+ 处内联 style）+ Google Fonts，
+	// 阻止向第三方加载脚本 / 外传数据（管理员页面被 XSS 时的外泄面收敛）。
+	w.Header().Set("Content-Security-Policy",
+		"default-src 'self'; script-src 'self' 'unsafe-inline'; "+
+			"style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "+
+			"font-src 'self' https://fonts.gstatic.com data:; "+
+			"img-src 'self' data: blob:; connect-src 'self' ws: wss:; "+
+			"object-src 'none'; base-uri 'self'")
 	// index.html 里的 ?v=__BUILD__ 换成进程构建戳，强制静态资源走新版本。
 	if name == "index.html" && strings.Contains(string(data), "__BUILD__") {
 		data = []byte(strings.ReplaceAll(string(data), "__BUILD__", f.buildStamp))

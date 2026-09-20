@@ -26,9 +26,9 @@ type IntelProject struct {
 	// AnalysisStatus is the background analyze lifecycle: "" never run, "running",
 	// "ok", "failed". It lets the UI show "分析失败/进行中" instead of guessing
 	// from a nil AnalyzedAt.
-	AnalysisStatus string     `json:"analysisStatus"`
-	CreatedAt      time.Time  `json:"createdAt"`
-	UpdatedAt      time.Time  `json:"updatedAt"`
+	AnalysisStatus string    `json:"analysisStatus"`
+	CreatedAt      time.Time `json:"createdAt"`
+	UpdatedAt      time.Time `json:"updatedAt"`
 }
 
 // IntelModule is one sub-module of a monorepo/mixed-type repository.

@@ -9,11 +9,11 @@ import (
 
 // Archive is a stored snapshot of a remote OpenCode session.
 type Archive struct {
-	ID        string    `json:"id"`
-	SessionID string    `json:"sessionId"`
-	Title     string    `json:"title"`
-	Format    string    `json:"format"` // "markdown" | "json"
-	Content   string    `json:"content"`
+	ID        string `json:"id"`
+	SessionID string `json:"sessionId"`
+	Title     string `json:"title"`
+	Format    string `json:"format"` // "markdown" | "json"
+	Content   string `json:"content"`
 	// RawMessages 保存会话的完整结构化消息 JSON（含 info/parts），用于恢复。
 	// 旧归档无该数据时为空字符串。
 	RawMessages string    `json:"rawMessages,omitempty"`

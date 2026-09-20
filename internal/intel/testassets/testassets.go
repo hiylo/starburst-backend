@@ -127,10 +127,10 @@ func classifyFile(fullPath, relSlash, moduleRelPath string, isPlaywright, isVite
 	}
 
 	// Go: *_test.go → go-test, one Asset per top-level function whose name starts
-// with Test/Benchmark/Example (class = base name without _test.go, so the
-// runner can backfill last_status per case). Files with no such top-level
-// funcs still yield one file-level Asset so the file is not lost.
-if strings.HasSuffix(base, "_test.go") {
+	// with Test/Benchmark/Example (class = base name without _test.go, so the
+	// runner can backfill last_status per case). Files with no such top-level
+	// funcs still yield one file-level Asset so the file is not lost.
+	if strings.HasSuffix(base, "_test.go") {
 		return classifyGo(fullPath, moduleRelPath, relSlash)
 	}
 

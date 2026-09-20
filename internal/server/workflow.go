@@ -12,18 +12,18 @@ import (
 
 // workflowStep is one step of a multi-step orchestration.
 type workflowStep struct {
-	Name          string `json:"name"` // 步骤名（写到任务 name）
-	Prompt        string `json:"prompt"`
-	Directory     string `json:"directory"` // 为空则用工作流默认目录
-	TimeoutSec    int    `json:"timeoutSeconds"`
-	Priority      int    `json:"priority"`
+	Name       string `json:"name"` // 步骤名（写到任务 name）
+	Prompt     string `json:"prompt"`
+	Directory  string `json:"directory"` // 为空则用工作流默认目录
+	TimeoutSec int    `json:"timeoutSeconds"`
+	Priority   int    `json:"priority"`
 }
 
 // workflowRequest creates a chained sequence of tasks sharing one workflow id.
 type workflowRequest struct {
-	Name       string         `json:"name"`
-	Directory  string         `json:"directory"`
-	Steps      []workflowStep `json:"steps"`
+	Name      string         `json:"name"`
+	Directory string         `json:"directory"`
+	Steps     []workflowStep `json:"steps"`
 }
 
 // handleWorkflowCreate creates one task per step, each depending on the

@@ -67,13 +67,13 @@ func scanGoFiles(files []string) ([]*store.IntelEntity, []*store.IntelEndpoint) 
 						col := goFieldColumn(n.Name, fd.Tag)
 						fields = append(fields, col)
 						entities = append(entities, &store.IntelEntity{
-							Entity:       ts.Name.Name,
-							TableName:    strings.ToLower(ts.Name.Name),
-							ColumnName:   col,
-							FieldType:    exprString(fd.Type),
-							IsPrimary:    n.Name == "ID" || n.Name == "Id" || n.Name == "id",
-							SourceFile:   file,
-							SourceLine:   fset.Position(n.Pos()).Line,
+							Entity:     ts.Name.Name,
+							TableName:  strings.ToLower(ts.Name.Name),
+							ColumnName: col,
+							FieldType:  exprString(fd.Type),
+							IsPrimary:  n.Name == "ID" || n.Name == "Id" || n.Name == "id",
+							SourceFile: file,
+							SourceLine: fset.Position(n.Pos()).Line,
 						})
 					}
 				}

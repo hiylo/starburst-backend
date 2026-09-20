@@ -187,17 +187,18 @@ func (s *Server) handleWebPassword(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
-// handleTokens lists (GET) and creates (POST) tokens. Requires a web session
-// (admin) or an APP token.
+// handleTokens lists (GET) and creates (POST) tokens. Listing stays open to
+// APP tokens (the App shows them); creating tokens is an admin-only write so a
+// leaked device token cannot mint more credentials.
 func (s *Server) handleTokens(w http.ResponseWriter, r *http.Request) {
-	if !s.requireWeb(r) {
-		if _, ok := s.requireToken(r); !ok {
-			writeErr(w, http.StatusUnauthorized, "web session or APP token required")
-			return
-		}
-	}
 	switch r.Method {
 	case http.MethodGet:
+		if !s.requireWeb(r) {
+			if _, ok := s.requireToken(r); !ok {
+				writeErr(w, http.StatusUnauthorized, "web session or APP token required")
+				return
+			}
+		}
 		tokens, err := s.auth.ListTokens(r.Context())
 		if err != nil {
 			writeErr(w, http.StatusInternalServerError, "list tokens failed")
@@ -205,6 +206,10 @@ func (s *Server) handleTokens(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(w, http.StatusOK, tokens)
 	case http.MethodPost:
+		if !s.requireWeb(r) {
+			writeErr(w, http.StatusForbidden, "creating tokens requires admin web session")
+			return
+		}
 		var req struct {
 			Name string `json:"name"`
 		}
@@ -226,14 +231,12 @@ func (s *Server) handleTokens(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// handleTokenByID revokes a token (DELETE). Requires a web session (admin) or
-// an APP token.
+// handleTokenByID revokes a token (DELETE). Admin-only write: a device token
+// must not be able to revoke other credentials.
 func (s *Server) handleTokenByID(w http.ResponseWriter, r *http.Request) {
 	if !s.requireWeb(r) {
-		if _, ok := s.requireToken(r); !ok {
-			writeErr(w, http.StatusUnauthorized, "web session or APP token required")
-			return
-		}
+		writeErr(w, http.StatusForbidden, "revoking tokens requires admin web session")
+		return
 	}
 	if r.Method != http.MethodDelete {
 		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")

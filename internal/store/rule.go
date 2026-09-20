@@ -9,9 +9,9 @@ import (
 
 // Trigger kinds supported by the automation engine.
 const (
-	TriggerCron  = "cron"  // scheduled interval: "*/30 * * * * *"
-	TriggerGit   = "git"   // watched repository event (push happens, etc.)
-	TriggerHTTP  = "http"  // inbound webhook
+	TriggerCron = "cron" // scheduled interval: "*/30 * * * * *"
+	TriggerGit  = "git"  // watched repository event (push happens, etc.)
+	TriggerHTTP = "http" // inbound webhook
 )
 
 // Rule is a user-defined automation rule: when a trigger fires, run a prompt.
