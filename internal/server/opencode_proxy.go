@@ -411,6 +411,11 @@ func relayTrimMessageDiffs(w http.ResponseWriter, resp *http.Response, path stri
 		if gz, gerr := gzip.NewReader(bytes.NewReader(blob)); gerr == nil {
 			if ub, uerr := io.ReadAll(io.LimitReader(gz, maxMessageTrimBytes+1)); uerr == nil {
 				blob = ub
+				// 就地解压后 body 已是明文，必须丢弃上游的 Content-Encoding，否则
+				// 浏览器按 gzip 解压明文会报 ERR_CONTENT_DECODING_FAILED。
+				w.Header().Del("Content-Encoding")
+				// 解压后长度也变了，Content-Length 同样作废，改 chunked。
+				w.Header().Del("Content-Length")
 			}
 			_ = gz.Close()
 		}
