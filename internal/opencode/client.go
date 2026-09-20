@@ -497,7 +497,12 @@ func (c *Client) StreamEvents(ctx context.Context, onEvent func(SSEEvent) error)
 	}
 
 	// SSE framing: read lines, accumulate "data:" payloads, emit on blank line.
-	var buf []byte
+	// 单事件跨行累积设 maxSSEEventSize 上限：超大/畸形流不再无界占内存。超限时
+	// 丢弃该事件（与 App 端 SseFrameDecoder 的超限跳过对齐），不透传给 onEvent。
+	var (
+		buf     []byte
+		dropped bool
+	)
 	reader := bufio.NewReader(resp.Body)
 	for {
 		line, rerr := reader.ReadBytes('\n')
@@ -505,21 +510,34 @@ func (c *Client) StreamEvents(ctx context.Context, onEvent func(SSEEvent) error)
 			trimmed := trimCRLF(line)
 			if len(trimmed) > 0 && trimmed[0] == 'd' && bytes.HasPrefix(trimmed, []byte("data:")) {
 				payload := bytes.TrimSpace(trimmed[len("data:"):])
+				if dropped {
+					// 事件已超限：跳过剩余 data 行，不再累积内存。
+					continue
+				}
+				if len(buf)+len(payload) > maxSSEEventSize {
+					dropped = true
+					buf = buf[:0]
+					continue
+				}
 				buf = append(buf, payload...)
 				continue
 			}
 			// blank line = event boundary
-			if len(trimmed) == 0 && len(buf) > 0 {
-				if err := onEvent(SSEEvent{Data: append([]byte(nil), buf...)}); err != nil {
-					return err
+			if len(trimmed) == 0 {
+				if len(buf) > 0 && !dropped {
+					if err := onEvent(SSEEvent{Data: append([]byte(nil), buf...)}); err != nil {
+						return err
+					}
 				}
+				// 事件结束，无论是否被丢弃都复位，下个事件重新累积。
 				buf = buf[:0]
+				dropped = false
 			}
 		}
 		if rerr != nil {
 			if errors.Is(rerr, io.EOF) {
 				// flush trailing event if any
-				if len(buf) > 0 {
+				if len(buf) > 0 && !dropped {
 					if err := onEvent(SSEEvent{Data: append([]byte(nil), buf...)}); err != nil {
 						return err
 					}
