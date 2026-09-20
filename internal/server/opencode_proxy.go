@@ -293,6 +293,14 @@ func (s *Server) handleOpenCodeProxy(w http.ResponseWriter, r *http.Request) {
 		relaySanitizedJSON(w, resp, upstreamPath)
 		return
 	}
+	// message 响应裁剪：上游 /session/{id}/message 的每条 info.summary.diffs 是
+	// 会话文件变更的全量 diff，可单条数 MB（聊天界面并不使用该字段——diff 走
+	// /session/{id}/diff，这里只做展示性回传）。缓冲删掉后再回程，避免数 MB
+	// 下载 + 浏览器 JSON 解析把「加载对话」拖到很久。
+	if r.Method == http.MethodGet && isMessagePath(upstreamPath) {
+		relayTrimMessageDiffs(w, resp, upstreamPath)
+		return
+	}
 	w.WriteHeader(resp.StatusCode)
 
 	// SSE: stream with a flush per read so events are delivered immediately.
@@ -370,4 +378,108 @@ func relaySanitizedJSON(w http.ResponseWriter, resp *http.Response, path string)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(resp.StatusCode)
 	_, _ = w.Write(out)
+}
+
+// isMessagePath reports whether an upstream path is a GET /session/{id}/message
+// listing (the endpoint whose responses can balloon to multi-MB because of
+// per-message info.summary.diffs).
+func isMessagePath(path string) bool {
+	if !strings.HasPrefix(path, "/session/") || !strings.HasSuffix(path, "/message") {
+		return false
+	}
+	rest := strings.TrimSuffix(strings.TrimPrefix(path, "/session/"), "/message")
+	return rest != "" && !strings.Contains(rest, "/")
+}
+
+// maxMessageTrimBytes bounds how much of a message response we buffer for
+// summary.diffs trimming. Larger than a single message page (single-message
+// diffs can reach several MB, and a 30-message page should stay well under 64MB).
+const maxMessageTrimBytes = 64 << 20
+
+// relayTrimMessageDiffs buffers an upstream message response, strips each
+// message's info.summary.diffs (the session-wide file diff list that the chat
+// view never renders) and writes the shrunk JSON back, so a page that would
+// otherwise weigh multiple MB is reduced to the parts the client actually uses.
+func relayTrimMessageDiffs(w http.ResponseWriter, resp *http.Response, path string) {
+	blob, err := io.ReadAll(io.LimitReader(resp.Body, maxMessageTrimBytes+1))
+	if err != nil {
+		log.Printf("opencode proxy %s: read message payload: %v", path, err)
+		writeErr(w, http.StatusBadGateway, "upstream opencode request failed")
+		return
+	}
+	if strings.Contains(strings.ToLower(resp.Header.Get("Content-Encoding")), "gzip") {
+		if gz, gerr := gzip.NewReader(bytes.NewReader(blob)); gerr == nil {
+			if ub, uerr := io.ReadAll(io.LimitReader(gz, maxMessageTrimBytes+1)); uerr == nil {
+				blob = ub
+			}
+			_ = gz.Close()
+		}
+	}
+	if int64(len(blob)) > maxMessageTrimBytes {
+		// 超限不裁剪，回退为流式透传（宁可大也不截断丢消息）。
+		log.Printf("opencode proxy %s: message payload over %d bytes, relay verbatim", path, maxMessageTrimBytes)
+		w.WriteHeader(resp.StatusCode)
+		_, _ = w.Write(blob)
+		return
+	}
+	var decoded any
+	if err := json.Unmarshal(blob, &decoded); err != nil {
+		// 非 JSON（不太可能）直接透传原样。
+		w.WriteHeader(resp.StatusCode)
+		_, _ = w.Write(blob)
+		return
+	}
+	n := trimSummaryDiffs(decoded)
+	if n == 0 {
+		// 没有可裁剪的 diffs：原样透传，避免重序列化改动无关字段顺序/字节
+		// （也保住无 diffs 会话的既有响应语义）。
+		w.WriteHeader(resp.StatusCode)
+		_, _ = w.Write(blob)
+		return
+	}
+	out, err := json.Marshal(decoded)
+	if err != nil {
+		log.Printf("opencode proxy %s: re-encode trimmed message: %v", path, err)
+		writeErr(w, http.StatusBadGateway, "upstream response could not be trimmed")
+		return
+	}
+	if n > 0 {
+		log.Printf("opencode proxy %s: trimmed summary.diffs from %d message(s)", path, n)
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(resp.StatusCode)
+	_, _ = w.Write(out)
+}
+
+// trimSummaryDiffs removes info.summary.diffs from every message in a decoded
+// message response (which may be a top-level array or a {messages:[...]} object),
+// returning how many messages had the field removed.
+func trimSummaryDiffs(v any) int {
+	n := 0
+	var arr []any
+	switch val := v.(type) {
+	case []any:
+		arr = val
+	case map[string]any:
+		if ms, ok := val["messages"].([]any); ok {
+			arr = ms
+		}
+	}
+	for _, item := range arr {
+		m, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		info, ok := m["info"].(map[string]any)
+		if !ok {
+			continue
+		}
+		if sum, ok := info["summary"].(map[string]any); ok {
+			if _, exists := sum["diffs"]; exists {
+				delete(sum, "diffs")
+				n++
+			}
+		}
+	}
+	return n
 }
