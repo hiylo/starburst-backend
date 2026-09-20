@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/hiylo/starburst-backend/internal/intel/android"
+	"github.com/hiylo/starburst-backend/internal/intel/ios"
 	"github.com/hiylo/starburst-backend/internal/intel/web"
 	"github.com/hiylo/starburst-backend/internal/store"
 )
@@ -220,6 +221,16 @@ func ScanModule(root, relPath string) (*scanSummary, error) {
 	gradle, _ := filepath.Glob(filepath.Join(dir, "build.gradle*"))
 	goMod, _ := filepath.Glob(filepath.Join(dir, "go.mod"))
 	pkgJSON, _ := filepath.Glob(filepath.Join(dir, "package.json"))
+	xcodeproj, _ := filepath.Glob(filepath.Join(dir, "*.xcodeproj"))
+	swiftpm, _ := filepath.Glob(filepath.Join(dir, "Package.swift"))
+	// iOS/Swift（.xcodeproj / Package.swift）：Swift Codable 实体 + 网络请求端点。
+	if len(xcodeproj) > 0 || len(swiftpm) > 0 {
+		ents, eps, err := ios.ScanSwift(dir)
+		if err != nil {
+			return &scanSummary{}, nil
+		}
+		return &scanSummary{Entities: ents, Endpoints: eps}, nil
+	}
 	// Web/Node 前端（package.json）：契约来自 axios/fetch API 调用。
 	if len(pkgJSON) > 0 {
 		eps, err := web.ScanWeb(dir)
