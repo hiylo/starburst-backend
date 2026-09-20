@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"time"
 
@@ -27,10 +28,43 @@ func (s *Server) handleBatch(w http.ResponseWriter, r *http.Request) {
 			Directory string `json:"directory"`
 			SessionID string `json:"sessionId"`
 		} `json:"targets"`
+		// IntelProjectIDs 非空：并行触发测试智能 run-all 回归（与 prompt/targets 互斥）。
+		IntelProjectIDs []int64 `json:"intelProjectIds"`
 	}
 	if !readBody(w, r, &req) {
 		return
 	}
+
+	// 一次性批量任务数必须有限：单个请求灌入上千任务会撑爆 DB 与 worker
+	// 队列，也放大超时窗口内的部分成功语义。
+	const maxBatchTargets = 100
+
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+
+	// intel-run 批量：对每个项目触发 run-all 回归，返回 test run id。
+	if len(req.IntelProjectIDs) > 0 {
+		if req.Prompt != "" || len(req.Targets) > 0 {
+			writeErr(w, http.StatusBadRequest, "intelProjectIds 与 prompt/targets 互斥")
+			return
+		}
+		if len(req.IntelProjectIDs) > maxBatchTargets {
+			writeErr(w, http.StatusBadRequest, "too many projects, max 100 per batch")
+			return
+		}
+		runIDs := make([]int64, 0, len(req.IntelProjectIDs))
+		for _, pid := range req.IntelProjectIDs {
+			run, err := s.enqueueIntelRunAll(ctx, pid, false)
+			if err != nil {
+				writeErr(w, http.StatusBadRequest, fmt.Sprintf("触发 intel 回归失败(项目 %d): %v", pid, err))
+				return
+			}
+			runIDs = append(runIDs, run.ID)
+		}
+		writeJSON(w, http.StatusCreated, map[string]any{"runIds": runIDs, "count": len(runIDs)})
+		return
+	}
+
 	if req.Prompt == "" {
 		writeErr(w, http.StatusBadRequest, "prompt is required")
 		return
@@ -39,16 +73,10 @@ func (s *Server) handleBatch(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "targets must not be empty")
 		return
 	}
-	// 一次性批量任务数必须有限：单个请求灌入上千任务会撑爆 DB 与 worker
-	// 队列，也放大超时窗口内的部分成功语义。
-	const maxBatchTargets = 100
 	if len(req.Targets) > maxBatchTargets {
 		writeErr(w, http.StatusBadRequest, "too many targets, max 100 per batch")
 		return
 	}
-
-	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
-	defer cancel()
 
 	created := make([]string, 0, len(req.Targets))
 	for _, tg := range req.Targets {
