@@ -95,7 +95,6 @@ var migrations = []migration{
 	{name: "tasks_priority_timeout_workflow", apply: migrationTasksPriorityTimeoutWorkflow},
 	{name: "rules_session_id", apply: migrationRulesSessionID},
 	{name: "tasks_workflow_index", apply: migrationTasksWorkflowIndex},
-	{name: "task_kind", apply: migrationTaskKind},
 	{name: "intel", apply: migrationIntel},
 	{name: "intel_field_meta", apply: migrationIntelFieldMeta},
 	{name: "intel_test_assets", apply: migrationIntelTestAssets},
@@ -130,6 +129,7 @@ var migrations = []migration{
 	{name: "intel_rule_project", apply: migrationIntelRuleProject},
 	{name: "intel_project_git_creds", apply: migrationIntelProjectGitCreds},
 	{name: "intel_run_attempts", apply: migrationIntelRunAttempts},
+	{name: "task_kind", apply: migrationTaskKind},
 }
 
 // migrationIntel creates the Test Intelligence subsystem tables: flat project
