@@ -95,6 +95,7 @@ var migrations = []migration{
 	{name: "tasks_priority_timeout_workflow", apply: migrationTasksPriorityTimeoutWorkflow},
 	{name: "rules_session_id", apply: migrationRulesSessionID},
 	{name: "tasks_workflow_index", apply: migrationTasksWorkflowIndex},
+	{name: "task_kind", apply: migrationTaskKind},
 	{name: "intel", apply: migrationIntel},
 	{name: "intel_field_meta", apply: migrationIntelFieldMeta},
 	{name: "intel_test_assets", apply: migrationIntelTestAssets},
@@ -458,6 +459,17 @@ func migrationTasksWorkflowIndex(ctx context.Context, driver string, db *sql.DB)
 		if _, err := db.ExecContext(ctx, s); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+// migrationTaskKind adds a kind column to the tasks table so non-agent tasks
+// (e.g. test-intelligence run tracking) can be recorded and displayed without
+// being claimed by the prompt-task executor (which only claims kind = ”).
+func migrationTaskKind(ctx context.Context, driver string, db *sql.DB) error {
+	_, err := db.ExecContext(ctx, `ALTER TABLE tasks ADD COLUMN kind TEXT NOT NULL DEFAULT ''`)
+	if err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+		return err
 	}
 	return nil
 }

@@ -22,11 +22,12 @@ const (
 
 // taskColumns is the canonical SELECT/RETURNING column list, kept in a single
 // place so scanTask and every query stay in lockstep.
-const taskColumns = "id, session_id, directory, name, prompt, depends_on, status, error, result, progress, ai_summary, attempts, priority, timeout_seconds, workflow_id, created_at, updated_at, started_at, finished_at, available_at, scheduled_at, cron, last_fired_at"
+const taskColumns = "id, kind, session_id, directory, name, prompt, depends_on, status, error, result, progress, ai_summary, attempts, priority, timeout_seconds, workflow_id, created_at, updated_at, started_at, finished_at, available_at, scheduled_at, cron, last_fired_at"
 
 // Task is an asynchronous orchestration job submitted by a client.
 type Task struct {
 	ID          string     `json:"id"`
+	Kind        string     `json:"kind"`      // 任务类型："" = prompt（agent 编排任务，走 executor）；非空 = 内置追踪任务（如 test-run），不进 executor
 	SessionID   string     `json:"sessionId"` // target OpenCode session id ("" = new session)
 	Directory   string     `json:"directory"` // working directory hint for new sessions
 	Name        string     `json:"name"`      // user-facing task name ("" = derive from prompt)
@@ -62,9 +63,9 @@ func (s *sqlStore) CreateTask(ctx context.Context, t *Task) error {
 func (s *sqlStore) CreateTaskWithStatus(ctx context.Context, t *Task, status string) error {
 	t.Status = status
 	_, err := s.db.ExecContext(ctx, s.q(`
-		INSERT INTO tasks (id, session_id, directory, name, prompt, depends_on, status, error, result, progress, attempts, priority, timeout_seconds, workflow_id, created_at, updated_at, available_at, scheduled_at, cron)
-		VALUES (?, ?, ?, ?, ?, ?, ?, '', '', '', 0, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, ?, ?)`),
-		t.ID, t.SessionID, t.Directory, t.Name, t.Prompt, t.DependsOn, status,
+		INSERT INTO tasks (id, kind, session_id, directory, name, prompt, depends_on, status, error, result, progress, attempts, priority, timeout_seconds, workflow_id, created_at, updated_at, available_at, scheduled_at, cron)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, '', '', '', 0, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, ?, ?)`),
+		t.ID, t.Kind, t.SessionID, t.Directory, t.Name, t.Prompt, t.DependsOn, status,
 		t.Priority, t.TimeoutSec, t.WorkflowID, t.ScheduledAt, t.Cron,
 	)
 	return err
@@ -137,14 +138,14 @@ func (s *sqlStore) ClaimNextTask(ctx context.Context) (*Task, error) {
 		query = `
 		UPDATE tasks SET status = ?, attempts = attempts + 1, started_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
 		WHERE id = (
-			SELECT id FROM tasks WHERE status = ? AND available_at <= CURRENT_TIMESTAMP ORDER BY priority DESC, created_at ASC LIMIT 1 FOR UPDATE SKIP LOCKED
+			SELECT id FROM tasks WHERE status = ? AND kind = '' AND available_at <= CURRENT_TIMESTAMP ORDER BY priority DESC, created_at ASC LIMIT 1 FOR UPDATE SKIP LOCKED
 		)
 		RETURNING ` + taskColumns
 	} else {
 		query = `
 		UPDATE tasks SET status = ?, attempts = attempts + 1, started_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
 		WHERE id = (
-			SELECT id FROM tasks WHERE status = ? AND available_at <= CURRENT_TIMESTAMP ORDER BY priority DESC, created_at ASC LIMIT 1
+			SELECT id FROM tasks WHERE status = ? AND kind = '' AND available_at <= CURRENT_TIMESTAMP ORDER BY priority DESC, created_at ASC LIMIT 1
 		)
 		RETURNING ` + taskColumns
 	}
@@ -175,6 +176,16 @@ func (s *sqlStore) CompleteTask(ctx context.Context, id, result string) error {
 	_, err := s.db.ExecContext(ctx, s.q(`
 		UPDATE tasks SET status = ?, result = ?, finished_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
 		WHERE id = ?`), TaskSucceeded, result, id)
+	return err
+}
+
+// UpdateTaskStatusByResult transitions a non-executor tracking task (kind =
+// 'test-run') whose result column stores an intel run id, so the task list
+// reflects that run's lifecycle without the executor claiming it.
+func (s *sqlStore) UpdateTaskStatusByResult(ctx context.Context, result, status string) error {
+	_, err := s.db.ExecContext(ctx, s.q(`
+		UPDATE tasks SET status = ?, finished_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+		WHERE result = ? AND kind = 'test-run'`), status, result)
 	return err
 }
 
@@ -766,7 +777,7 @@ type rowScanner interface {
 func scanTask(row rowScanner) (*Task, error) {
 	t := &Task{}
 	var started, finished, scheduled, lastFired *time.Time
-	err := row.Scan(&t.ID, &t.SessionID, &t.Directory, &t.Name, &t.Prompt, &t.DependsOn, &t.Status,
+	err := row.Scan(&t.ID, &t.Kind, &t.SessionID, &t.Directory, &t.Name, &t.Prompt, &t.DependsOn, &t.Status,
 		&t.Error, &t.Result, &t.Progress, &t.AISummary, &t.Attempts, &t.Priority, &t.TimeoutSec, &t.WorkflowID,
 		&t.CreatedAt, &t.UpdatedAt, &started, &finished, &t.AvailableAt, &scheduled, &t.Cron, &lastFired)
 	if err != nil {

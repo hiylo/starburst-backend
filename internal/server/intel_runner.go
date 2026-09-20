@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"strconv"
 	"sync"
 	"time"
 
@@ -242,6 +243,7 @@ func (s *Server) failIntelRun(projectID int64, run *store.TestRun, reason string
 		log.Printf("intel run %d fail update: %v", run.ID, err)
 	}
 	s.pushIntelRunEvent(run)
+	s.syncIntelRunTask(ctx, run, "failed")
 }
 
 // enqueueIntelRunAll creates a scope=all run and executes every module's test
@@ -263,8 +265,43 @@ func (s *Server) enqueueIntelRunAll(ctx context.Context, projectID int64, force 
 		return nil, err
 	}
 	s.pushIntelRunEvent(run)
+	// 追踪任务：在任务列表统一展示这次 run-all 的生命周期（kind=test-run 不进
+	// prompt executor，由 intel runner 自行驱动并在终态同步 status）。
+	s.trackIntelRun(ctx, run)
 	go s.runIntelAll(projectID, force, run)
 	return run, nil
+}
+
+// trackIntelRun mirrors a scope=all intel run as a kind=test-run task row so the
+// task list shows the run without the prompt executor claiming it.
+func (s *Server) trackIntelRun(ctx context.Context, run *store.TestRun) {
+	if run.Scope != "all" {
+		return
+	}
+	t := &store.Task{
+		ID:     newTaskID(),
+		Kind:   "test-run",
+		Name:   "智能测试 · 一键回归",
+		Result: strconv.FormatInt(run.ID, 10),
+	}
+	if err := s.store.CreateTaskWithStatus(ctx, t, store.TaskRunning); err != nil {
+		log.Printf("intel track run %d task: %v", run.ID, err)
+	}
+}
+
+// syncIntelRunTask transitions the tracking task for a finished intel run to its
+// terminal state (passed→succeeded, failed/error→failed).
+func (s *Server) syncIntelRunTask(ctx context.Context, run *store.TestRun, status string) {
+	if run.Scope != "all" {
+		return
+	}
+	taskStatus := store.TaskSucceeded
+	if status != "passed" {
+		taskStatus = store.TaskFailed
+	}
+	if err := s.store.UpdateTaskStatusByResult(ctx, strconv.FormatInt(run.ID, 10), taskStatus); err != nil {
+		log.Printf("intel sync run %d task: %v", run.ID, err)
+	}
 }
 
 // runIntelAll is the background driver for a scope=all run: it serializes on
@@ -367,6 +404,7 @@ func (s *Server) finishIntelRunAll(ctx context.Context, run *store.TestRun, stat
 		log.Printf("intel run-all %d finish: %v", run.ID, err)
 	}
 	s.pushIntelRunEvent(run)
+	s.syncIntelRunTask(ctx, run, status)
 }
 
 // execIntelModule runs a single module's test as part of a run-all, returning

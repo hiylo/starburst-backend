@@ -112,6 +112,9 @@ type Store interface {
 	TaskStatsDetailed(ctx context.Context, windowDays int) (*TaskStatsWindow, error)
 	// UpdateTaskProgress records a progress note for a running task.
 	UpdateTaskProgress(ctx context.Context, id, progress string) error
+	// UpdateTaskStatusByResult transitions a kind=test-run tracking task by its
+	// result column (which stores the associated intel run id).
+	UpdateTaskStatusByResult(ctx context.Context, result, status string) error
 	// SetTaskSession records the resolved session id for a task.
 	SetTaskSession(ctx context.Context, id, sessionID string) error
 	// CompleteTask marks a task succeeded with a result.
