@@ -98,3 +98,22 @@ func TestGzipHeadSkipped(t *testing.T) {
 	}
 }
 
+// 压缩的渐进式响应：Flush() 必须把 gzip.Writer 的 flate 缓冲刷到下游，
+// 否则「边生成边输出」在压缩路径下直到 Close 才全量落地（客户端全程空白）。
+func TestGzipFlushStreamsPartialData(t *testing.T) {
+	handler := gzipMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fl := w.(http.Flusher)
+		_, _ = io.WriteString(w, strings.Repeat("d", 130))
+		fl.Flush()
+	}))
+	req := httptest.NewRequest(http.MethodGet, "/x", nil)
+	req.Header.Set("Accept-Encoding", "gzip")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	// 只写 130 字节 + Flush：修复前 body 只有 gzip 头（10 字节），
+	// 修复后 Flush 刷出已编码块（显著 > 20 字节）。
+	if rec.Body.Len() <= 20 {
+		t.Fatalf("gzip Flush did not stream partial data: body=%d bytes", rec.Body.Len())
+	}
+}

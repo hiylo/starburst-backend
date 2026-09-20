@@ -1,11 +1,11 @@
 package server
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"log"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -14,6 +14,10 @@ import (
 	"github.com/hiylo/starburst-backend/internal/push"
 	"github.com/hiylo/starburst-backend/internal/store"
 )
+
+// toolFilePartRE 匹配 part 对象里的 `"type": "tool"` / `"type":"file"`（容忍空格），
+// 用于高频 message.part.updated 里挑出有动作语义的工具/文件 part 入库。
+var toolFilePartRE = regexp.MustCompile(`"type"\s*:\s*"(tool|file)"`)
 
 // eventRetention is how long captured session events are kept before the
 // janitor deletes them. The App dashboard only shows "recent session
@@ -63,6 +67,12 @@ func (s *Server) StartEventCollector(ctx context.Context) {
 	backoff := time.Second
 	for {
 		err := s.openCode.StreamEvents(ctx, func(ev opencode.SSEEvent) error {
+			// 单条事件回调内任何 panic 都不该让采集器整体退出（否则推送永久静默停）。
+			defer func() {
+				if r := recover(); r != nil {
+					log.Printf("events: collector callback panic: %v", r)
+				}
+			}()
 			// 高频 delta/progress 事件占流量 90%+，只用来维护会话活跃心跳。
 			// 先做轻量解析（只取 type+sessionID，不物化大 payload、几乎零分配），
 			// 命中高频则直接返回，避免完整 json.Unmarshal 触发 GC 抖动。
@@ -70,34 +80,32 @@ func (s *Server) StartEventCollector(ctx context.Context) {
 			if !ok {
 				return nil
 			}
-if isHighFrequencyEvent(eventType) {
-			if sessionID != "" && isMessageActivityEvent(eventType) {
-				s.sessionActivity.Store(sessionID, time.Now())
-			}
-			// message.part.updated 本按高频丢弃（文本/推理 part 每 token 一次）；
-			// 但「工具」与「文件」part 的状态变化是低频、有动作语义的（运行/完成/失败
-			// 某工具、产出某文件），值得入库供实时动态栏展示。用有界前缀子串检测
-			// 避免为整段流式文本做 O(n²) 扫描：只查前 1KB，任何 part 的 type 都在
-			// 事件体开头，命中即完整解析落库。注意 lightParseEvent 无法从 v1.18
-			// wrapper 里取到 sessionID（它在 payload.properties 里），这里用完整
-			// 解析后的 se.SessionID 判空。
-			if eventType == "message.part.updated" {
-				data := ev.Data
-				if len(data) > 1024 {
-					data = data[:1024]
+			if isHighFrequencyEvent(eventType) {
+				if sessionID != "" && isMessageActivityEvent(eventType) {
+					s.sessionActivity.Store(sessionID, time.Now())
 				}
-				if bytes.Contains(data, []byte(`"type":"tool"`)) || bytes.Contains(data, []byte(`"type":"file"`)) {
-					if se, ok := parseSessionEvent(ev); ok && se.SessionID != "" {
-						select {
-						case queue <- se:
-							s.pushSessionEvent(se)
-						default:
+				// message.part.updated 本按高频丢弃（文本/推理 part 每 token 一次）；
+				// 但「工具」与「文件」part 的状态变化是低频、有动作语义的（运行/完成/失败
+				// 某工具、产出某文件），值得入库供实时动态栏展示。用有界前缀匹配
+				// 避免为整段流式文本做 O(n²) 扫描：只查前 4KB（type 字段在事件体开头），
+				// 容忍 `"type" : "tool"` 这类带空格的形态，命中即完整解析落库。
+				if eventType == "message.part.updated" {
+					data := ev.Data
+					if len(data) > 4096 {
+						data = data[:4096]
+					}
+					if toolFilePartRE.Match(data) {
+						if se, ok := parseSessionEvent(ev); ok && se.SessionID != "" {
+							select {
+							case queue <- se:
+								s.pushSessionEvent(se)
+							default:
+							}
 						}
 					}
 				}
+				return nil
 			}
-			return nil
-		}
 			se, ok := parseSessionEvent(ev)
 			if !ok {
 				return nil
@@ -118,12 +126,13 @@ if isHighFrequencyEvent(eventType) {
 			}
 			select {
 			case queue <- se:
+				// 仅在成功入队（最终会落库）时才广播给 WS 客户端，避免「面板有、历史没有」。
+				s.pushSessionEvent(se)
 			default:
 				// 队列满说明落库跟不上事件速率；丢弃比阻塞 SSE 读循环安全，
-				// 事件流本就是可再拉取的遥测数据。
+				// 事件流本就是可再拉取的遥测数据。丢弃事件同样不广播。
 				log.Printf("events: queue full, dropping %s for session %s", se.EventType, se.SessionID)
 			}
-			s.pushSessionEvent(se)
 			return nil
 		})
 		if err != nil {
@@ -320,17 +329,22 @@ func payloadObject(p map[string]any) map[string]any {
 // lightParseEvent 从原始 SSE 事件中只取 type 与 sessionID，不物化大的
 // payload（delta 文本等），用于高频事件热路径，几乎零分配。
 func lightParseEvent(ev opencode.SSEEvent) (eventType, sessionID string, ok bool) {
+	// 嵌套 session 字段同时接受 sessionID/sessionId 两种拼写（对齐 lookupSessionID
+	// 的宽容处理）。仍用结构体解码而非 map：只取所需字段，不物化大的 delta 文本
+	// payload。v1.18 wrapper 的 session id 在 payload.properties / payload.data 里。
+	type sidFields struct {
+		Session    string `json:"sessionID"`
+		SessionAlt string `json:"sessionId"`
+	}
 	var body struct {
-		Type    string `json:"type"`
-		Session string `json:"sessionID"`
-		Props   struct {
-			Session string `json:"sessionID"`
-		} `json:"properties"`
-		Data struct {
-			Session string `json:"sessionID"`
-		} `json:"data"`
+		Type    string    `json:"type"`
+		Session string    `json:"sessionID"`
+		Props   sidFields `json:"properties"`
+		Data    sidFields `json:"data"`
 		Payload struct {
-			Type string `json:"type"`
+			Type  string    `json:"type"`
+			Props sidFields `json:"properties"`
+			Data  sidFields `json:"data"`
 		} `json:"payload"`
 	}
 	if err := json.Unmarshal(ev.Data, &body); err != nil {
@@ -345,12 +359,29 @@ func lightParseEvent(ev opencode.SSEEvent) (eventType, sessionID string, ok bool
 	}
 	sessionID = strings.TrimSpace(body.Session)
 	if sessionID == "" {
-		sessionID = strings.TrimSpace(body.Props.Session)
+		sessionID = sessionIDFromFields(body.Props.Session, body.Props.SessionAlt)
 	}
 	if sessionID == "" {
-		sessionID = strings.TrimSpace(body.Data.Session)
+		sessionID = sessionIDFromFields(body.Data.Session, body.Data.SessionAlt)
+	}
+	if sessionID == "" {
+		sessionID = sessionIDFromFields(body.Payload.Props.Session, body.Payload.Props.SessionAlt)
+	}
+	if sessionID == "" {
+		sessionID = sessionIDFromFields(body.Payload.Data.Session, body.Payload.Data.SessionAlt)
 	}
 	return eventType, sessionID, true
+}
+
+// sessionIDFromFields returns the first non-empty session id among the given
+// fields, tolerating both "sessionID"/"sessionId" spellings like lookupSessionID.
+func sessionIDFromFields(fields ...string) string {
+	for _, f := range fields {
+		if v := strings.TrimSpace(f); v != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 func isHighFrequencyEvent(eventType string) bool {
@@ -361,13 +392,44 @@ func isHighFrequencyEvent(eventType string) bool {
 		eventType == "heartbeat"
 }
 
+// unwrapEventPayload 解包 wrapped v1.18 事件：App 端推送进来时事件主体被包成
+// {directory,project,payload:{id,type,properties:{sessionID,...}}}，而 App 端
+// container() 解析器只下钻一层（先看 payload.properties，再看 payload.data，
+// 再看 payload.payload），取不到内部 properties。此处把 payload object 内的
+// 事件主体抽出来作为对外推送 payload，保证 permission.asked / session.error /
+// session.status 等通知能命中。若 payload 对象内没有 properties/data，则整体
+// 返回该 payload 对象；解析失败或没有顶层 payload 对象时原样返回 raw。
+func unwrapEventPayload(raw []byte) []byte {
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return raw
+	}
+	inner, ok := m["payload"]
+	if !ok {
+		return raw
+	}
+	var payloadObj map[string]json.RawMessage
+	if err := json.Unmarshal(inner, &payloadObj); err != nil {
+		return raw
+	}
+	for _, key := range []string{"properties", "data"} {
+		if v, ok := payloadObj[key]; ok {
+			var vm map[string]json.RawMessage
+			if err := json.Unmarshal(v, &vm); err == nil {
+				return v
+			}
+		}
+	}
+	return inner
+}
+
 // pushSessionEvent fans a captured event out to every connected /api/ws client
 // so dashboards update live without polling.
 func (s *Server) pushSessionEvent(se *store.SessionEvent) {
 	b, err := json.Marshal(map[string]any{
 		"sessionId": se.SessionID,
 		"eventType": se.EventType,
-		"payload":   json.RawMessage(se.Payload),
+		"payload":   json.RawMessage(unwrapEventPayload([]byte(se.Payload))),
 	})
 	if err != nil {
 		return
@@ -481,20 +543,29 @@ func isUnreadTriggerEvent(eventType string) bool {
 // seedSessionStatuses pre-populates the in-memory session status map from
 // recent persisted events (the map is lost on restart; the events table is not).
 func (s *Server) seedSessionStatuses(ctx context.Context) {
-	cutoff := time.Now().Add(-1 * time.Hour)
-	events, err := s.store.ListEvents(ctx, "", cutoff, 1000)
+	// 用 since=time.Time{} 走 ListEvents 的 DESC 分支取「最近」的 limit 条事件，
+	// 而不是传非零 cutoff（那会 ORDER BY created_at ASC 取到窗口内最旧的 1000 条，
+	// 一小时事件 >1000 时当前状态全部丢失）。
+	events, err := s.store.ListEvents(ctx, "", time.Time{}, 1000)
 	if err != nil {
 		log.Printf("events: seed session statuses: %v", err)
 		return
 	}
+	// seed 项必须同步填 sessionActivity：否则重启后第一次聚合时所有 seed 项
+	// hasActivity=false → busy 立即 Delete、idle 也立即 Delete，seed 形同虚设。
+	// 用「近期」时间戳（现在 -10s）让 seed 项撑过一个 stale 窗口，等真实事件到来接管；
+	// 不用 time.Now() 是为 idle 项的 1 小时清理语义留出起点（避免清理计数被推得太近）。
+	seedActivity := time.Now().Add(-10 * time.Second)
 	for _, e := range events {
 		switch e.EventType {
 		case "session.status":
 			if st := parseStatusFromPayload(e.Payload); st != "" {
 				s.sessionStatuses.Store(e.SessionID, st)
+				s.sessionActivity.Store(e.SessionID, seedActivity)
 			}
 		case "session.idle":
 			s.sessionStatuses.Store(e.SessionID, "idle")
+			s.sessionActivity.Store(e.SessionID, seedActivity)
 		}
 	}
 	if n := len(events); n > 0 {
@@ -504,16 +575,31 @@ func (s *Server) seedSessionStatuses(ctx context.Context) {
 
 // handleSessionStatusAgg 是原 `/session/status` 镜像的增强：上游快照 + 采集器
 // 事件聚合合并，返回最准确的会话状态视图。endpoint 不变（仍经镜像代理）。
-func (s *Server) handleSessionStatusAgg(w http.ResponseWriter) {
+//
+// rr 为可选参数：调用方持有 *http.Request 时传入（r），上游快照请求基于
+// r.Context() 派生 5s 超时上下文——客户端断开（r.Context 取消）同样会取消上游
+// 请求，超时兜底防挂死；未传时退化为 context.Background()。保持可变参数是为了
+// 不破坏现有调用点（opencode_proxy 与测试当前只传 w），调用方接入 r 后无需改签名。
+func (s *Server) handleSessionStatusAgg(w http.ResponseWriter, rr ...*http.Request) {
+	// 读 body 用超时 ctx：快照请求整体（建连+读 body）受 5s 上限约束，同时
+	// r.Context 取消（客户端断开）时上游请求也随之取消，两者取先到者。
+	base := context.Background()
+	if len(rr) > 0 && rr[0] != nil {
+		base = rr[0].Context()
+	}
+	ctx, cancel := context.WithTimeout(base, 5*time.Second)
+	defer cancel()
 	// 快照是上游当前权威状态：优先保留；事件聚合只补充快照未覆盖的会话，
 	// 避免把已 idle 的会话误标成 busy，也补齐快照遗漏的 busy。
-	out := map[string]string{}
-	if resp, err := s.openCode.Do(context.Background(), http.MethodGet, "/session/status", nil, nil, nil); err == nil {
+	out := map[string]map[string]any{}
+	if resp, err := s.openCode.Do(ctx, http.MethodGet, "/session/status", nil, nil, nil); err == nil {
 		var m map[string]map[string]any
 		if derr := json.NewDecoder(resp.Body).Decode(&m); derr == nil {
 			for id, v := range m {
 				if t, ok := v["type"].(string); ok && t != "" {
-					out[id] = t
+					// 快照命中的条目整体透传：保留 type/attempt/message/next 等
+					// retry 元数据，只丢弃无有效 type 的脏条目。
+					out[id] = v
 				}
 			}
 		}
@@ -522,8 +608,14 @@ func (s *Server) handleSessionStatusAgg(w http.ResponseWriter) {
 	// 上游 status 事件并不可靠：会话被标 idle 后仍可能继续流式输出。最近有消息
 	// 活动的会话若状态是 idle，纠正为 busy，避免「处理中显示空闲」。
 	// busy/retry 残留清除也用它：超过该窗口无任何消息输出即视为已结束。
+	// activeWindow: 无消息活动超过该窗口即不再视作「进行中」。用于 idle→busy 纠正
+	// 与 sessionActivity map 的淘汰（30s 覆盖普通思考/短工具调用的停顿）。
 	const activeWindow = 30 * time.Second
-	const busyStaleWindow = activeWindow
+	// busyStaleWindow: busy/retry 残留清除窗口。长推理、长工具调用可能 >30s 无任何
+	// 消息活动（不是真的结束），若与 activeWindow 同值会把仍在工作的会话误 Delete。
+	// 放宽到 90s：既保留对确已停止会话残留的及时清理，又容纳长任务的无消息间隔。
+	// 注意：此窗口独立于 activeWindow，后者只用于 idle→busy 纠正，语义不同。
+	const busyStaleWindow = 90 * time.Second
 	now := time.Now()
 	s.sessionStatuses.Range(func(k, v any) bool {
 		id, ok := k.(string)
@@ -556,7 +648,7 @@ func (s *Server) handleSessionStatusAgg(w http.ResponseWriter) {
 				s.sessionStatuses.Delete(k)
 				return true
 			}
-			out[id] = st
+			out[id] = map[string]any{"type": st}
 		case "busy", "retry":
 			// 上游快照未覆盖（未在 /session/status 里）说明上游已认为该会话不再忙。
 			// 若事件聚合仍挂着 busy/retry，且超活动窗口无任何消息输出 → 判定已结束，
@@ -566,9 +658,9 @@ func (s *Server) handleSessionStatusAgg(w http.ResponseWriter) {
 				s.sessionStatuses.Delete(k)
 				return true
 			}
-			out[id] = st
+			out[id] = map[string]any{"type": st}
 		default:
-			out[id] = st
+			out[id] = map[string]any{"type": st}
 		}
 		return true
 	})
@@ -587,14 +679,17 @@ func (s *Server) handleSessionStatusAgg(w http.ResponseWriter) {
 			s.sessionActivity.Delete(k)
 			return true
 		}
-		if out[id] == "idle" || out[id] == "" {
-			out[id] = "busy"
+		// 纠正逻辑对 map 值里的 "type" 字段判定，(缺失视为空)：
+		// 快照异常矫正 idle→busy；事件聚合补的项同理。
+		m, ok := out[id]
+		if !ok {
+			out[id] = map[string]any{"type": "busy"}
+			return true
+		}
+		if t, _ := m["type"].(string); t == "idle" || t == "" {
+			m["type"] = "busy"
 		}
 		return true
 	})
-	merged := make(map[string]any, len(out))
-	for id, st := range out {
-		merged[id] = map[string]any{"type": st}
-	}
-	writeJSON(w, http.StatusOK, merged)
+	writeJSON(w, http.StatusOK, out)
 }

@@ -89,12 +89,21 @@ func (g *gzipResponseWriter) Write(b []byte) (int, error) {
 }
 
 // Flush 转发到下层：SSE 路径未启用压缩（gz==nil），直接透传逐事件 flush；
-// 压缩路径把 gzip 缓冲一并刷出，保证长响应也能渐进送达。
+// 压缩路径先刷 gzip.Writer 的 flate 缓冲（否则渐进式响应会在结束瞬间才全部
+// 落地），再刷下层保证真实送达。
 func (g *gzipResponseWriter) Flush() {
+	if g.compress && g.gz != nil {
+		_ = g.gz.Flush()
+	}
 	if fl, ok := g.ResponseWriter.(http.Flusher); ok {
 		fl.Flush()
 	}
 }
+
+// Unwrap 暴露下层 ResponseWriter，让 http.NewResponseController(w) 的
+// SetWriteDeadline 等能力穿过 gzip 包装层；否则 SSE 慢客户端超时回收因
+// ErrNotSupported 全部失效（死代码）。
+func (g *gzipResponseWriter) Unwrap() http.ResponseWriter { return g.ResponseWriter }
 
 // Close 写 gzip 尾部并归还 writer 到池。无正文的 204/304/1xx 已在 WriteHeader 跳过
 // 压缩，不会出现「gzip 编码的空体」。
