@@ -652,16 +652,16 @@ POST /api/intel/scan/rules {"projectId","ruleIds[]"}  按配置规则逐条扫�
 
 > **⚠️ 实现现状（本节多数控件已落地，以下几项没有）**
 > - **repos_dir 两阶段修改**：无预检/确认端点与前端弹窗（见 §3.1 标注）。
-> - **测试 Worker 并发数**：页面无该设置项，后端 `intel.workers` 无人读取，实际并发是编译期
->   常量 `intelExecConcurrency = 2`（**不是**本节所述的"默认 1、可热改"）。
+> - **测试 Worker 并发数**：后端已支持可调（2026-09-20：`intelSem` 动态信号量 + `intel.workers`
+>   setting，`GET/POST /api/intel/settings` 即时生效），**但页面无该设置项**；默认仍编译期
+>   常量 `intelExecConcurrency = 2`（**不是**本节所述的"默认 1"）。
 > - **Git clone 认证（token/SSH key 加密落库）**：**完全没有实现**——`IntelProject` 无
 >   `git_token`/`ssh_key` 之类字段，`cloneGitRepo`/`ensureGitClone` 也不注入任何凭据，
 >   私有仓库只能依赖主机自身的 git 凭据（§9 承诺的"git 私钥/token 加密落库"同此）。
 >   （中间件口令与远程节点 SSH auth 的加密落库**已实现**，见 `internal/store/crypto.go`。）
-> - **flaky 隔离区**：后端只做"同轮内对失败用例立即重跑一次、转绿则计 `flaky_count` 并改判
->   passed"（`intel_exec.go` 的 `flakyRetry`，且**仅 go 报告生效**）；**没有**
->   `flaky_quarantined` 状态、**没有**"连续 N 次"阈值、**没有**从受影响范围/增量回归自动剔除，
->   前端也就没有隔离区视图与解除隔离操作。
+> - **flaky 隔离区**：核心状态机已实现（2026-09-20：test_cases 加 `quarantined` 列，flaky_count
+>   累计达阈值 3 次即隔离；`flakyRetry`/`recordRunIssues` 跳过已隔离用例；`POST /api/intel/test-cases`
+>   endpoint 解除隔离），但**前端隔离区视图**未做；`flakyRetry` 仍仅 go 报告生效。
 > - **工具链卸载入口 / 中间件卷清理**：`/api/intel/env/install` 只有装没有卸；env 路由里没有
 >   卷清理端点（`/api/intel/env/stop` 只做容器停止）。
 > - ✅ 已实现且与描述一致：两段式导航、功能点列表/详情/拖动排序/涉及端、单测区与 AI 对话区、
@@ -853,23 +853,24 @@ POST /api/intel/scan/rules {"projectId","ruleIds[]"}  按配置规则逐条扫�
 | 1 | §7 任务化、§3.5 执行、§8 M3 | analyze/run 复用任务状态机，`tasks` 新增 `kind=test-run/env/audit/fix-apply` | `store.Task` **无 `Kind` 字段**、`tasks` 表无 kind 列；5 处生产建任务调用点无一处来自 intel；intel 走 `intel_runner.go` 自有派发 + `intelExecSem` + `intelExecMutex` + `intelCancels` | intel run **拿不到重试、`dependsOn`、优先级、worker 池、`RecoverStaleRunning` 崩溃恢复、janitor 清理**；`test_runs` 里重启前 `running`/`queued` 的行永久悬挂 | 保留设计为待办；短期给 `test_runs` 补启动期"孤儿 run 置 failed"，长期再下沉为 task kind |
 | 2 | §3.6、§7 执行 transport、§10 iOS | 远程执行用 `golang.org/x/crypto/ssh`（"已在依赖中"）、流式回传、scp 拉回产物、按能力标签路由 | 全仓**无 `crypto/ssh` import**（x/crypto 仅 bcrypt）；实际 `envagent.RunSSH` 起**系统 `ssh` 二进制** + `CombinedOutput()` 一次性收集；**无 scp/产物回拉**；`reportKind != "go"` 直接拒绝；`capabilities` 列有表无路由逻辑 | 去 macOS 跑 `xcodebuild`、去远端跑 Gradle/Maven **整条路走不通**，而"补 macOS 节点"正是文中引入远程执行的头号理由；`intel_exec.go` 内"capability labels"注释属误导 | 先补产物回拉（scp/tar over ssh）再放开非 go 报告；capabilities 要么实现自动匹配要么从文档/字段语义降级为"人工选节点" |
 | 3 | §6 全局设置、§3.1 缓存路径、§5 | `intel.repos_dir` 两阶段修改（预检 → 确认 → 破坏性删除重建），默认路径 `~/.local/share/starburst-backend/intel-repos` | `probe-repos` / `repos-rebuild` **两个 handler 都不存在**；无 repos_dir 变更清理逻辑；**无默认值**（读不到即报 `intel.repos_dir not configured`） | 改路径后旧缓存既不清理也不重建，磁盘只增不减；未配置时 Git 项目完全无法分析 | 二选一：实现两阶段端点，或把本节降级为"仅提示"并手动清理 |
-| 4 | §6/§7 测试并发、§4 `intel.workers` | 并发数页面可配、默认 1（串行）、热生效不重启 | 编译期常量 `intelExecConcurrency = 2`，`intel.workers` 全仓无人读取 | 实际默认 **2 并行**（非串行），且改并发要重编译重启 | 若要兑现承诺：读 setting + 可重建信号量；否则修正文档为"常量 2" |
+| 4 | §6/§7 测试并发、§4 `intel.workers` | 并发数页面可配、默认 1（串行）、热生效不重启 | **已实现（2026-09-20）**：`intelSem` 动态信号量（`intel_runner.go`）替代固定容量 channel；`intel.workers` setting 驱动，`GET/POST /api/intel/settings` 可调、启动时恢复；cap 变化即时生效 | 默认仍 `intelExecConcurrency=2` 并行（与文档"默认 1"不同，已改口径）；页面设置项待补 | ✅ 并发可配已兑现（后端 + API）；前端全局设置项未做 |
 | 5 | §7 推送 | 9 个新事件类型（`intel.ready`…`feature.chat.answer`） | intel 侧只有 **`intel.run.event`** 一种，语义靠 `run.status`/`run.progress` 表达 | 前端无法区分"环境就绪/审计发现/修复建议/对话回复"等语义，只能轮询 | 事件名以代码为准改写本节，或按语义补事件类型 |
 | 6 | §7 自动化、§7 批量 | `rules.kind` 扩展 `intel-run`；`/api/batch` 可并行下发分析/执行 | 规则 kind 只有 `cron/git/http`，命中后建的是 **prompt 任务**；`/api/batch` 同样只建 prompt 任务 | 周期回归、push/tag 触发回归**当前无法自动跑起来**（§8 M7 验收不成立） | 新增 `intel-run` 触发类型并把 target 指向 intel 队列 |
-| 7 | §3.5/§6 flaky | 连续 N 次先败后绿 → `flaky_quarantined`、自动剔除出增量范围、页面隔离区可解除 | 只有 `flakyRetry`（**仅 go 报告**、`flakyRetryMaxRetries = 1`）同轮立即重跑、转绿则 `flaky_count+1` 并改判 passed；无隔离状态、无剔除、无 UI | 不稳定用例仍会被反复计入回归；跨报告类型（JUnit/playwright/XCTest）不做 flaky 判定 | 补 `flaky_quarantined` 状态机 + 影响面剔除 |
+| 7 | §3.5/§6 flaky | 连续 N 次先败后绿 → `flaky_quarantined`、自动剔除出增量范围、页面隔离区可解除 | **核心已实现（2026-09-20）**：test_cases 加 `quarantined` 列（迁移 `intel_flaky_quarantine`），`UpdateIntelTestCaseOutcome` 在 flaky_count 累计达阈值（3 次）时置隔离；`flakyRetry`/`recordRunIssues` 跳过已隔离用例（不再重跑/建 issue）；`POST /api/intel/test-cases`（endpoint）解除隔离。`flakyRetry` 仍仅 go 报告、同轮重跑预算 1 | 不稳定用例达 3 次后被隔离并告警、可解除（issue 不重复生成）；跨报告类型（JUnit/playwright）flaky 判定与页面隔离区视图仍缺 | ✅ 核心隔离状态机已兑现；页面隔离区 UI + 跨类型 flaky 判定待补 |
 | 8 | §5、§3.7 SBOM 与扫描触发 | `POST /api/intel/sbom`、`POST /api/intel/scan/findings`、`/api/intel/sync/scan`、`/api/intel/issues/{id}/ack`、`/api/intel/issues/{id}/link-feature`、`/api/intel/runs/{id}/results` | 上述端点**均未注册**；SBOM 随 `intel_overview.sbom_json` 由 analyze 产出、前端 `downloadIntelSbom()` 下载；findings 扫描随 analyze 触发；issue 只有列表 | 依赖本节接口表的调用方会拿到 404/405 | 以 `docs/API.md` 为权威，本节改为"设计提案" |
-| 9 | §3.4/§6 修复写回形态 | 写回可选 直接写文件 / 补丁文件 / 剪贴板 / 建分支+提交，四选一 | `applyIntelFix` **只有直接写文件**（`os.WriteFile`）；`intel_fixes.write_mode` 列存在但写入路径不使用；备份 + `rollback` 已实现 | 主干污染风险比文档描述更高（无法选择"只出补丁"） | 实现其余三种 mode，或在文档标注"仅直接写" |
+| 9 | §3.4/§6 修复写回形态 | 写回可选 直接写文件 / 补丁文件 / 剪贴板 / 建分支+提交，四选一 | **已实现（2026-09-20）**：`POST /api/intel/fixes/{id}/apply` 接受 body `writeMode`；`applyIntelFix` 分派 `file`（直接写+备份）/`patch`（`fix.GeneratePatch` 写 `intel-fix-<id>.patch`，不改源码）/`branch`（git 分支 `intel-fix-<id>` 提交，非 git 退避 file）；备份 + `rollback` 保持 | 主干污染可用 patch/branch 规避；「剪贴板」由前端取 patch 文本实现 | ✅ file/patch/branch 三形态已实现；剪贴板形态由前端承接 |
 | 10 | §3.1/§6/§9 Git 凭据 | clone 认证 HTTP token / SSH 私钥加密落库、运行时注入 | `IntelProject` 无凭据字段，`cloneGitRepo`/`ensureGitClone` **不注入任何凭据**（§9 该条对 git 不成立；中间件口令与节点 SSH auth 确实已 AES-256-GCM 加密落库） | 私有 GitLab 仓库只能在主机侧预置凭据，页面配置项是空头承诺 | 补凭据字段 + `GIT_ASKPASS`/ssh-agent 注入，或删掉该承诺 |
 | 11 | §3.6 依赖声明 | 人工 manifest `intel-env.yaml`（含 `init_scripts`） | **无解析实现**（仅 `internal/store/env.go` 注释里提过一次）；依赖只靠 `envdetect` 自动推导 | 自动推导覆盖不到的项目无法人工补声明 | 标注为未实现或落地解析器 |
 | 12 | §5 路径归属 | `GET /api/intel/projects/{id}/modules`、`PUT …/commands`、`…/commands-modules` | 实际是 `GET /api/intel/modules` 与 `GET\|PUT /api/intel/modules/`（按 moduleId），projects 子路径只挂了 `sources` | 与 §5 写法不一致，易误判为缺失 | 改写 §5 路径 |
-| 13 | §3.5、§8 M3 报告解析 | 解析 surefire / playwright json / go test -json（§3.5 另列 XCTest、pytest） | `parseReport` 只分派 `go` 与 `surefire`；`report.ParsePlaywrightJSON` **已实现有单测但无调用方** | Web/E2E 用例跑完只有一条"整轮"结果，逐用例视图空白；`npm` 类型同理 | 把 Playwright 分支接进 `parseReport` 并给 `npm/web` 落报告路径 |
+| 13 | §3.5、§8 M3 报告解析 | 解析 surefire / playwright json / go test -json（§3.5 另列 XCTest、pytest） | **已实现（2026-09-20）**：`parseReport` 加 `playwright` 分派（stdout 容错提取 JSON 段）；`detectPlaywright` 检出 web/node 项目（playwright.config 或 @playwright/test）且无人工指定命令时，默认 `npx playwright test --reporter=json`；surefire/go 不变 | Web/E2E 项目逐用例结果可解析；XCTest/pytest 仍缺 | ✅ Playwright 已接线；XCTest/pytest 待补 |
 | 14 | 文首设计原则、§3.1 Profile 注册表 | "现装现有体系：Java/Maven、Go、Android、iOS、Web、BFF(GraphQL)、Node" | 类型**探测**（`internal/intel/profile.go` 的 7 个 Profile 锚点）确实全都有；但"每个 Profile 打包自己的结构化扫描器"只有 **Java（`java.go`）与 Go（`go.go`）**两套，其余类型 `ScanModule` 返回空结果 | 混合仓库里 Android/iOS/Web 子项目能被识别出 type/role，却拿不到实体/端点契约，字段级校验与影响面推导对这些子项目不成立 | 见 `internal/intel/scan.go` 的 `ScanModule` 注释；补 Android/iOS/Web 扫描器前，文中"现装"应限定为"探测现装、扫描器仅 Java/Go" |
 
 **另需知悉（不算"文档说谎"，但会影响判断）**
 
-- **env 门禁遇错即放行**：`internal/server/env.go` 的 `envGate` 在 `ensureEnv` 返回错误时
-  `log … (放行)` 并 `return nil`。即"环境探测本身坏了"等同于"环境检查通过"，与 §3.6/§7 承诺的
-  硬门禁语义相反（本地 run 只有探测正常时才被真正拦住；`force`/远程 run 完全跳过门禁）。
+- **env 门禁（2026-09-20 已修复）**：原 `internal/server/env.go` 的 `envGate` 在 `ensureEnv` 返回错误时
+  `log … (放行)` 并 `return nil`，即"环境探测本身坏了"等同于"环境检查通过"，与 §3.6/§7 承诺的
+  硬门禁语义相反。现改为**遇错即拦**并暴露探测错误（硬门禁）；本地 run 只有探测正常时才被真正拦住，
+  `force`/远程 run 仍跳过门禁。
 - **轻量化部署看不到 intel**：`/api/system` 的 `vectorCapable`（= pgvector 已装 **且**
   embedding 已配）为 false 时，`internal/webui/static/assets/app.js` **直接隐藏「测试」入口**。
   因此默认 SQLite 部署下，整套 intel 功能"后端可用、页面无入口"。这也是
