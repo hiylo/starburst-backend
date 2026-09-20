@@ -96,13 +96,16 @@ func (s *Server) ensureEnv(ctx context.Context, projectID int64) ([]*store.Intel
 
 // envGate evaluates environment readiness before a test run: every required
 // middleware and toolchain must be ready, otherwise the run is rejected with a
-// per-item missing list (the environment gate of §3.6). Projects whose env
-// state cannot be determined are let through (gate is best-effort).
+// per-item missing list (the environment gate of §3.6). A failure to determine
+// the environment state is treated as "not ready" (hard gate): silently letting
+// it through meant a broken probe also passed the gate, hiding missing
+// middleware behind a failed detection.
 func (s *Server) envGate(ctx context.Context, projectID int64) error {
 	services, _, err := s.ensureEnv(ctx, projectID)
 	if err != nil {
-		log.Printf("intel env gate project %d: %v (放行)", projectID, err)
-		return nil
+		// 硬门禁：探测失败 ≠ 就绪。此前「遇错放行」会让环境探测本身坏了时
+		// 「缺失中间件」也被判为通过；改为拒绝并暴露探测错误。
+		return fmt.Errorf("环境门禁探测失败：%v；请检查环境供给配置后重试", err)
 	}
 	var missing []string
 	for _, svc := range services {

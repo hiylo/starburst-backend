@@ -30,6 +30,27 @@ func (s *Server) handleIntelTestCases(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if r.Method == http.MethodPost {
+		// 解除 flaky 隔离：把某个用例从「隔离区」移除，恢复参与后续回归。
+		var req struct {
+			ProjectID int64  `json:"projectId"`
+			ModuleID  int64  `json:"moduleId"`
+			Endpoint  string `json:"endpoint"`
+		}
+		if !readBody(w, r, &req) {
+			return
+		}
+		class, method := splitEndpoint(req.Endpoint)
+		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+		defer cancel()
+		if err := s.store.UnquarantineIntelTestCase(ctx, req.ProjectID, req.ModuleID, class, method); err != nil {
+			log.Printf("intel unquarantine %q: %v", req.Endpoint, err)
+			writeErr(w, http.StatusInternalServerError, "unquarantine failed")
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+		return
+	}
 	if r.Method != http.MethodGet {
 		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
@@ -368,8 +389,10 @@ func (s *Server) runIntelTests(ctx context.Context, projectID, moduleID, nodeID 
 	// (projects.commands_json) when it offers a matching test command for this
 	// module's build tool; the whitelist is parsed into argv (no shell), so
 	// edited entries cannot inject shell metacharacters.
+	commandSpecified := false
 	if wl := whitelistedTestCommand(p.CommandsJSON, module.BuildTool, module.KindType); wl != nil {
 		cmdArgs = wl
+		commandSpecified = true
 	}
 	// 测试计划执行（POST /api/intel/plan）可覆盖命令：计划预览的命令必须先
 	// 经 argv 解析（无 shell）且无 shell 元字符，否则回退到默认/白名单命令。
@@ -383,7 +406,16 @@ func (s *Server) runIntelTests(ctx context.Context, projectID, moduleID, nodeID 
 		}
 		if safe {
 			cmdArgs = overrideCmd
+			commandSpecified = true
 		}
+	}
+	// Playwright 项目（web/node 检出 playwright.config 或 @playwright/test）：
+	// 默认 `npm test` 不产逐用例 JSON，页面只剩一条整轮结果；在用户未人工
+	// 指定命令时切换为 `npx playwright test --reporter=json`，stdout 输出可
+	// 解析的逐用例 JSON。人工指定的命令（白名单/覆盖）优先，不被覆盖。
+	if reportKind == "npm" && !commandSpecified && detectPlaywright(dir) {
+		cmdArgs = []string{"npx", "playwright", "test", "--reporter=json"}
+		reportKind = "playwright"
 	}
 
 	run.ModuleID = module.ID
@@ -467,7 +499,7 @@ func (s *Server) runIntelTests(ctx context.Context, projectID, moduleID, nodeID 
 		res.ProjectID = projectID
 		res.ModuleID = module.ID
 	}
-	flakyRetry(ctx, dir, reportKind, results)
+	s.flakyRetry(ctx, projectID, module.ID, dir, reportKind, results)
 	// npm/other script runners produce no per-case report on stdout; synthesize a
 	// single whole-run result so the run has a definite pass/fail to display.
 	if len(results) == 0 && reportKind == "npm" {
@@ -544,6 +576,40 @@ func testCommandFor(buildTool, kindType string) ([]string, string) {
 	return nil, ""
 }
 
+// detectPlaywright reports whether a web/node module uses Playwright (a
+// playwright.config.* file at the module root, or the @playwright/test /
+// playwright dependency in package.json). Such projects run with
+// `npx playwright test --reporter=json` so per-case results are parseable
+// instead of collapsing into a single whole-run row.
+func detectPlaywright(dir string) bool {
+	matches, _ := filepath.Glob(filepath.Join(dir, "playwright.config.*"))
+	if len(matches) > 0 {
+		return true
+	}
+	pj, err := os.ReadFile(filepath.Join(dir, "package.json"))
+	if err != nil {
+		return false
+	}
+	var manifest struct {
+		Dependencies    map[string]string `json:"dependencies"`
+		DevDependencies map[string]string `json:"devDependencies"`
+	}
+	if json.Unmarshal(pj, &manifest) != nil {
+		return false
+	}
+	for dep := range manifest.Dependencies {
+		if dep == "@playwright/test" || dep == "playwright" {
+			return true
+		}
+	}
+	for dep := range manifest.DevDependencies {
+		if dep == "@playwright/test" || dep == "playwright" {
+			return true
+		}
+	}
+	return false
+}
+
 // whitelistedTestCommand picks a test command from the project-level reviewed
 // command whitelist (projects.commands_json, a JSON array of command strings).
 // It returns the matching argv (split with strings.Fields, never a shell) or nil
@@ -604,15 +670,23 @@ const flakyRetryMaxRetries = 1
 // flakyRetry re-runs the failed Go tests once (bounded by filter) and marks the
 // results that then pass as flaky. Non-Go report kinds and build failures abort
 // the retry deterministically (no unbounded re-execution).
-func flakyRetry(ctx context.Context, dir, reportKind string, results []*store.TestResult) {
+func (s *Server) flakyRetry(ctx context.Context, projectID, moduleID int64, dir, reportKind string, results []*store.TestResult) {
 	if reportKind != "go" {
 		return
+	}
+	// 已隔离的用例不再参与 flaky 重跑（已连续 flaky 达阈值，重跑无意义）。
+	var quarantined map[string]bool
+	if q, err := s.store.ListQuarantinedIntelTestCases(ctx, projectID, moduleID); err == nil {
+		quarantined = q
 	}
 	failed := make([]*store.TestResult, 0)
 	seen := map[string]bool{}
 	names := make([]string, 0)
 	for _, r := range results {
 		if r == nil || r.Passed {
+			continue
+		}
+		if quarantined[r.Endpoint] {
 			continue
 		}
 		failed = append(failed, r)
@@ -735,6 +809,18 @@ func parseReport(reportKind, dir string, output []byte) []*store.TestResult {
 				cases = append(cases, c...)
 			}
 		}
+	case "playwright":
+		// `--reporter=json` 的 stdout 是纯 JSON；runCommand 合并了 stderr，
+		// 浏览器日志可能混入，直接解析失败时提取 JSON 段再试。
+		if c, err := report.ParsePlaywrightJSON(output); err == nil {
+			cases = c
+		} else if i := bytes.IndexByte(output, '{'); i >= 0 {
+			if j := bytes.LastIndexByte(output, '}'); j > i {
+				if c, err := report.ParsePlaywrightJSON(output[i : j+1]); err == nil {
+					cases = c
+				}
+			}
+		}
 	}
 	out := make([]*store.TestResult, 0, len(cases))
 	for _, c := range cases {
@@ -755,8 +841,16 @@ func parseReport(reportKind, dir string, output []byte) []*store.TestResult {
 
 // recordRunIssues turns failed results into intel_issues (closed-loop).
 func (s *Server) recordRunIssues(ctx context.Context, run *store.TestRun, projectID, moduleID int64, results []*store.TestResult) {
+	var quarantined map[string]bool
+	if q, err := s.store.ListQuarantinedIntelTestCases(ctx, projectID, moduleID); err == nil {
+		quarantined = q
+	}
 	for _, res := range results {
 		if res.Passed {
+			continue
+		}
+		// 隔离中的 flaky 用例不生成 issue，避免不稳定用例反复进问题清单。
+		if quarantined[res.Endpoint] {
 			continue
 		}
 		issue := &store.IntelIssue{

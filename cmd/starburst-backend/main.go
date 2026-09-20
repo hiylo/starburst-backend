@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -175,6 +176,26 @@ func main() {
 
 	// 异步审计批量落库（避免轮询流量同步 INSERT）。
 	go srv.StartAuditFlusher(ctx)
+
+	// 测试智能（intel）启动恢复：把上次进程退出时遗留的 running/queued 测试
+	// 运行置为 failed。intel 未接入任务状态机，test_runs 无崩溃恢复，否则重启
+	// 前悬挂的运行会永远卡在「运行中/排队中」。
+	func() {
+		rc, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if n, err := st.FailStaleIntelRuns(rc, time.Now().Add(-20*time.Second)); err != nil {
+			log.Printf("intel startup: mark stale test runs failed: %v", err)
+		} else if n > 0 {
+			log.Printf("intel startup: marked %d stale test runs as failed", n)
+		}
+		// 恢复测试执行并发设置（intel.workers），缺省保持常量 2。
+		if v, err := st.GetSetting(rc, "intel.workers"); err == nil {
+			if n, err := strconv.Atoi(v); err == nil && n >= 1 && n <= 16 {
+				srv.SetIntelWorkers(n)
+				log.Printf("intel startup: test concurrency = %d", n)
+			}
+		}
+	}()
 
 	// Task scheduler: promotes due one-shot scheduled tasks to queued and
 	// clones recurring cron templates into concrete tasks.

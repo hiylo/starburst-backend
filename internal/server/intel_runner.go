@@ -14,8 +14,87 @@ import (
 
 // intelExecConcurrency bounds how many test processes run at once across all
 // projects. run-all parallelizes within a project but never exceeds this global
-// cap, so a wide regression cannot saturate the host.
+// cap, so a wide regression cannot saturate the host. This is the default; the
+// runtime value is adjustable via the intel.workers setting (see intelSem).
 const intelExecConcurrency = 2
+
+// intelSem is a process-wide concurrency gate for test executions whose
+// capacity can be changed at runtime (intel.workers) without a restart. It
+// replaces a fixed-capacity channel so raising/lowering concurrency applies
+// immediately to the in-flight waiters.
+type intelSem struct {
+	mu  sync.Mutex
+	cur int
+	cap int
+	ch  chan struct{}
+}
+
+func newIntelSem(cap int) *intelSem {
+	if cap < 1 {
+		cap = 1
+	}
+	return &intelSem{cap: cap, ch: make(chan struct{}, 1)}
+}
+
+// tryAcquire takes a slot when one is free, without blocking.
+func (s *intelSem) tryAcquire() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.cur >= s.cap {
+		return false
+	}
+	s.cur++
+	return true
+}
+
+// release returns a slot and wakes one waiter.
+func (s *intelSem) release() {
+	s.mu.Lock()
+	if s.cur > 0 {
+		s.cur--
+	}
+	s.mu.Unlock()
+	select {
+	case s.ch <- struct{}{}:
+	default:
+	}
+}
+
+// setCap changes the concurrency cap (clamped to >= 1) and wakes a waiter in
+// case the higher cap admits it immediately.
+func (s *intelSem) setCap(cap int) {
+	if cap < 1 {
+		cap = 1
+	}
+	s.mu.Lock()
+	s.cap = cap
+	s.mu.Unlock()
+	select {
+	case s.ch <- struct{}{}:
+	default:
+	}
+}
+
+// capValue returns the current concurrency cap.
+func (s *intelSem) capValue() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.cap
+}
+
+// acquire blocks until a slot is free or ctx is done.
+func (s *intelSem) acquire(ctx context.Context) bool {
+	for {
+		if s.tryAcquire() {
+			return true
+		}
+		select {
+		case <-s.ch:
+		case <-ctx.Done():
+			return false
+		}
+	}
+}
 
 // intelRunTimeout bounds a single module's test execution (local or remote).
 // The previous handler let a run block up to 10/30 minutes with no isolation;
@@ -88,13 +167,13 @@ func (s *Server) runIntelJob(projectID, moduleID, nodeID int64, force bool, run 
 	defer mu.Unlock()
 
 	// 全局并发水位：拿不到槽位时保持排队状态等待。
-	select {
-	case s.intelExecSem <- struct{}{}:
-		defer func() { <-s.intelExecSem }()
-	case <-time.After(intelRunTimeout):
+	semCtx, cancelSem := context.WithTimeout(context.Background(), intelRunTimeout)
+	defer cancelSem()
+	if !s.intelSem.acquire(semCtx) {
 		s.failIntelRun(projectID, run, "排队超时，未获得执行槽位")
 		return
 	}
+	defer s.intelSem.release()
 
 	execCtx, cancel := context.WithTimeout(context.Background(), intelRunTimeout)
 	s.registerIntelCancel(run.ID, cancel)
@@ -266,13 +345,11 @@ func (s *Server) finishIntelRunAll(ctx context.Context, run *store.TestRun, stat
 // the effective status ("passed" | "failed" | "error").
 func (s *Server) execIntelModule(ctx context.Context, projectID int64, m *store.IntelModule, mr *store.TestRun, force bool, idx, total int) string {
 	// 全局并发水位：与其他项目/模块的测试进程共享。
-	select {
-	case s.intelExecSem <- struct{}{}:
-		defer func() { <-s.intelExecSem }()
-	case <-ctx.Done():
+	if !s.intelSem.acquire(ctx) {
 		s.failIntelRun(projectID, mr, "已取消")
 		return "error"
 	}
+	defer s.intelSem.release()
 
 	mctx, cancel := context.WithTimeout(ctx, intelRunTimeout)
 	defer cancel()

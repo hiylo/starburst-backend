@@ -58,7 +58,7 @@ type Server struct {
 	intelExecMu sync.Map // int64 projectID → *sync.Mutex
 	// intelExecSem 全局测试执行并发水位：限制同时进行的测试进程数，
 	// 防止 run-all 并行把所有 CPU/IO 打满。
-	intelExecSem chan struct{}
+	intelSem *intelSem
 	// intelCancelMu 保护 intelCancels：runID → cancel，供取消接口终止执行。
 	intelCancelMu sync.Mutex
 	intelCancels  map[int64]context.CancelFunc
@@ -94,7 +94,7 @@ func New(cfg *config.Config, st store.Store, am *auth.Manager, oc *opencode.Clie
 		genLimit:      newLoginLimiter(20, time.Minute),
 		touchSeen:     make(map[string]time.Time),
 		auditCh:       make(chan *store.AuditEntry, 512),
-		intelExecSem:  make(chan struct{}, intelExecConcurrency),
+		intelSem:      newIntelSem(intelExecConcurrency),
 		intelCancels:  make(map[int64]context.CancelFunc),
 		intelAutoLast: make(map[int64]time.Time),
 	}
@@ -260,6 +260,7 @@ func (s *Server) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/intel/nodes/", s.handleIntelNodeByID)
 	mux.HandleFunc("/api/intel/ai-rules", s.handleIntelAIRules)
 	mux.HandleFunc("/api/intel/ai-rules/", s.handleIntelAIRuleByID)
+	mux.HandleFunc("/api/intel/settings", s.handleIntelSettings)
 	mux.HandleFunc("/api/intel/scan/rules", s.handleIntelRuleScan)
 	mux.HandleFunc("/api/intel/overrides", s.handleIntelOverrides)
 	mux.HandleFunc("/api/intel/overrides/suggest", s.handleIntelOverrideSuggest)

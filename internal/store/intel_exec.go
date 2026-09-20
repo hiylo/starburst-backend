@@ -24,9 +24,15 @@ type TestCase struct {
 	LastStatus     string     `json:"lastStatus"`
 	LastDurationMs int64      `json:"lastDurationMs"`
 	FlakyCount     int        `json:"flakyCount"`
+	Quarantined    int        `json:"quarantined"`
 	LastRunAt      *time.Time `json:"lastRunAt"`
 	CreatedAt      time.Time  `json:"createdAt"`
 }
+
+// flakyQuarantineThreshold is the number of times a case must first fail then
+// pass (flaky) before it is quarantined and excluded from flaky retries and
+// issue creation.
+const flakyQuarantineThreshold = 3
 
 // TestRun is one test execution (scope/kind/command), owned by a project/module.
 type TestRun struct {
@@ -145,7 +151,7 @@ func (s *sqlStore) AppendIntelTestCases(ctx context.Context, projectID int64, ca
 // module).
 func (s *sqlStore) ListIntelTestCases(ctx context.Context, projectID, moduleID int64) ([]*TestCase, error) {
 	query := `SELECT id, project_id, module_id, module, kind, framework, class, method,
-		path, tags, last_status, last_duration_ms, flaky_count, last_run_at, created_at
+		path, tags, last_status, last_duration_ms, flaky_count, quarantined, last_run_at, created_at
 		FROM test_cases WHERE project_id = ?`
 	args := []any{projectID}
 	if moduleID > 0 {
@@ -164,7 +170,7 @@ func (s *sqlStore) ListIntelTestCases(ctx context.Context, projectID, moduleID i
 		var lastRun *time.Time
 		if err := rows.Scan(&c.ID, &c.ProjectID, &c.ModuleID, &c.Module, &c.Kind, &c.Framework,
 			&c.Class, &c.Method, &c.Path, &c.Tags, &c.LastStatus, &c.LastDurationMs,
-			&c.FlakyCount, &lastRun, &c.CreatedAt); err != nil {
+			&c.FlakyCount, &c.Quarantined, &lastRun, &c.CreatedAt); err != nil {
 			return nil, err
 		}
 		c.LastRunAt = lastRun
@@ -190,13 +196,51 @@ func (s *sqlStore) UpdateIntelTestCaseOutcome(ctx context.Context, projectID, mo
 	if flaky {
 		flakyInt = 1
 	}
+	// quarantined 在 flaky_count 累计达到阈值时置 1（用更新后的值判断），
+	// 隔离的用例不再参与 flaky 重跑与 issue 生成。
 	_, err := s.db.ExecContext(ctx, s.q(`
 		UPDATE test_cases SET last_status = ?, last_duration_ms = ?,
-			flaky_count = flaky_count + ?, last_run_at = CURRENT_TIMESTAMP
+			flaky_count = flaky_count + ?,
+			quarantined = CASE WHEN flaky_count + ? >= ? THEN 1 ELSE quarantined END,
+			last_run_at = CURRENT_TIMESTAMP
 		WHERE id = (
 			SELECT id FROM test_cases WHERE project_id = ? AND module_id = ? AND method = ? AND (? = '' OR class = ?)
 			ORDER BY id LIMIT 1
-		)`), status, durationMs, flakyInt, projectID, moduleID, method, class, class)
+		)`), status, durationMs, flakyInt, flakyInt, flakyQuarantineThreshold, projectID, moduleID, method, class, class)
+	return err
+}
+
+// ListQuarantinedIntelTestCases returns the endpoints (class.method) of quarantined
+// cases for a module, keyed by the endpoint string used in TestResult.Endpoint.
+func (s *sqlStore) ListQuarantinedIntelTestCases(ctx context.Context, projectID, moduleID int64) (map[string]bool, error) {
+	rows, err := s.db.QueryContext(ctx, s.q(`
+		SELECT class, method FROM test_cases WHERE project_id = ? AND module_id = ? AND quarantined = 1`),
+		projectID, moduleID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make(map[string]bool)
+	for rows.Next() {
+		var class, method string
+		if err := rows.Scan(&class, &method); err != nil {
+			return nil, err
+		}
+		out[class+"."+method] = true
+	}
+	return out, rows.Err()
+}
+
+// UnquarantineIntelTestCase clears the quarantine flag and flaky counter for a
+// case, restoring it to normal participation in runs and issue tracking.
+func (s *sqlStore) UnquarantineIntelTestCase(ctx context.Context, projectID, moduleID int64, class, method string) error {
+	if method == "" {
+		return nil
+	}
+	_, err := s.db.ExecContext(ctx, s.q(`
+		UPDATE test_cases SET quarantined = 0, flaky_count = 0
+		WHERE project_id = ? AND module_id = ? AND method = ? AND (? = '' OR class = ?)`),
+		projectID, moduleID, method, class, class)
 	return err
 }
 
@@ -273,6 +317,25 @@ func (s *sqlStore) UpdateIntelTestRun(ctx context.Context, run *TestRun) error {
 			command = COALESCE(?, command), progress = COALESCE(?, progress), output = COALESCE(?, output) WHERE id = ?`),
 		run.Status, run.StartedAt, run.FinishedAt, run.LogPath, run.Command, run.Progress, run.Output, run.ID)
 	return err
+}
+
+// FailStaleIntelRuns marks runs left in running/queued from a previous process
+// that exited before finishing (a restart, crash or cancellation) as failed.
+// Without this, those rows hang forever as running/queued with no execution
+// behind them. olderThan guards the fresh rows created by a concurrently
+// starting run loop; the fixed 20-second window is long enough that no live run
+// is ever older than it at startup.
+func (s *sqlStore) FailStaleIntelRuns(ctx context.Context, olderThan time.Time) (int64, error) {
+	res, err := s.db.ExecContext(ctx, s.q(`
+		UPDATE test_runs SET status = 'failed',
+			finished_at = COALESCE(finished_at, CURRENT_TIMESTAMP),
+			progress = '进程重启，运行被中断（启动恢复标记为失败）'
+		WHERE status IN ('running', 'queued') AND created_at < ?`), olderThan)
+	if err != nil {
+		return 0, err
+	}
+	n, err := res.RowsAffected()
+	return n, err
 }
 
 // AddIntelTestResults inserts per-case results for a run.

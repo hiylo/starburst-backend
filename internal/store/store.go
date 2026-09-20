@@ -310,6 +310,10 @@ type Store interface {
 	AppendIntelTestCases(ctx context.Context, projectID int64, cases []*TestCase) error
 	// UpdateIntelTestCaseOutcome records a run outcome on the matching test case.
 	UpdateIntelTestCaseOutcome(ctx context.Context, projectID, moduleID int64, class, method string, passed bool, durationMs int64, flaky bool) error
+	// ListQuarantinedIntelTestCases returns endpoints of quarantined cases for a module.
+	ListQuarantinedIntelTestCases(ctx context.Context, projectID, moduleID int64) (map[string]bool, error)
+	// UnquarantineIntelTestCase clears the quarantine flag and flaky counter.
+	UnquarantineIntelTestCase(ctx context.Context, projectID, moduleID int64, class, method string) error
 	// CreateIntelTestRun persists a new test run and populates its id.
 	CreateIntelTestRun(ctx context.Context, run *TestRun) error
 	// GetIntelTestRun loads a single test run.
@@ -324,6 +328,9 @@ type Store interface {
 	ListIntelTestResults(ctx context.Context, runID int64) ([]*TestResult, error)
 	// GetIntelTestResult loads a single per-case result by id.
 	GetIntelTestResult(ctx context.Context, id int64) (*TestResult, error)
+	// FailStaleIntelRuns marks runs left in running/queued (from a previous
+	// process that exited before finishing) as failed and returns the count.
+	FailStaleIntelRuns(ctx context.Context, olderThan time.Time) (int64, error)
 
 	// ---- Test Intelligence: issues & features ----
 

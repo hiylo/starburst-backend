@@ -125,6 +125,7 @@ var migrations = []migration{
 	{name: "intel_project_sources", apply: migrationIntelProjectSources},
 	{name: "test_runs_progress", apply: migrationTestRunsProgress},
 	{name: "intel_analysis_status", apply: migrationIntelAnalysisStatus},
+	{name: "intel_flaky_quarantine", apply: migrationIntelFlakyQuarantine},
 }
 
 // migrationIntel creates the Test Intelligence subsystem tables: flat project
@@ -1238,6 +1239,17 @@ func migrationTestRunsProgress(ctx context.Context, driver string, db *sql.DB) e
 // from an empty analyzed_at. Values: "" (never), "running", "ok", "failed".
 func migrationIntelAnalysisStatus(ctx context.Context, driver string, db *sql.DB) error {
 	_, err := db.ExecContext(ctx, `ALTER TABLE projects ADD COLUMN analysis_status TEXT NOT NULL DEFAULT ''`)
+	if err != nil && strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+		return nil // 已存在（并发迁移重入）
+	}
+	return err
+}
+
+// migrationIntelFlakyQuarantine adds a quarantine flag to test_cases so a case
+// that keeps flipping failed→green can be quarantined (excluded from flaky
+// retries and issue creation) and later released from the web UI.
+func migrationIntelFlakyQuarantine(ctx context.Context, driver string, db *sql.DB) error {
+	_, err := db.ExecContext(ctx, `ALTER TABLE test_cases ADD COLUMN quarantined INTEGER NOT NULL DEFAULT 0`)
 	if err != nil && strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
 		return nil // 已存在（并发迁移重入）
 	}

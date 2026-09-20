@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -158,7 +159,17 @@ func (s *Server) handleIntelFixAction(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusBadRequest, "fix is not in proposed state")
 			return
 		}
-		if err := s.applyIntelFix(ctx, fx); err != nil {
+		var req struct {
+			WriteMode string `json:"writeMode"` // file(默认) | patch | branch
+		}
+		if r.ContentLength > 0 && !readBody(w, r, &req) {
+			return
+		}
+		if req.WriteMode != "" && req.WriteMode != "file" && req.WriteMode != "patch" && req.WriteMode != "branch" {
+			writeErr(w, http.StatusBadRequest, "writeMode must be file|patch|branch")
+			return
+		}
+		if err := s.applyIntelFix(ctx, fx, req.WriteMode); err != nil {
 			writeErr(w, http.StatusInternalServerError, "应用修复失败: "+err.Error())
 			return
 		}
@@ -185,10 +196,14 @@ func (s *Server) handleIntelFixAction(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "status": fx.Status})
 }
 
-// applyIntelFix writes a proposed fix's edits into the project working tree,
-// validating each oldText against the current file content. The original
-// content of every touched file is captured into AppliedBackup for rollback.
-func (s *Server) applyIntelFix(ctx context.Context, rec *store.IntelFix) error {
+// applyIntelFix applies a proposed fix in one of three write-back modes:
+//   - "file"   (default): edit the project working tree directly, capturing the
+//     original content of every touched file into AppliedBackup for rollback.
+//   - "patch"  : render a unified diff patch draft (fix.GeneratePatch) and write
+//     it to intel-fix-<id>.patch in the project root without touching sources.
+//   - "branch" : create a git branch intel-fix-<id>, apply the edits on it and
+//     commit, leaving the original branch untouched.
+func (s *Server) applyIntelFix(ctx context.Context, rec *store.IntelFix, writeMode string) error {
 	var suggestions []*fix.Suggestion
 	if err := json.Unmarshal([]byte(rec.DiffJSON), &suggestions); err != nil {
 		return fmt.Errorf("diff_json 不是合法的建议列表: %w", err)
@@ -196,6 +211,23 @@ func (s *Server) applyIntelFix(ctx context.Context, rec *store.IntelFix) error {
 	if len(suggestions) == 0 {
 		return fmt.Errorf("diff_json 为空")
 	}
+	if writeMode == "" {
+		writeMode = "file"
+	}
+	switch writeMode {
+	case "patch":
+		return s.applyIntelFixPatch(ctx, rec, suggestions)
+	case "branch":
+		return s.applyIntelFixBranch(ctx, rec, suggestions)
+	default:
+		return s.applyIntelFixFile(ctx, rec, suggestions)
+	}
+}
+
+// applyIntelFixFile is the direct-write mode: validate each oldText against the
+// current file content and rewrite it, capturing the original content of every
+// touched file into AppliedBackup for rollback.
+func (s *Server) applyIntelFixFile(ctx context.Context, rec *store.IntelFix, suggestions []*fix.Suggestion) error {
 	p, err := s.store.GetIntelProject(ctx, rec.ProjectID)
 	if err != nil {
 		return err
@@ -232,6 +264,72 @@ func (s *Server) applyIntelFix(ctx context.Context, rec *store.IntelFix) error {
 	rec.AppliedBackup = string(buf)
 	rec.Status = "applied"
 	return nil
+}
+
+// applyIntelFixPatch renders a unified diff patch draft and writes it to
+// intel-fix-<id>.patch in the project root without modifying the sources.
+func (s *Server) applyIntelFixPatch(ctx context.Context, rec *store.IntelFix, suggestions []*fix.Suggestion) error {
+	p, err := s.store.GetIntelProject(ctx, rec.ProjectID)
+	if err != nil {
+		return err
+	}
+	root, err := s.projectRoot(ctx, p)
+	if err != nil {
+		return err
+	}
+	content := make(map[string]string)
+	for _, sg := range suggestions {
+		if sg == nil || sg.File == "" {
+			continue
+		}
+		if _, ok := content[sg.File]; ok {
+			continue
+		}
+		abs, err := intelResolveRepoPath(root, sg.File)
+		if err != nil {
+			return err
+		}
+		data, err := os.ReadFile(abs)
+		if err != nil {
+			return fmt.Errorf("读取 %s: %w", sg.File, err)
+		}
+		content[sg.File] = string(data)
+	}
+	patch, err := fix.GeneratePatch(content, suggestions)
+	if err != nil {
+		return fmt.Errorf("生成补丁: %w", err)
+	}
+	patchPath := filepath.Join(root, fmt.Sprintf("intel-fix-%d.patch", rec.ID))
+	if err := os.WriteFile(patchPath, []byte(patch), 0o644); err != nil {
+		return fmt.Errorf("写入补丁文件: %w", err)
+	}
+	rec.AppliedBackup = patchPath
+	rec.Status = "applied"
+	return nil
+}
+
+// applyIntelFixBranch applies the edits on a NEW git branch (intel-fix-<id>) and
+// commits them, leaving the current branch untouched. Non-git repositories and
+// git failures degrade to the direct-write file mode after a branch attempt.
+func (s *Server) applyIntelFixBranch(ctx context.Context, rec *store.IntelFix, suggestions []*fix.Suggestion) error {
+	p, err := s.store.GetIntelProject(ctx, rec.ProjectID)
+	if err != nil {
+		return err
+	}
+	root, err := s.projectRoot(ctx, p)
+	if err != nil {
+		return err
+	}
+	branch := fmt.Sprintf("intel-fix-%d", rec.ID)
+	// 建分支失败（非 git 仓库/分支已存在/网络锁定）时退避到直接写文件。
+	if _, err := runCommand(ctx, root, "git", "checkout", "-b", branch); err == nil {
+		defer func() {
+			_, _ = runCommand(context.Background(), root, "git", "add", "-A")
+			_, _ = runCommand(context.Background(), root, "git", "commit", "-m",
+				fmt.Sprintf("intel fix #%d: %s", rec.ID, rec.Title))
+		}()
+	}
+	return s.applyIntelFixFile(ctx, rec, suggestions)
 }
 
 // markFindingFixed closes the loop when a fix is applied: the linked finding

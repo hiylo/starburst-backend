@@ -344,13 +344,11 @@ func (s *Server) finishIntelPlan(ctx context.Context, run *store.TestRun, status
 
 // execIntelPlanStep executes one module's build→test pair, returning success.
 func (s *Server) execIntelPlanStep(ctx context.Context, projectID int64, step *IntelPlanStep, mr *store.TestRun, idx, total int) bool {
-	select {
-	case s.intelExecSem <- struct{}{}:
-		defer func() { <-s.intelExecSem }()
-	case <-ctx.Done():
+	if !s.intelSem.acquire(ctx) {
 		s.failIntelRun(projectID, mr, "已取消")
 		return false
 	}
+	defer s.intelSem.release()
 
 	mctx, cancel := context.WithTimeout(ctx, intelRunTimeout)
 	defer cancel()
