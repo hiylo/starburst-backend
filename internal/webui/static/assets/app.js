@@ -320,7 +320,17 @@ function mdRender(src) {
     // 有序 / 无序列表（含嵌套缩进与任务清单 [ ] / [x]）
     if (isListLine(line)) {
       const collected = [];
-      while (i < lines.length && isListLine(lines[i])) collected.push(lines[i++]);
+      // 列表项之间允许空行（LLM 常见输出），空行后仍是列表项则合并为同一列表；
+      // 空行后是普通段落则终止，避免把后续段落吞进列表。
+      while (i < lines.length) {
+        if (isListLine(lines[i])) collected.push(lines[i++]);
+        else if (!lines[i].trim()) {
+          let j = i;
+          while (j < lines.length && !lines[j].trim()) j++;
+          if (j < lines.length && isListLine(lines[j])) i = j;
+          else break;
+        } else break;
+      }
       const base = /^\s*/.exec(collected[0])[0].length;
       const items = collected.map(l => {
         const ind = /^\s*/.exec(l)[0].length;
