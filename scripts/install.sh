@@ -66,7 +66,7 @@ while [[ $# -gt 0 ]]; do
   case "$opt" in
     -h|--help)
       echo "用法: $0 [--port 18880] [--db sqlite|postgres] [--pg-dsn dsn] [--admin-password pw] [--default-token tok] \\"
-      echo "       [--workers 4] [--task-retention 168h0m] [--prefix /] [--version 2.0.0] \\"
+      echo "       [--workers 4] [--task-retention 168h0m] [--prefix /] [--version 2.0.1] \\"
       echo "       [--stt-url http://192.0.2.150:18090] [--stt-timeout 30s] [--stt-max-chunk-bytes 2097152] \\"
       echo "       [--pg-container starburst-pg] [--pg-port 55432] [--pg-image pgvector/pgvector:pg16]"
       exit 0 ;;

@@ -71,7 +71,7 @@ type Config struct {
 
 // Version is the semantic version reported by --version. CI 打 tag 时用
 // -ldflags "-X .../config.Version=<tag>" 注入，所以这里必须是 var（const 无法被链接器改写）。
-var Version = "2.0.0"
+var Version = "2.0.1"
 
 // Parse reads configuration from command-line flags and environment variables.
 // Environment variables take precedence over flag defaults where set.
