@@ -1294,6 +1294,41 @@ function connectTaskWS() {
       refreshIntelRunsIfVisible();
       return;
     }
+    // 智能测试语义事件（§11 偏差清单 #5）：在 intel.run.event 之上区分环境门禁 /
+    // 审计发现 / 修复建议 / 功能点 AI 对话等语义，逐类刷新对应面板。
+    if (msg.type === "intel.gate.blocked" && msg.payload) {
+      const sev = msg.severity === "critical" ? "crit" : "warn";
+      const why = msg.payload.reason === "probe_failed" ? "环境探测失败" : "环境未就绪";
+      toast("环境门禁拦截", why + "，请到「环境供给」处理", sev, 12000);
+      refreshIntelPanelIfVisible("env");
+      return;
+    }
+    if (msg.type === "intel.env.ready") {
+      refreshIntelPanelIfVisible("env");
+      return;
+    }
+    if (msg.type === "intel.audit.finding" && msg.payload) {
+      refreshIntelPanelIfVisible("findings");
+      toast("新增审计发现", msg.payload.summary || "", "warn", 10000);
+      return;
+    }
+    if (msg.type === "intel.fix.suggested") {
+      refreshIntelPanelIfVisible("fixes");
+      return;
+    }
+    if (msg.type === "intel.fix.applied") {
+      refreshIntelPanelIfVisible("fixes");
+      return;
+    }
+    if (msg.type === "intel.feature.chat.answer") {
+      refreshIntelPanelIfVisible("features");
+      return;
+    }
+    // 未知 intel.* 语义事件兜底：不阻断旧逻辑，按前缀做一次通用刷新。
+    if (msg.type && msg.type.indexOf("intel.") === 0) {
+      refreshIntelPanelIfVisible("runs");
+      return;
+    }
     if (!msg.payload) return;
     if (msg.type === "task.summary") {
       updateTaskAI(msg.payload.id, msg.payload.summary, false);
@@ -4852,6 +4887,21 @@ function refreshIntelRunsIfVisible() {
   const panel = document.getElementById("intelPanel-runs");
   if (!panel || panel.classList.contains("hidden")) return;
   loadIntelRuns(intelCurrentProject);
+}
+
+// refreshIntelPanelIfVisible reloads the given intel detail panel when it is
+// open, used by the semantic push events (env/findings/fixes/features). Panels
+// closed on the current detail page are skipped: their data reloads on switch.
+function refreshIntelPanelIfVisible(tab) {
+  if (!intelCurrentProject) return;
+  const panel = document.getElementById("intelPanel-" + tab);
+  if (!panel || panel.classList.contains("hidden")) return;
+  const loaders = {
+    runs: loadIntelRuns, env: loadIntelEnv, findings: loadIntelFindings,
+    fixes: loadIntelFixes, features: loadIntelFeatures,
+  };
+  const fn = loaders[tab];
+  if (fn) fn(intelCurrentProject);
 }
 
 // pollIntelRunningRuns refreshes the runs table while any run is active, so

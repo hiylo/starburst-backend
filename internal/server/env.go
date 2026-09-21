@@ -15,6 +15,7 @@ import (
 	"github.com/hiylo/starburst-backend/internal/intel/envagent"
 	"github.com/hiylo/starburst-backend/internal/intel/envdetect"
 	"github.com/hiylo/starburst-backend/internal/intel/schemainit"
+	"github.com/hiylo/starburst-backend/internal/push"
 	"github.com/hiylo/starburst-backend/internal/store"
 )
 
@@ -107,6 +108,11 @@ func (s *Server) envGate(ctx context.Context, projectID int64) error {
 	if err != nil {
 		// 硬门禁：探测失败 ≠ 就绪。此前「遇错放行」会让环境探测本身坏了时
 		// 「缺失中间件」也被判为通过；改为拒绝并暴露探测错误。
+		s.pushIntelEvent(intelGateBlockedEvent, map[string]any{
+			"projectId": projectID,
+			"reason":    "probe_failed",
+			"detail":    err.Error(),
+		}, push.Critical)
 		return fmt.Errorf("环境门禁探测失败：%v；请检查环境供给配置后重试", err)
 	}
 	var missing []string
@@ -116,9 +122,17 @@ func (s *Server) envGate(ctx context.Context, projectID int64) error {
 		}
 	}
 	if len(missing) > 0 {
+		s.pushIntelEvent(intelGateBlockedEvent, map[string]any{
+			"projectId": projectID,
+			"reason":    "missing",
+			"missing":   missing,
+		}, push.Warning)
 		return fmt.Errorf("环境门禁未通过，缺失项：%s；请到「环境供给」Tab 逐项安装后重试",
 			strings.Join(missing, "、"))
 	}
+	s.pushIntelEvent(intelEnvReadyEvent, map[string]any{
+		"projectId": projectID,
+	}, push.Info)
 	return nil
 }
 

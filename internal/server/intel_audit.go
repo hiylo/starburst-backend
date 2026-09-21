@@ -15,6 +15,7 @@ import (
 	"github.com/hiylo/starburst-backend/internal/intel/compliance"
 	"github.com/hiylo/starburst-backend/internal/intel/fix"
 	"github.com/hiylo/starburst-backend/internal/intel/security"
+	"github.com/hiylo/starburst-backend/internal/push"
 	"github.com/hiylo/starburst-backend/internal/store"
 )
 
@@ -174,6 +175,12 @@ func (s *Server) handleIntelFixAction(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.markFindingFixed(ctx, fx.FindingID)
+		s.pushIntelEvent(intelFixAppliedEvent, map[string]any{
+			"projectId": fx.ProjectID,
+			"fixId":     fx.ID,
+			"findingId": fx.FindingID,
+			"writeMode": req.WriteMode,
+		}, push.Info)
 	case "reject":
 		fx.Status = "rejected"
 	case "rollback":
@@ -493,6 +500,12 @@ func (s *Server) generateFixForFinding(ctx context.Context, projectID, findingID
 	if err := s.store.CreateIntelFix(ctx, stored); err != nil {
 		return nil, err
 	}
+	s.pushIntelEvent(intelFixSuggestedEvent, map[string]any{
+		"projectId": projectID,
+		"fixId":     stored.ID,
+		"findingId": findingID,
+		"title":     title,
+	}, push.Info)
 	return stored, nil
 }
 
@@ -540,8 +553,18 @@ func (s *Server) runIntelComplianceScan(ctx context.Context, projectID int64, ro
 				Status:      "open",
 			}
 			keep[f.RuleID+"\x00"+loc] = true
-			if _, err := s.store.CreateIntelFindingIfAbsent(ctx, finding); err != nil {
+			inserted, err := s.store.CreateIntelFindingIfAbsent(ctx, finding)
+			if err != nil {
 				log.Printf("intel compliance finding: %v", err)
+			}
+			if inserted {
+				s.pushIntelEvent(intelAuditFindingEvent, map[string]any{
+					"projectId": projectID,
+					"findingId": finding.ID,
+					"severity":  finding.Severity,
+					"category":  finding.Category,
+					"summary":   f.Message,
+				}, push.Warning)
 			}
 		}
 	}
@@ -596,8 +619,16 @@ func (s *Server) runIntelSecurityScan(ctx context.Context, projectID int64, enti
 			Summary:     w.Message,
 			Status:      "open",
 		}
-		if _, err := s.store.CreateIntelFindingIfAbsent(ctx, finding); err != nil {
+		if inserted, err := s.store.CreateIntelFindingIfAbsent(ctx, finding); err != nil {
 			log.Printf("intel security finding: %v", err)
+		} else if inserted {
+			s.pushIntelEvent(intelAuditFindingEvent, map[string]any{
+				"projectId": projectID,
+				"findingId": finding.ID,
+				"severity":  finding.Severity,
+				"category":  finding.Category,
+				"summary":   w.Message,
+			}, push.Warning)
 		}
 	}
 	n, err := s.store.CloseStaleIntelFindings(ctx, projectID, "security", keep)

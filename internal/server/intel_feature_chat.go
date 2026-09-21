@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/hiylo/starburst-backend/internal/intel/feature"
+	"github.com/hiylo/starburst-backend/internal/push"
 	"github.com/hiylo/starburst-backend/internal/store"
 )
 
@@ -213,6 +214,11 @@ func (s *Server) handleIntelFeatureChat(w http.ResponseWriter, r *http.Request) 
 		writeErr(w, http.StatusInternalServerError, "保存对话失败")
 		return
 	}
+	s.pushIntelEvent(intelChatAnswerEvent, map[string]any{
+		"projectId": req.ProjectID,
+		"featureId": id,
+		"mode":      label,
+	}, push.Info)
 	writeJSON(w, http.StatusOK, map[string]any{"chat": rec, "mode": label})
 }
 
