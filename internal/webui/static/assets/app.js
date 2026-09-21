@@ -413,6 +413,8 @@ function switchPage(name) {
   if (target) target.classList.remove("hidden");
   document.querySelectorAll("#nav button").forEach(b => b.classList.toggle("active", b.dataset.page === name));
   document.getElementById("pageTitle").textContent = TITLES[name] || name;
+  // 专注模式只服务于工作台：切到其他页自动退出，避免菜单被隐藏后无法跳转。
+  if (name !== "workbench") setFocusMode(false);
   // 工作台大屏布局：内容区整宽并纵向撑满，消除右侧/底部空余。
   const content = document.querySelector(".content");
   if (content) {
@@ -442,6 +444,27 @@ function switchPage(name) {
 document.querySelectorAll("#nav button").forEach(b => {
   b.addEventListener("click", () => switchPage(b.dataset.page));
 });
+
+/* ---------- 专注模式 ---------- */
+// 进入后隐藏侧栏（菜单）与顶栏（标题），AI 工作台全屏沉浸；
+// 顶部右侧浮现悬浮「退出」按钮，再次点击恢复。
+function setFocusMode(on) {
+  const app = document.querySelector(".app");
+  const btn = document.getElementById("focusModeBtn");
+  const restore = document.getElementById("focusRestoreBtn");
+  if (on) {
+    app.classList.add("focus");
+    if (btn) btn.querySelector(".txt").textContent = "";
+    if (restore) restore.classList.remove("hidden");
+  } else {
+    app.classList.remove("focus");
+    if (btn) btn.querySelector(".txt").textContent = "专注";
+    if (restore) restore.classList.add("hidden");
+  }
+}
+function toggleFocusMode() {
+  setFocusMode(!document.querySelector(".app").classList.contains("focus"));
+}
 
 /* ---------- 登录 ---------- */
 async function doLogin() {

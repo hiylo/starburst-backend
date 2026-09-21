@@ -330,6 +330,20 @@ h1, h2, h3, h4 { margin: 0; font-weight: 600; letter-spacing: -0.01em; }
 .content > .page { animation: pageIn 200ms ease; }
 @keyframes pageIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
 
+/* 专注模式：隐藏侧栏（菜单）与顶栏（标题），工作台全屏沉浸 */
+.app.focus .sidebar,
+.app.focus .topbar { display: none; }
+.app.focus .main { height: 100vh; height: 100dvh; }
+.focus-restore {
+  position: fixed; top: 10px; right: 14px; z-index: 60;
+  padding: 6px 10px; font-size: 12px;
+  background: var(--surface-2); color: var(--ink);
+  border: 1px solid var(--hairline); border-radius: var(--r-md);
+  box-shadow: var(--shadow-pop);
+  display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+}
+.focus-restore:hover { background: var(--surface-3); border-color: var(--hairline-strong); color: var(--ink); }
+
 /* ============================== 组件卡片 ============================== */
 .card {
   background: var(--surface-1);
