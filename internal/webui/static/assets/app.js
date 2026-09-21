@@ -96,6 +96,66 @@ function escapeHtml(s) {
   return String(s ?? "").replace(/[&<>"']/g, c =>
     ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
+/* ---------------- 浏览器系统通知（页面后台时也能收到关键事件提醒） ---------------- */
+// 系统通知受浏览器权限控制（必须用户手势触发授权请求），本端开关记录在 localStorage。
+const SYS_NOTIF_KEY = "sysNotif.enabled";
+function sysNotifSupported() {
+  return typeof window !== "undefined" && "Notification" in window;
+}
+function sysNotifPermission() {
+  return sysNotifSupported() ? Notification.permission : "unsupported";
+}
+// 端上已开启（授权 + 用户打开开关）才弹系统通知。
+function sysNotifOn() {
+  return sysNotifPermission() === "granted" && localStorage.getItem(SYS_NOTIF_KEY) === "1";
+}
+// 用户手势触发的授权入口：浏览器只允许在点击等手势里请求通知权限。
+async function enableSysNotif() {
+  if (!sysNotifSupported()) {
+    toast("系统通知", "当前浏览器不支持系统通知", "warn");
+    return;
+  }
+  let perm = Notification.permission;
+  if (perm !== "granted") perm = await Notification.requestPermission();
+  if (perm === "granted") {
+    localStorage.setItem(SYS_NOTIF_KEY, "1");
+    toast("系统通知", "已开启：页面最小化或切到后台时，关键事件会弹系统通知", "info");
+  } else {
+    localStorage.removeItem(SYS_NOTIF_KEY);
+    toast("系统通知", "权限被拒绝，请在浏览器地址栏的站点设置中开启通知权限", "warn");
+  }
+  renderSysNotifUI();
+}
+function disableSysNotif() {
+  localStorage.removeItem(SYS_NOTIF_KEY);
+  toast("系统通知", "已关闭", "info");
+  renderSysNotifUI();
+}
+// 弹一条系统通知；前台页面已有站内 toast，系统通知只在页面不可见时弹出以免重复打扰。
+function sysNotif(title, body, opts) {
+  if (!sysNotifOn() || !document.hidden) return;
+  try {
+    const n = new Notification(title, Object.assign({ body: body || "" }, opts || {}));
+    n.onclick = () => { window.focus(); n.close(); };
+    setTimeout(() => n.close(), 30000);
+  } catch (_) { /* 个别平台抛异常时静默降级为站内 toast */ }
+}
+// 渲染设置页的系统通知开关状态（按钮文本 + 权限说明）。
+function renderSysNotifUI() {
+  const btn = document.getElementById("sysNotifBtn");
+  const st = document.getElementById("sysNotifStatus");
+  if (!btn) return;
+  const on = sysNotifOn();
+  btn.textContent = on ? "关闭系统通知" : "开启系统通知";
+  btn.style.display = "";
+  if (st) {
+    if (!sysNotifSupported()) st.textContent = "当前浏览器不支持";
+    else if (sysNotifPermission() === "denied") st.textContent = "浏览器权限已拒绝，需在站点设置中手动开启";
+    else if (on) st.textContent = "已开启 · 页面在后台时弹提醒";
+    else if (sysNotifPermission() === "default") st.textContent = "未授权，点击开启将请求浏览器权限";
+    else st.textContent = "未开启";
+  }
+}
 /* ---------------- 代码语法高亮（零依赖，正则分词） ---------------- */
 const HL_KEYWORDS = {
   c: ("if else for while do switch case default break continue return func function var let const class interface " +
@@ -375,7 +435,7 @@ function switchPage(name) {
   else if (name === "archives") { loadArchives(); loadArchiveSessions(); }
   else if (name === "audit") loadAudit();
   else if (name === "tokens") { loadTokens(); loadTokenUsage(); }
-  else if (name === "settings") { loadLLMConfig(); loadEmbedConfig(); loadIntelAiRules(); }
+  else if (name === "settings") { loadLLMConfig(); loadEmbedConfig(); loadIntelAiRules(); renderSysNotifUI(); }
   else if (name === "stream") ensureStream();
   else if (name === "intel") loadIntelProjects();
 }
@@ -1300,6 +1360,7 @@ function connectTaskWS() {
       const sev = msg.severity === "critical" ? "crit" : "warn";
       const why = msg.payload.reason === "probe_failed" ? "环境探测失败" : "环境未就绪";
       toast("环境门禁拦截", why + "，请到「环境供给」处理", sev, 12000);
+      sysNotif("环境门禁拦截", why + "，请到「环境供给」处理");
       refreshIntelPanelIfVisible("env");
       return;
     }
@@ -1310,6 +1371,7 @@ function connectTaskWS() {
     if (msg.type === "intel.audit.finding" && msg.payload) {
       refreshIntelPanelIfVisible("findings");
       toast("新增审计发现", msg.payload.summary || "", "warn", 10000);
+      sysNotif("新增审计发现", msg.payload.summary || "");
       return;
     }
     if (msg.type === "intel.fix.suggested") {
@@ -1322,6 +1384,22 @@ function connectTaskWS() {
     }
     if (msg.type === "intel.feature.chat.answer") {
       refreshIntelPanelIfVisible("features");
+      return;
+    }
+    // 硬件阈值告警（CPU/内存/磁盘）：超阈值与恢复时弹提示；页面在后台时走系统通知。
+    if (msg.type === "alert.hardware" && msg.payload) {
+      const p = msg.payload;
+      const names = { cpu: "CPU", mem: "内存", disk: "磁盘" };
+      const nm = names[p.metric] || String(p.metric || "资源");
+      if (p.state === "alert") {
+        const text = `${nm} 使用率 ${Number(p.value).toFixed(1)}% 超过阈值 ${Number(p.threshold).toFixed(1)}%`;
+        toast("硬件告警", text, "crit", 15000);
+        sysNotif("硬件告警", text);
+      } else {
+        const text = `${nm} 使用率已回落至 ${Number(p.value).toFixed(1)}%`;
+        toast("硬件恢复", text, "info", 8000);
+        sysNotif("硬件恢复", text);
+      }
       return;
     }
     // 未知 intel.* 语义事件兜底：不阻断旧逻辑，按前缀做一次通用刷新。
@@ -1339,12 +1417,16 @@ function connectTaskWS() {
       const label = TASK_STATUS[p.status] || p.status || "";
       if (p.status === "blocked") {
         // 前置任务失败/取消：需要人工介入，弹通知并跳到任务页。
-        toast("任务被阻塞：" + label, (p.reason ? "原因：" + p.reason : "") + (p.upstream ? "（前置 " + p.upstream + "）" : ""), "warn", 12000);
+        const msg2 = (p.reason ? "原因：" + p.reason : "") + (p.upstream ? "（前置 " + p.upstream + "）" : "");
+        toast("任务被阻塞：" + label, msg2, "warn", 12000);
+        sysNotif("任务被阻塞：" + label, msg2);
       } else if (p.status === "failed") {
         toast("任务失败：" + label, "", "crit", 12000);
+        sysNotif("任务失败：" + label, "任务已失败，请及时处理");
       } else if (p.status === "queued" && (p.reason === "manual unblock" || p.upstream)) {
         const why = p.reason === "manual unblock" ? "已手动解阻" : "前置 " + p.upstream + " 已完成";
         toast("任务已重新排队", why, "info");
+        sysNotif("任务已重新排队", why);
       }
       const page = document.querySelector(".page:not(.hidden)");
       if (page && page.id === "page-tasks" && session) loadTasks();

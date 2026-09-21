@@ -706,6 +706,15 @@
           <div id="aiRuleMsg" class="msg"></div>
         </div>
         <div class="card">
+          <h2><span class="dot"></span>浏览器系统通知</h2>
+          <p class="muted" style="font-size:12px;margin-top:0">页面最小化或在后台时，关键事件（任务失败/阻塞、硬件告警、环境门禁、审计发现等）会通过浏览器系统通知提醒。</p>
+          <div class="row" style="margin-top:12px">
+            <button onclick="sysNotifOn() ? disableSysNotif() : enableSysNotif()" id="sysNotifBtn">开启系统通知</button>
+            <span id="sysNotifStatus" class="muted" style="font-size:12px"></span>
+          </div>
+          <div id="sysNotifMsg" class="msg"></div>
+        </div>
+        <div class="card">
           <h2><span class="dot"></span>修改管理密码</h2>
           <label>当前密码</label>
           <input type="password" id="curpw" autocomplete="current-password" placeholder="必填，用于确认是你本人">
