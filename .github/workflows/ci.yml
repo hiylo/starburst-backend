@@ -145,11 +145,14 @@ jobs:
           mkdir -p dist
           # 剥离 tag 的 v 前缀，使 --version / /api/system 的 version 与 config.Version
           # 默认值同为纯语义化版本（2.0.0 而非 v2.0.0），与客户端 compareVersions 格式一致。
-          version="${GITHUB_REF_NAME#v}"
-          echo "building $name with Version=$version"
-          go build -trimpath \
-            -ldflags "-s -w -X github.com/hiylo/starburst-backend/internal/config.Version=$version" \
-            -o "dist/$name" ./cmd/starburst-backend
+           # -buildvcs=false：不把 vcs.revision/vcs.time 编入 buildinfo。否则同一提交两次
+           # 构建产物不同（vcs.time 每次都变），任何「先构建、后另行算校验和」的非原子流程
+           # 都会产出 SHA256SUMS 与二进制自相矛盾的资产。
+           version="${GITHUB_REF_NAME#v}"
+           echo "building $name with Version=$version"
+           go build -trimpath -buildvcs=false \
+             -ldflags "-s -w -X github.com/hiylo/starburst-backend/internal/config.Version=$version" \
+             -o "dist/$name" ./cmd/starburst-backend
       - uses: actions/upload-artifact@v4
         with:
           name: starburst-backend-${{ matrix.os }}-${{ matrix.arch }}
