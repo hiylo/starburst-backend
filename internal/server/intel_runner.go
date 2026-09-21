@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"sort"
 	"strconv"
 	"sync"
 	"time"
@@ -102,6 +103,24 @@ func (s *intelSem) acquire(ctx context.Context) bool {
 // a bounded per-module budget keeps a wedged suite from blocking others.
 const intelRunTimeout = 10 * time.Minute
 
+// IntelRunOptions carries optional scheduling knobs for an enqueued test run.
+// Zero values keep the default behavior, so existing callers that pass nothing
+// are unaffected.
+type IntelRunOptions struct {
+	// Priority is a 0-100 scheduling weight (default 0): higher runs first. It
+	// is stored on the run row and run-all inherits it onto each module run so
+	// the run list and module execution order can honor it.
+	Priority int
+}
+
+// intelRunPriority extracts the optional priority from a variadic options list.
+func intelRunPriority(opts ...IntelRunOptions) int {
+	if len(opts) == 0 {
+		return 0
+	}
+	return opts[0].Priority
+}
+
 // intelOutputLimit caps the captured output stored on a run so a chatty test
 // cannot balloon test_runs. The tail is kept (latest lines are most useful).
 const intelOutputLimit = 256 << 10
@@ -138,8 +157,9 @@ func (s *Server) intelExecMutex(projectID int64) *sync.Mutex {
 // caller gets the run id immediately; progress flows through the hub and the
 // run row. Same-project runs serialize on intelExecMutex. When nodeID is 0 and
 // force is false the environment gate is checked synchronously so a gate
-// rejection surfaces to the caller before anything is enqueued.
-func (s *Server) enqueueIntelRun(ctx context.Context, projectID, moduleID, nodeID int64, force bool) (*store.TestRun, error) {
+// rejection surfaces to the caller before anything is enqueued. An optional
+// IntelRunOptions.Priority (default 0) stamps the run row for scheduling.
+func (s *Server) enqueueIntelRun(ctx context.Context, projectID, moduleID, nodeID int64, force bool, opts ...IntelRunOptions) (*store.TestRun, error) {
 	if nodeID == 0 && !force {
 		if err := s.envGate(ctx, projectID); err != nil {
 			return nil, err
@@ -151,6 +171,7 @@ func (s *Server) enqueueIntelRun(ctx context.Context, projectID, moduleID, nodeI
 		Scope:     "module",
 		Status:    "queued",
 		Progress:  "排队中",
+		Priority:  intelRunPriority(opts...),
 	}
 	if err := s.store.CreateIntelTestRun(ctx, run); err != nil {
 		return nil, err
@@ -210,6 +231,7 @@ func (s *Server) runIntelJob(projectID, moduleID, nodeID int64, force bool, run 
 				Status:    "queued",
 				Progress:  fmt.Sprintf("自动重试（第 %d 次）", run.Attempts+1),
 				Attempts:  run.Attempts + 1,
+				Priority:  run.Priority,
 			}
 			if cerr := s.store.CreateIntelTestRun(context.Background(), retry); cerr == nil {
 				s.pushIntelRunEvent(retry)
@@ -249,7 +271,9 @@ func (s *Server) failIntelRun(projectID int64, run *store.TestRun, reason string
 // enqueueIntelRunAll creates a scope=all run and executes every module's test
 // command, parallelizing across modules up to the global concurrency cap.
 // Each module gets its own run row so per-module status/progress is visible.
-func (s *Server) enqueueIntelRunAll(ctx context.Context, projectID int64, force bool) (*store.TestRun, error) {
+// An optional IntelRunOptions.Priority (default 0) is stamped on the aggregate
+// run and inherited by each module run, ordering module execution accordingly.
+func (s *Server) enqueueIntelRunAll(ctx context.Context, projectID int64, force bool, opts ...IntelRunOptions) (*store.TestRun, error) {
 	if !force {
 		if err := s.envGate(ctx, projectID); err != nil {
 			return nil, err
@@ -260,6 +284,7 @@ func (s *Server) enqueueIntelRunAll(ctx context.Context, projectID int64, force 
 		Scope:     "all",
 		Status:    "queued",
 		Progress:  "排队中",
+		Priority:  intelRunPriority(opts...),
 	}
 	if err := s.store.CreateIntelTestRun(ctx, run); err != nil {
 		return nil, err
@@ -344,25 +369,36 @@ func (s *Server) runIntelAll(projectID int64, force bool, run *store.TestRun) {
 		failedCount int
 		errorsCount int
 	)
-	perModule := make(map[int64]*store.TestRun, len(mods))
-	for i, m := range mods {
+	// 每个模块一条 run 行，继承聚合 run 的 priority；按 priority DESC 排序后
+	// 再并行执行（同样优先级保持模块加载顺序，与旧行为一致）。
+	type intelModuleRun struct {
+		m  *store.IntelModule
+		mr *store.TestRun
+	}
+	ordered := make([]intelModuleRun, 0, len(mods))
+	for _, m := range mods {
 		mr := &store.TestRun{
 			ProjectID: projectID,
 			ModuleID:  m.ID,
 			Scope:     "module",
 			Status:    "queued",
 			Progress:  "等待执行",
+			Priority:  run.Priority,
 		}
 		if err := s.store.CreateIntelTestRun(ctx, mr); err != nil {
 			continue
 		}
-		perModule[m.ID] = mr
 		s.pushIntelRunEvent(mr)
-
+		ordered = append(ordered, intelModuleRun{m: m, mr: mr})
+	}
+	sort.SliceStable(ordered, func(i, j int) bool {
+		return ordered[i].mr.Priority > ordered[j].mr.Priority
+	})
+	for idx, entry := range ordered {
 		wg.Add(1)
 		go func(m *store.IntelModule, mr *store.TestRun, idx int) {
 			defer wg.Done()
-			status := s.execIntelModule(ctx, projectID, m, mr, force, idx, len(mods))
+			status := s.execIntelModule(ctx, projectID, m, mr, force, idx, len(ordered))
 			muStats.Lock()
 			switch status {
 			case "passed":
@@ -373,12 +409,12 @@ func (s *Server) runIntelAll(projectID int64, force bool, run *store.TestRun) {
 				errorsCount++
 			}
 			muStats.Unlock()
-		}(m, mr, i+1)
+		}(entry.m, entry.mr, idx+1)
 	}
 	wg.Wait()
 
 	summary := fmt.Sprintf("全部完成：%d 通过 / %d 失败 / %d 错误（共 %d 模块）",
-		passedCount, failedCount, errorsCount, len(mods))
+		passedCount, failedCount, errorsCount, len(ordered))
 	// The aggregate used to be hardcoded "passed", so a run where every module
 	// failed still read green to anything that filters on status.
 	status := "passed"
@@ -470,4 +506,46 @@ func (s *Server) cancelIntelRun(runID int64) bool {
 	cancel()
 	delete(s.intelCancels, runID)
 	return true
+}
+
+// intelRunRetention is how long a finished test run is kept before the janitor
+// deletes it. Test runs are write-only today (only FailStaleIntelRuns marks
+// leftovers failed), so this bounds test_runs on long-lived installs.
+const intelRunRetention = 30 * 24 * time.Hour
+
+// intelRunPurgeInterval is how often the test-run janitor sweeps.
+const intelRunPurgeInterval = time.Hour
+
+// intelRunPurgeBatch caps the rows a single pass deletes so a backlogged
+// install drains over a few passes instead of one long transaction.
+const intelRunPurgeBatch = 500
+
+// StartIntelRunJanitor deletes terminal test runs finished more than
+// intelRunRetention ago, once at startup and then every intelRunPurgeInterval,
+// keeping test_runs bounded. It is a side loop: failures are logged, never
+// fatal, and a slow database cannot stall the process.
+func (s *Server) StartIntelRunJanitor(ctx context.Context) {
+	purge := func() {
+		cctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		defer cancel()
+		n, err := s.store.PurgeOldIntelTestRuns(cctx, time.Now().Add(-intelRunRetention), intelRunPurgeBatch)
+		if err != nil {
+			log.Printf("intel janitor: purge old test runs: %v", err)
+			return
+		}
+		if n > 0 {
+			log.Printf("intel janitor: purged %d old test run(s) older than %s", n, intelRunRetention)
+		}
+	}
+	purge()
+	ticker := time.NewTicker(intelRunPurgeInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			purge()
+		}
+	}
 }

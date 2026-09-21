@@ -180,6 +180,7 @@ func (s *Server) handleIntelRun(w http.ResponseWriter, r *http.Request) {
 		ModuleID  int64 `json:"moduleId"`
 		NodeID    int64 `json:"node"`
 		Force     bool  `json:"force"`
+		Priority  int   `json:"priority"`
 	}
 	if err := readJSONLimited(w, r, &req); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid request body")
@@ -191,7 +192,7 @@ func (s *Server) handleIntelRun(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
-	run, err := s.enqueueIntelRun(ctx, req.ProjectID, req.ModuleID, req.NodeID, req.Force)
+	run, err := s.enqueueIntelRun(ctx, req.ProjectID, req.ModuleID, req.NodeID, req.Force, IntelRunOptions{Priority: req.Priority})
 	if err != nil {
 		log.Printf("intel run enqueue project %d: %v", req.ProjectID, err)
 		writeErr(w, http.StatusInternalServerError, "run failed: "+err.Error())
@@ -253,6 +254,7 @@ func (s *Server) handleIntelRunAll(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		ProjectID int64 `json:"projectId"`
 		Force     bool  `json:"force"`
+		Priority  int   `json:"priority"`
 	}
 	if err := readJSONLimited(w, r, &req); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid request body")
@@ -264,7 +266,7 @@ func (s *Server) handleIntelRunAll(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
-	run, err := s.enqueueIntelRunAll(ctx, req.ProjectID, req.Force)
+	run, err := s.enqueueIntelRunAll(ctx, req.ProjectID, req.Force, IntelRunOptions{Priority: req.Priority})
 	if err != nil {
 		log.Printf("intel run-all enqueue project %d: %v", req.ProjectID, err)
 		writeErr(w, http.StatusInternalServerError, "run-all failed: "+err.Error())

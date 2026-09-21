@@ -1001,3 +1001,88 @@ func TestCloseStaleIntelFindings(t *testing.T) {
 		t.Errorf("waived finding touched: %q", byRule["rule-waived"].Status)
 	}
 }
+
+// TestPurgeOldIntelTestRuns verifies the test_runs janitor: only terminal runs
+// finished before the cutoff are deleted, non-terminal runs are never touched,
+// and the per-pass limit is honored (batch drains over repeated passes).
+func TestPurgeOldIntelTestRuns(t *testing.T) {
+	ctx := context.Background()
+	st := newTestStore(t)
+
+	old := time.Now().Add(-48 * time.Hour)
+	recent := time.Now()
+	mk := func(scope, status string, finished *time.Time) int64 {
+		r := &TestRun{ProjectID: 1, ModuleID: 1, Scope: scope, Status: status, FinishedAt: finished}
+		if err := st.CreateIntelTestRun(ctx, r); err != nil {
+			t.Fatalf("create run: %v", err)
+		}
+		return r.ID
+	}
+	oldPassed := mk("module", "passed", &old)
+	mk("module", "queued", nil) // 非终态（finished_at 为空）：绝不清理
+	mk("module", "passed", &recent)
+
+	n, err := st.PurgeOldIntelTestRuns(ctx, time.Now().Add(-24*time.Hour), 10)
+	if err != nil {
+		t.Fatalf("purge: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("purged %d, want 1", n)
+	}
+	if _, err := st.GetIntelTestRun(ctx, oldPassed); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("old terminal run still present: %v", err)
+	}
+
+	// 批量上限：一次只删 limit 条，剩余条目在后续 pass 中删除。
+	mk("module", "failed", &old)
+	mk("module", "error", &old)
+	if n, err := st.PurgeOldIntelTestRuns(ctx, time.Now().Add(-24*time.Hour), 1); err != nil || n != 1 {
+		t.Fatalf("limited purge: n=%d err=%v (want 1)", n, err)
+	}
+	if n, err := st.PurgeOldIntelTestRuns(ctx, time.Now().Add(-24*time.Hour), 10); err != nil || n != 1 {
+		t.Fatalf("remaining purge: n=%d err=%v (want 1)", n, err)
+	}
+}
+
+// TestIntelTestRunPriorityRoundTrip guards the run priority chain: a run created
+// without priority defaults to 0, and an explicitly set priority survives
+// single-run and list reads.
+func TestIntelTestRunPriorityRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	st := newTestStore(t)
+
+	def := &TestRun{ProjectID: 1, ModuleID: 1, Scope: "module", Status: "queued"}
+	if err := st.CreateIntelTestRun(ctx, def); err != nil {
+		t.Fatalf("create default: %v", err)
+	}
+	if def.Priority != 0 {
+		t.Fatalf("default priority = %d, want 0", def.Priority)
+	}
+
+	pri := &TestRun{ProjectID: 1, ModuleID: 2, Scope: "all", Status: "queued", Priority: 7}
+	if err := st.CreateIntelTestRun(ctx, pri); err != nil {
+		t.Fatalf("create priority: %v", err)
+	}
+
+	got, err := st.GetIntelTestRun(ctx, pri.ID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got.Priority != 7 {
+		t.Fatalf("get priority = %d, want 7", got.Priority)
+	}
+	runs, err := st.ListIntelTestRuns(ctx, 1)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	byID := map[int64]*TestRun{}
+	for _, r := range runs {
+		byID[r.ID] = r
+	}
+	if byID[pri.ID] == nil || byID[pri.ID].Priority != 7 {
+		t.Fatalf("list priority lost: %+v", byID[pri.ID])
+	}
+	if byID[def.ID] == nil || byID[def.ID].Priority != 0 {
+		t.Fatalf("list default priority wrong: %+v", byID[def.ID])
+	}
+}

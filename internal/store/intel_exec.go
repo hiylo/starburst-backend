@@ -49,6 +49,7 @@ type TestRun struct {
 	LogPath    string     `json:"logPath"`
 	Progress   string     `json:"progress,omitempty"`
 	Output     string     `json:"output,omitempty"`
+	Priority   int        `json:"priority"` // 0-100 调度权重，越高越先执行（默认 0）
 	CreatedAt  time.Time  `json:"createdAt"`
 }
 
@@ -250,19 +251,19 @@ func (s *sqlStore) CreateIntelTestRun(ctx context.Context, run *TestRun) error {
 	if isPostgres(s.driver) {
 		return s.db.QueryRowContext(ctx, s.q(`
 			INSERT INTO test_runs (project_id, module_id, scope, kind, command, status,
-				attempts, started_at, finished_at, log_path, progress, output, created_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+				attempts, started_at, finished_at, log_path, progress, output, priority, created_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
 			RETURNING id`),
 			run.ProjectID, run.ModuleID, run.Scope, run.Kind, run.Command, run.Status,
-			run.Attempts, run.StartedAt, run.FinishedAt, run.LogPath, run.Progress, run.Output,
+			run.Attempts, run.StartedAt, run.FinishedAt, run.LogPath, run.Progress, run.Output, run.Priority,
 		).Scan(&run.ID)
 	}
 	res, err := s.db.ExecContext(ctx, s.q(`
 		INSERT INTO test_runs (project_id, module_id, scope, kind, command, status,
-			attempts, started_at, finished_at, log_path, progress, output, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`),
+			attempts, started_at, finished_at, log_path, progress, output, priority, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`),
 		run.ProjectID, run.ModuleID, run.Scope, run.Kind, run.Command, run.Status,
-		run.Attempts, run.StartedAt, run.FinishedAt, run.LogPath, run.Progress, run.Output,
+		run.Attempts, run.StartedAt, run.FinishedAt, run.LogPath, run.Progress, run.Output, run.Priority,
 	)
 	if err != nil {
 		return err
@@ -279,7 +280,7 @@ func (s *sqlStore) CreateIntelTestRun(ctx context.Context, run *TestRun) error {
 func (s *sqlStore) GetIntelTestRun(ctx context.Context, id int64) (*TestRun, error) {
 	row := s.db.QueryRowContext(ctx, s.q(`
 		SELECT id, project_id, module_id, scope, kind, command, status, attempts,
-			started_at, finished_at, log_path, progress, output, created_at FROM test_runs WHERE id = ?`), id)
+			started_at, finished_at, log_path, progress, output, priority, created_at FROM test_runs WHERE id = ?`), id)
 	run, err := scanIntelTestRun(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
@@ -293,7 +294,7 @@ func (s *sqlStore) GetIntelTestRun(ctx context.Context, id int64) (*TestRun, err
 func (s *sqlStore) ListIntelTestRuns(ctx context.Context, projectID int64) ([]*TestRun, error) {
 	rows, err := s.db.QueryContext(ctx, s.q(`
 		SELECT id, project_id, module_id, scope, kind, command, status, attempts,
-			started_at, finished_at, log_path, progress, '', created_at
+			started_at, finished_at, log_path, progress, '', priority, created_at
 		FROM test_runs WHERE project_id = ? ORDER BY created_at DESC`), projectID)
 	if err != nil {
 		return nil, err
@@ -337,6 +338,46 @@ func (s *sqlStore) FailStaleIntelRuns(ctx context.Context, olderThan time.Time) 
 	}
 	n, err := res.RowsAffected()
 	return n, err
+}
+
+// PurgeOldIntelTestRuns deletes terminal test runs whose finished_at is older
+// than olderThan, bounded by limit rows per pass so a backlogged install drains
+// over a few passes instead of one long transaction. finished_at < olderThan
+// already excludes never-finished rows (NULL), so queued/running runs are never
+// touched; the DELETE targets the oldest ids first. Identical SQL runs on both
+// SQLite and PostgreSQL. Returns the number of rows deleted.
+func (s *sqlStore) PurgeOldIntelTestRuns(ctx context.Context, olderThan time.Time, limit int) (int64, error) {
+	if limit <= 0 {
+		limit = 500
+	}
+	// The candidate set is the same bounded subquery for both deletes, and both
+	// run in one transaction so the per-case results of a purged run never linger
+	// as orphans. The limit lives in the inner select: SQLite refuses DELETE ...
+	// LIMIT, and PostgreSQL needs the same shape for a deterministic batch.
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx, s.q(`
+		DELETE FROM test_results WHERE run_id IN (
+			SELECT id FROM test_runs WHERE finished_at < ?
+			ORDER BY id LIMIT `+itoa(limit)+`
+		)`), olderThan); err != nil {
+		return 0, err
+	}
+	res, err := tx.ExecContext(ctx, s.q(`
+		DELETE FROM test_runs WHERE id IN (
+			SELECT id FROM test_runs WHERE finished_at < ?
+			ORDER BY id LIMIT `+itoa(limit)+`
+		)`), olderThan)
+	if err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
 }
 
 // AddIntelTestResults inserts per-case results for a run.
@@ -615,7 +656,7 @@ func scanIntelTestRun(row rowScanner) (*TestRun, error) {
 	run := &TestRun{}
 	var started, finished *time.Time
 	err := row.Scan(&run.ID, &run.ProjectID, &run.ModuleID, &run.Scope, &run.Kind, &run.Command,
-		&run.Status, &run.Attempts, &started, &finished, &run.LogPath, &run.Progress, &run.Output, &run.CreatedAt)
+		&run.Status, &run.Attempts, &started, &finished, &run.LogPath, &run.Progress, &run.Output, &run.Priority, &run.CreatedAt)
 	if err != nil {
 		return nil, err
 	}

@@ -334,6 +334,9 @@ type Store interface {
 	// FailStaleIntelRuns marks runs left in running/queued (from a previous
 	// process that exited before finishing) as failed and returns the count.
 	FailStaleIntelRuns(ctx context.Context, olderThan time.Time) (int64, error)
+	// PurgeOldIntelTestRuns deletes terminal test runs finished before
+	// olderThan, bounded by limit rows per pass, and returns the count deleted.
+	PurgeOldIntelTestRuns(ctx context.Context, olderThan time.Time, limit int) (int64, error)
 
 	// ---- Test Intelligence: issues & features ----
 

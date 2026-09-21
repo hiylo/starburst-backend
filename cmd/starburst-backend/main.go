@@ -225,6 +225,10 @@ func main() {
 		}
 	}()
 
+	// test_runs 清理：低频删除长期保留的终态测试运行，防止 test_runs 只增不减。
+	// 首次启动立即执行一次，之后每小时一次。
+	go srv.StartIntelRunJanitor(ctx)
+
 	// Orchestration: periodically report upstream health so subscribers get
 	// live status without polling from the app.
 	go func() {

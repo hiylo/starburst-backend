@@ -130,6 +130,7 @@ var migrations = []migration{
 	{name: "intel_project_git_creds", apply: migrationIntelProjectGitCreds},
 	{name: "intel_run_attempts", apply: migrationIntelRunAttempts},
 	{name: "task_kind", apply: migrationTaskKind},
+	{name: "test_runs_priority", apply: migrationTestRunsPriority},
 }
 
 // migrationIntel creates the Test Intelligence subsystem tables: flat project
@@ -1318,6 +1319,19 @@ func migrationIntelProjectGitCreds(ctx context.Context, driver string, db *sql.D
 // times without a task-state-machine migration.
 func migrationIntelRunAttempts(ctx context.Context, driver string, db *sql.DB) error {
 	_, err := db.ExecContext(ctx, `ALTER TABLE test_runs ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0`)
+	if err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+		return err
+	}
+	return nil
+}
+
+// migrationTestRunsPriority adds the priority column to test_runs so an intel
+// run (single module or run-all) carries a 0-100 scheduling weight used to
+// order run-all module execution (higher runs first, default 0). Existing rows
+// keep priority 0, so the previous behavior is unchanged. The DDL is identical
+// on SQLite and PostgreSQL.
+func migrationTestRunsPriority(ctx context.Context, driver string, db *sql.DB) error {
+	_, err := db.ExecContext(ctx, `ALTER TABLE test_runs ADD COLUMN priority INTEGER NOT NULL DEFAULT 0`)
 	if err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
 		return err
 	}
