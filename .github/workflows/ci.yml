@@ -96,7 +96,7 @@ jobs:
       - name: Sandbox install with special-character DSN
         run: |
           sandbox="$RUNNER_TEMP/sandbox"
-          OCB_BIN_URL="file://$(pwd)/starburst-backend" \
+          STARBURST_BIN_URL="file://$(pwd)/starburst-backend" \
             bash scripts/install.sh --prefix "$sandbox" --port 18080 \
               --db postgres --workers 2 \
               --pg-dsn 'postgres://user:p@ss@127.0.0.1:5432/db?sslmode=disable&application_name=a"b\c' \

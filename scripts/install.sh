@@ -49,6 +49,18 @@ STT_TIMEOUT="${STARBURST_STT_TIMEOUT:-}"
 STT_MAX_CHUNK_BYTES="${STARBURST_STT_MAX_CHUNK_BYTES:-}"
 PREFIX="${STARBURST_PREFIX:-/}"
 
+# sha256_of <file>：输出文件的 SHA-256 摘要。Linux 用 sha256sum，macOS 用 shasum -a 256。
+# 两者都不存在时返回非零，调用方据此跳过校验。
+sha256_of() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" | awk '{print $1}'
+  else
+    return 1
+  fi
+}
+
 while [[ $# -gt 0 ]]; do
   opt="$1"
   case "$opt" in
@@ -190,6 +202,35 @@ echo "==> 下载 $BIN_URL"
 mkdir -p "$INSTALL_DIR"
 if curl -fsSL -o "$BIN_PATH.tmp" "$BIN_URL"; then
   chmod +x "$BIN_PATH.tmp"
+
+  # SHA-256 校验：与同目录的 SHA256SUMS 比对，防止下载被篡改或取错资产。
+  # 仅 http(s) 直链能拉取校验和；file:// 本地构建等场景无校验和，跳过。
+  # STARBURST_SKIP_CHECKSUM=1 显式跳过（不推荐，仅离线/内网镜像用）。
+  if [[ "${STARBURST_SKIP_CHECKSUM:-}" == "1" ]]; then
+    echo "!! 已跳过 SHA-256 校验（STARBURST_SKIP_CHECKSUM=1）"
+  elif [[ "$BIN_URL" == http://* || "$BIN_URL" == https://* ]]; then
+    sums_url="${BIN_URL%/*}/SHA256SUMS"
+    bin_file="$(basename "$BIN_URL")"
+    if actual="$(sha256_of "$BIN_PATH.tmp")" && sums_text="$(curl -fsSL "$sums_url" 2>/dev/null)"; then
+      expected="$(printf '%s\n' "$sums_text" | awk -v f="$bin_file" '$2==f {print $1; exit}')"
+      if [[ -z "$expected" ]]; then
+        echo "!! SHA256SUMS 中无 $bin_file 条目，跳过校验" >&2
+      elif [[ "$actual" != "$expected" ]]; then
+        echo "!! SHA-256 校验失败，已删除下载的产物。" >&2
+        echo "   期望: $expected" >&2
+        echo "   实际: $actual" >&2
+        rm -f "$BIN_PATH.tmp"
+        exit 1
+      else
+        echo "==> SHA-256 校验通过"
+      fi
+    else
+      echo "!! 无法获取校验和或本机无 sha256sum/shasum，跳过校验" >&2
+    fi
+  else
+    echo "== 非 http(s) 来源（$BIN_URL），跳过 SHA-256 校验"
+  fi
+
   mv "$BIN_PATH.tmp" "$BIN_PATH"
 else
   echo "!! 下载失败。若在开发机本地运行，可先 go build -o $BIN_PATH ./cmd/starburst-backend 再重试" >&2
