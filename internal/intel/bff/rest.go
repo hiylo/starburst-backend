@@ -14,6 +14,24 @@ import (
 // guarantee. Express/Router/Fastify verb calls and Nest @Controller/@Get-style
 // decorators are recognized; dynamic (template-literal/concatenated) paths are
 // skipped, exactly like the Web scanner.
+//
+// KnownLimitations (design trade-offs of the zero-dependency regex scanner;
+// every item below is a "safely skipped" shape — no panic, no false row):
+//
+//   - Express/Router/Fastify: only a string-literal FIRST path argument is
+//     recognized. Concatenations (`app.get('/a' + id)`), template literals
+//     (app.get(`/a/${id}`)), route arrays (`app.get(['/a','/b'])`) and
+//     chained builders (`app.route('/x').get(...)` / `router.use(...)`) are
+//     skipped; the receiver regexp also misses non-standard variable names.
+//   - Nest: decorators are matched per line, so multi-line decorators
+//     (`@Get(\n  ':id'\n)`) are not recognized; handlers without a `{` body
+//     (abstract methods, arrow functions) are skipped; `@Controller()` with no
+//     path and the global `setGlobalPrefix` are ignored, so prefix-less
+//     controllers get their method paths as-is.
+//   - Skipped shapes never panic or mis-attribute a row; they simply yield no
+//     endpoint, which is the accepted under-reporting failure mode. Reading is
+//     bounded: lines come from a bufio.Scanner with a token cap and the file
+//     byte budget enforced in ScanBFF (bff.go).
 
 var (
 	// reExpressRoute matches Express/Router/Fastify route registrations:

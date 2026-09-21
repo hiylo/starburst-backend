@@ -13,6 +13,29 @@ import (
 // brace pairing for declaration bodies, top-level declaration regexes for
 // object/enum types, and a token masker so comments/strings never confuse brace
 // or field splitting. A full GraphQL parser is deliberately avoided.
+//
+// KnownLimitations (design trade-offs of the zero-dependency regex scanner,
+// same posture as the Web/Android/iOS scanners; failure mode is "missed or
+// mis-bounded output", never a false-positive panic):
+//
+//   - Only top-level bodies of `type`/`input`/`interface`/`enum` are parsed.
+//     `extend type/input/interface/enum`, `union`, `scalar` and `directive`
+//     declarations are not resolved, so extension-split schemas yield fewer
+//     rows than a full parser would.
+//   - Operation roots are identified by the convention names Query/Mutation/
+//     Subscription only; a schema resolving different root names
+//     (`schema { query: MyRoot }`) is not followed, and a custom type
+//     coincidentally named `type Query` is emitted as endpoints.
+//   - `gql`/`graphql` template literals are token-split, not lexed: `${...}`
+//     interpolation tracks only a brace balance, so a nested template literal
+//     or unterminated string inside an interpolation can mis-pair the closing
+//     backtick. Nesting deeper than maxBFFTemplateDepth makes the literal be
+//     treated as unterminated (block truncated), so input is always bounded.
+//   - Field argument capture stops at the first unescaped `)`: default values
+//     containing `)` or an object literal truncate the args, not the field.
+//   - All scans are linear time; Go's regexp is RE2 (no backtracking), so no
+//     input shape can cause a pathological match or a dead loop. Pathological
+//     module sizes are bounded by the ScanBFF budgets in bff.go.
 
 var (
 	// reGQLDecl matches a top-level GraphQL declaration (`type|input|interface|
@@ -100,6 +123,9 @@ func graphQLBlocksInFile(path string) []gqlBlock {
 // scanTemplateEnd returns the index just past the closing backtick of the
 // template literal opening at start, honoring backslash escapes and ${...}
 // interpolation (a backtick inside an interpolation does not close the literal).
+// The ${...} nesting is capped at maxBFFTemplateDepth: beyond it the literal is
+// treated as unterminated (len(text)) so a broken/deeply-nested snippet yields
+// a bounded block instead of an ever-growing one.
 func scanTemplateEnd(text string, start int) int {
 	interp := 0
 	for i := start + 1; i < len(text); i++ {
@@ -114,6 +140,9 @@ func scanTemplateEnd(text string, start int) int {
 			if i+1 < len(text) && text[i+1] == '{' {
 				interp++
 				i++
+				if interp > maxBFFTemplateDepth {
+					return len(text)
+				}
 			}
 		case '}':
 			if interp > 0 {

@@ -6,15 +6,41 @@
 // Subscription) become endpoints with Method QUERY/MUTATION/SUBSCRIPTION and
 // Path = field name, matching the Java Spring GraphQL extraction in
 // internal/intel/java.go.
+//
+// Design posture: the scanner is a bounded, best-effort contract extractor.
+// Per-file KnownLimitations live in graphql.go and rest.go; the module-level
+// limits are below.
 package bff
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 
 	"github.com/hiylo/starburst-backend/internal/store"
+)
+
+// errBFFScanBudgetExhausted stops the filepath.Walk once the defensive scan
+// budget is spent. It is not a real error: it only truncates a pathological
+// module to "enough provenance" so ScanBFF can never walk or read unboundedly.
+var errBFFScanBudgetExhausted = errors.New("bff scan budget exhausted")
+
+const (
+	// maxBFFScanFiles caps the number of candidate source files (.graphql/.gql/
+	// .graphqls/.ts/.tsx/.js/.mjs) that one ScanBFF call will collect. Real
+	// modules stay far below this; the cap exists so an oversized/vendored tree
+	// that escaped the skip list cannot stall the scan.
+	maxBFFScanFiles = 5000
+	// maxBFFFileBytes caps a single scanned source file (4 MiB). Larger files —
+	// typically bundled or dumped generated output — are skipped because their
+	// contracts are duplicates or noise and reading them costs unbounded time.
+	maxBFFFileBytes = 4 << 20
+	// maxBFFTemplateDepth caps `${...}` nesting inside a gql template literal;
+	// beyond it scanTemplateEnd treats the literal as unterminated so the block
+	// stays bounded (see graphql.go).
+	maxBFFTemplateDepth = 100
 )
 
 // nodeEntryNames are the conventional Node service entry files looked for
@@ -109,9 +135,11 @@ func isBackendPackage(name string) bool {
 }
 
 // hasGraphQLSchema reports whether any *.graphql, *.gql or *.graphqls schema
-// file exists anywhere under dir (build/vendor output excluded).
+// file exists anywhere under dir (build/vendor output excluded). Walking is
+// bounded by the same defensive budget as ScanBFF.
 func hasGraphQLSchema(dir string) bool {
 	found := false
+	seen := 0
 	_ = filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
 		if err != nil || found {
 			return nil
@@ -121,6 +149,10 @@ func hasGraphQLSchema(dir string) bool {
 				return filepath.SkipDir
 			}
 			return nil
+		}
+		seen++
+		if seen > maxBFFScanFiles {
+			return errBFFScanBudgetExhausted
 		}
 		switch filepath.Ext(path) {
 		case ".graphql", ".gql", ".graphqls":
@@ -137,9 +169,17 @@ func hasGraphQLSchema(dir string) bool {
 // .ts/.tsx/.js/.mjs files), returning entity mappings and endpoint contracts
 // deduplicated and deterministically sorted. SourceFile paths are relative to
 // dir. .git, build, node_modules, dist and test/build output directories are
-// skipped.
+// skipped, and the walk/read budgets in maxBFFScanFiles/maxBFFFileBytes bound
+// pathological trees.
+//
+// Probe side-effects (the LookLikeBackend classification): a module holding a
+// Node service entry (server/app/main/index.ts/js) or a *.graphqls codegen
+// file is conservatively classified as backend/BFF and scanned here even when
+// it is really a frontend; and ScanBFF's output is a contract-only addendum —
+// the caller in internal/intel/scan.go always merges it with web.ScanWeb's
+// frontend bindings, never replacing them.
 func ScanBFF(dir string) ([]*store.IntelEntity, []*store.IntelEndpoint, error) {
-	var graphqlFiles, jsFiles []string
+	graphqlFiles, jsFiles := []string{}, []string{}
 	err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return nil
@@ -150,15 +190,27 @@ func ScanBFF(dir string) ([]*store.IntelEntity, []*store.IntelEndpoint, error) {
 			}
 			return nil
 		}
+		// Defensive: oversized source files are skipped so reading them cannot
+		// dominate the scan. Real schema/route sources are tiny by comparison.
+		if info.Size() > maxBFFFileBytes {
+			return nil
+		}
 		switch filepath.Ext(path) {
 		case ".graphql", ".gql", ".graphqls":
 			graphqlFiles = append(graphqlFiles, path)
 		case ".ts", ".tsx", ".js", ".mjs":
 			jsFiles = append(jsFiles, path)
+		default:
+			return nil
+		}
+		// Defensive: stop collecting once the budget is spent. The walk returns
+		// errBFFScanBudgetExhausted, which ScanBFF treats as a normal truncation.
+		if len(graphqlFiles)+len(jsFiles) >= maxBFFScanFiles {
+			return errBFFScanBudgetExhausted
 		}
 		return nil
 	})
-	if err != nil {
+	if err != nil && err != errBFFScanBudgetExhausted {
 		return nil, nil, err
 	}
 
