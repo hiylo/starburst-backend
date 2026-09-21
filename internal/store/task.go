@@ -64,9 +64,9 @@ func (s *sqlStore) CreateTaskWithStatus(ctx context.Context, t *Task, status str
 	t.Status = status
 	_, err := s.db.ExecContext(ctx, s.q(`
 		INSERT INTO tasks (id, kind, session_id, directory, name, prompt, depends_on, status, error, result, progress, attempts, priority, timeout_seconds, workflow_id, created_at, updated_at, available_at, scheduled_at, cron)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, '', '', '', 0, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, ?, ?)`),
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, ?, ?)`),
 		t.ID, t.Kind, t.SessionID, t.Directory, t.Name, t.Prompt, t.DependsOn, status,
-		t.Priority, t.TimeoutSec, t.WorkflowID, t.ScheduledAt, t.Cron,
+		t.Error, t.Result, t.Progress, t.Priority, t.TimeoutSec, t.WorkflowID, t.ScheduledAt, t.Cron,
 	)
 	return err
 }
