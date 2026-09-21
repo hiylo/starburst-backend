@@ -401,59 +401,71 @@ const maxMessageTrimBytes = 64 << 20
 // view never renders) and writes the shrunk JSON back, so a page that would
 // otherwise weigh multiple MB is reduced to the parts the client actually uses.
 func relayTrimMessageDiffs(w http.ResponseWriter, resp *http.Response, path string) {
-	blob, err := io.ReadAll(io.LimitReader(resp.Body, maxMessageTrimBytes+1))
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxMessageTrimBytes+1))
 	if err != nil {
 		log.Printf("opencode proxy %s: read message payload: %v", path, err)
 		writeErr(w, http.StatusBadGateway, "upstream opencode request failed")
 		return
 	}
-	if strings.Contains(strings.ToLower(resp.Header.Get("Content-Encoding")), "gzip") {
-		if gz, gerr := gzip.NewReader(bytes.NewReader(blob)); gerr == nil {
-			if ub, uerr := io.ReadAll(io.LimitReader(gz, maxMessageTrimBytes+1)); uerr == nil {
-				blob = ub
-				// 就地解压后 body 已是明文，必须丢弃上游的 Content-Encoding，否则
-				// 浏览器按 gzip 解压明文会报 ERR_CONTENT_DECODING_FAILED。
-				w.Header().Del("Content-Encoding")
-				// 解压后长度也变了，Content-Length 同样作废，改 chunked。
-				w.Header().Del("Content-Length")
-			}
-			_ = gz.Close()
-		}
-	}
-	if int64(len(blob)) > maxMessageTrimBytes {
-		// 超限不裁剪，回退为流式透传（宁可大也不截断丢消息）。
+	// 原始（可能仍为 gzip 压缩）字节就已超过缓冲上限：不裁剪，保留上游的
+	// Content-Length / Content-Encoding 原样透传，避免截断丢消息。
+	if int64(len(raw)) > maxMessageTrimBytes {
 		log.Printf("opencode proxy %s: message payload over %d bytes, relay verbatim", path, maxMessageTrimBytes)
 		w.WriteHeader(resp.StatusCode)
-		_, _ = w.Write(blob)
+		_, _ = w.Write(raw)
 		return
 	}
-	var decoded any
-	if err := json.Unmarshal(blob, &decoded); err != nil {
-		// 非 JSON（不太可能）直接透传原样。
+
+	gzipEncoded := strings.Contains(strings.ToLower(resp.Header.Get("Content-Encoding")), "gzip")
+	decoded := raw
+	if gzipEncoded {
+		gz, gerr := gzip.NewReader(bytes.NewReader(raw))
+		if gerr != nil {
+			// 解不开就原样透传（原 Content-Encoding/Content-Length 仍有效）。
+			w.WriteHeader(resp.StatusCode)
+			_, _ = w.Write(raw)
+			return
+		}
+		ub, uerr := io.ReadAll(io.LimitReader(gz, maxMessageTrimBytes+1))
+		_ = gz.Close()
+		if uerr != nil || int64(len(ub)) > maxMessageTrimBytes {
+			// 解压后超限：原样透传压缩字节，不删 Content-Encoding/Content-Length，
+			// 否则浏览器按旧头解析会被截断或报解码错误。
+			log.Printf("opencode proxy %s: decompressed message over %d bytes, relay verbatim", path, maxMessageTrimBytes)
+			w.WriteHeader(resp.StatusCode)
+			_, _ = w.Write(raw)
+			return
+		}
+		decoded = ub
+	}
+
+	var v any
+	if err := json.Unmarshal(decoded, &v); err != nil {
+		// 非 JSON（不太可能）：原样透传原始字节。
 		w.WriteHeader(resp.StatusCode)
-		_, _ = w.Write(blob)
+		_, _ = w.Write(raw)
 		return
 	}
-	n := trimSummaryDiffs(decoded)
+	n := trimSummaryDiffs(v)
 	if n == 0 {
-		// 没有可裁剪的 diffs：原样透传，避免重序列化改动无关字段顺序/字节
-		// （也保住无 diffs 会话的既有响应语义）。
+		// 没有可裁剪的 diffs：原样透传原始字节，保持字节与响应头不变。
 		w.WriteHeader(resp.StatusCode)
-		_, _ = w.Write(blob)
+		_, _ = w.Write(raw)
 		return
 	}
-	out, err := json.Marshal(decoded)
+	out, err := json.Marshal(v)
 	if err != nil {
 		log.Printf("opencode proxy %s: re-encode trimmed message: %v", path, err)
 		writeErr(w, http.StatusBadGateway, "upstream response could not be trimmed")
 		return
 	}
-	if n > 0 {
-		log.Printf("opencode proxy %s: trimmed summary.diffs from %d message(s)", path, n)
-	}
-	// 裁剪后 body 长度已变，必须丢弃上游 relay 过来的 Content-Length，否则浏览器
-	// 按旧长度等待不完整 body 会报网络错误。Go 会改为 chunked / 自动重算长度。
+	log.Printf("opencode proxy %s: trimmed summary.diffs from %d message(s)", path, n)
+	// 裁剪后 body 长度已变，Content-Length 作废；若原先是 gzip 压缩的，解压重序列化
+	// 后已是明文，Content-Encoding 同样作废，否则浏览器按 gzip 解压明文报解码失败。
 	w.Header().Del("Content-Length")
+	if gzipEncoded {
+		w.Header().Del("Content-Encoding")
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(resp.StatusCode)
 	_, _ = w.Write(out)
