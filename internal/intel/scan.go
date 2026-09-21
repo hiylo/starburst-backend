@@ -201,17 +201,18 @@ type scanSummary struct {
 	Endpoints []*store.IntelEndpoint `json:"endpoints"`
 }
 
-// ScanModule scans a single module directory for its contracts. Two stacks have
-// real scanners today, picked by the build anchor found in the module dir:
-// a Java module (pom.xml / build.gradle*) goes through scanJavaFiles and yields
-// entities (JPA @Entity/@Table/@Column) plus endpoints (Controller @*Mapping,
-// GraphQL @*Mapping) with per-file:line provenance; a Go module (go.mod) goes
-// through scanGoFiles and yields exported types as entities, plus standard
-// library HTTP route registrations and exported methods as endpoints. A go.mod
-// anchor wins outright, so a directory holding both Go and Java sources is
-// scanned as Go. Every other module type (android/ios/web/node/bff and friends)
-// returns an empty (not failed) summary: analysis still records the module and
-// its type/role while its contract scanners land in later milestones.
+// ScanModule scans a single module directory for its contracts, dispatched by
+// the build anchor found in the module dir. iOS/Swift (.xcodeproj/Package.swift)
+// goes through ios.ScanSwift (Codable entities + network endpoints), Web/Node
+// (package.json) through web.ScanWeb (axios/fetch endpoints), Android/Kotlin
+// (.kt) through android.ScanKotlin (Kotlin entities + Retrofit endpoints, merged
+// with any Java files), a Go module (go.mod) through scanGoFiles (exported types
+// + standard-library HTTP routes), and a Java module (pom.xml / build.gradle*)
+// through scanJavaFiles (JPA @Entity/@Table/@Column + Controller @*Mapping).
+// All results carry per-file:line provenance. A go.mod anchor wins outright, so
+// a directory holding both Go and Java sources is scanned as Go. GraphQL/BFF
+// structured scanners are not yet dedicated: such modules still record their
+// type/role but yield no entity/endpoint contracts.
 func ScanModule(root, relPath string) (*scanSummary, error) {
 	dir := filepath.Join(root, relPath)
 	if fi, err := os.Stat(dir); err == nil && !fi.IsDir() {
