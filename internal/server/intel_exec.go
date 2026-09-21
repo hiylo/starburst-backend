@@ -439,8 +439,13 @@ func (s *Server) runIntelTests(ctx context.Context, projectID, moduleID, nodeID 
 		if !node.Reachable {
 			return fmt.Errorf("remote node %q 不可达（请先在节点列表检查）", node.Name)
 		}
-		if reportKind != "go" {
-			return fmt.Errorf("远程执行目前仅支持 go 报告（stdout 自包含）；%s 需本机运行", reportKind)
+		// Capability routing (§11 偏差#2)：节点声明了 capability 标签但没有涵盖
+		// 本模块测试所需标签时拒绝执行；未标注 capability 的旧节点视为不设防，
+		// 全部接受以保持向后兼容。
+		if need := remoteCapabilityFor(module.BuildTool, module.KindType); need != "" &&
+			strings.TrimSpace(node.Capabilities) != "" && !nodeHasCapability(node.Capabilities, need) {
+			return fmt.Errorf("远程节点 %q 缺少 capability %q（已声明：%q），无法执行 %s 模块的测试",
+				node.Name, need, node.Capabilities, module.BuildTool)
 		}
 		remoteNode = node
 	} else if !force {
@@ -453,11 +458,12 @@ func (s *Server) runIntelTests(ctx context.Context, projectID, moduleID, nodeID 
 		}
 	}
 
+	var wd string
 	var output []byte
 	var execErr error
 	if remoteNode != nil {
 		command := strings.Join(cmdArgs, " ")
-		wd := remoteNode.WorkDir
+		wd = remoteNode.WorkDir
 		if wd == "" {
 			wd = "~"
 		}
@@ -496,7 +502,22 @@ func (s *Server) runIntelTests(ctx context.Context, projectID, moduleID, nodeID 
 	}
 
 	run.Output = truncateOutput(output)
-	results := parseReport(reportKind, dir, output)
+	// 远程节点的报告产物在节点文件系统上，stdout 不包含 XML：把需要落盘的
+	// 报告（surefire/pytest/xctest）拉回本地临时目录再解析；go/playwright/npm
+	// 的输出 stdout 自包含，直接解析即可。临时目录用完即清理。
+	reportDir := dir
+	if remoteNode != nil {
+		switch reportKind {
+		case "surefire", "pytest", "xctest":
+			pulled, err := pullRemoteReports(ctx, remoteNode, wd, reportKind)
+			if err != nil {
+				return err
+			}
+			reportDir = pulled
+			defer os.RemoveAll(reportDir)
+		}
+	}
+	results := parseReport(reportKind, reportDir, output)
 	// 关键：parseReport 构造的结果不带 run/project/module 归属（默认 0），
 	// 写入前必须回填，否则 test_results 的 run_id/project_id/module_id 全是
 	// 0，运行详情页永远查不到本 run 的逐用例结果（既有 bug，真实用例被解析
@@ -957,4 +978,118 @@ func collectJUnitXML(dir string, maxDepth int) []string {
 		return nil
 	})
 	return out
+}
+
+// remoteCapabilityFor derives the capability label a remote node must declare
+// to execute a module's tests, from its build tool and kind type. The mapping
+// is deterministic and reviewed; an empty result means the module is not
+// capability-routed (unlabelled nodes still accept it, keeping nodes created
+// before capability labels working).
+func remoteCapabilityFor(buildTool, kindType string) string {
+	switch buildTool {
+	case "go":
+		return "go"
+	case "maven":
+		return "java"
+	case "gradle":
+		if kindType == "android" {
+			return "android"
+		}
+		return "gradle"
+	case "npm":
+		return "node"
+	case "pytest":
+		return "python"
+	case "xcode":
+		return "ios"
+	}
+	return ""
+}
+
+// nodeHasCapability reports whether a node's capability labels (whitespace or
+// comma separated, e.g. "ios-xcode android-sdk linux-docker go java node
+// python") include the required label. A token matches when it equals the label
+// or carries it as a "-"/"_" prefix, so "android-sdk" satisfies "android" and
+// "ios-xcode" satisfies "ios".
+func nodeHasCapability(capabilities, required string) bool {
+	if required == "" {
+		return true
+	}
+	for _, tok := range strings.FieldsFunc(capabilities, func(r rune) bool {
+		return r == ' ' || r == ',' || r == '\t'
+	}) {
+		tok = strings.TrimSpace(tok)
+		if tok == required || strings.HasPrefix(tok, required+"-") || strings.HasPrefix(tok, required+"_") {
+			return true
+		}
+	}
+	return false
+}
+
+// remoteReportRelPaths picks the node-relative paths that hold a report kind's
+// on-disk output, relative to the node workDir the test command runs in.
+// xctest reports are discovered recursively and pulled by PullJUnitXML instead
+// of this explicit list.
+func remoteReportRelPaths(reportKind string) []string {
+	switch reportKind {
+	case "surefire":
+		return []string{"target/surefire-reports"}
+	case "pytest":
+		return []string{"junit.xml"}
+	}
+	return nil
+}
+
+// pullRemoteReports fetches a remote node's on-disk framework reports
+// (surefire/pytest/xctest) into a fresh local temp dir so parseReport can read
+// them — the SSH command's stdout is the test output, not the report. Report
+// kinds that are self-contained on stdout (go/playwright/npm) return "" since
+// parseReport's dir argument is unused for them. The caller must remove the
+// returned dir.
+func pullRemoteReports(ctx context.Context, node *store.RemoteNode, workDir, reportKind string) (string, error) {
+	var files map[string][]byte
+	var err error
+	switch reportKind {
+	case "surefire", "pytest":
+		files, err = envagent.PullArtifacts(ctx, node.Host, node.User, node.Port, workDir, remoteReportRelPaths(reportKind))
+	case "xctest":
+		files, err = envagent.PullJUnitXML(ctx, node.Host, node.User, node.Port, workDir)
+	default:
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("拉取远程 %s 报告失败：%w", reportKind, err)
+	}
+	return materializeReportFiles(files)
+}
+
+// materializeReportFiles writes an in-memory artifact map (relative path ->
+// bytes) under a fresh temp dir, preserving the relative structure so report
+// parsers can glob/walk it. Returns the temp dir; the caller must remove it.
+func materializeReportFiles(files map[string][]byte) (string, error) {
+	tmp, err := os.MkdirTemp("", "intel-reports-")
+	if err != nil {
+		return "", err
+	}
+	cleanup := func() {
+		_ = os.RemoveAll(tmp)
+	}
+	for rel, data := range files {
+		p := filepath.Join(tmp, filepath.FromSlash(rel))
+		// filepath.Join cleans "..", so a traversal entry would silently escape
+		// the temp dir unless checked against it explicitly.
+		if !strings.HasPrefix(p, tmp+string(filepath.Separator)) {
+			cleanup()
+			return "", fmt.Errorf("report artifact %q escapes temp dir", rel)
+		}
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			cleanup()
+			return "", err
+		}
+		if err := os.WriteFile(p, data, 0o644); err != nil {
+			cleanup()
+			return "", err
+		}
+	}
+	return tmp, nil
 }

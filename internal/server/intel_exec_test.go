@@ -1,11 +1,15 @@
 package server
 
 import (
+	"archive/tar"
+	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -255,7 +259,7 @@ func TestIntelRunRemoteNode(t *testing.T) {
 		t.Fatalf("analyze status %d: %s", rec.Code, rec.Body.String())
 	}
 	rec = s.do(t, http.MethodPost, "/api/intel/nodes",
-		`{"name":"go-runner","host":"127.0.0.1","port":`+jsonInt(int64(port))+`,"capabilities":"linux-docker","workDir":"/srv/repos/echo"}`, wh)
+		`{"name":"go-runner","host":"127.0.0.1","port":`+jsonInt(int64(port))+`,"capabilities":"go linux-docker","workDir":"/srv/repos/echo"}`, wh)
 	var node struct {
 		Node struct {
 			ID int64 `json:"id"`
@@ -331,7 +335,7 @@ func TestIntelRunCancel(t *testing.T) {
 		t.Fatalf("analyze status %d: %s", rec.Code, rec.Body.String())
 	}
 	rec = s.do(t, http.MethodPost, "/api/intel/nodes",
-		`{"name":"go-runner","host":"127.0.0.1","port":`+jsonInt(int64(port))+`,"capabilities":"linux-docker","workDir":"/srv/repos/echo"}`, wh)
+		`{"name":"go-runner","host":"127.0.0.1","port":`+jsonInt(int64(port))+`,"capabilities":"go linux-docker","workDir":"/srv/repos/echo"}`, wh)
 	var node struct {
 		Node struct {
 			ID int64 `json:"id"`
@@ -624,5 +628,224 @@ func TestHasShellMeta(t *testing.T) {
 		if !hasShellMeta(s) {
 			t.Errorf("hasShellMeta(%q) = false, want true", s)
 		}
+	}
+}
+
+// TestRemoteCapabilityRouting verifies the deterministic build-tool→capability
+// mapping and the label matcher used to route runs to capability-annotated
+// nodes.
+func TestRemoteCapabilityRouting(t *testing.T) {
+	mapping := []struct {
+		buildTool, kindType, want string
+	}{
+		{"go", "", "go"},
+		{"maven", "", "java"},
+		{"gradle", "", "gradle"},
+		{"gradle", "android", "android"},
+		{"npm", "web", "node"},
+		{"pytest", "", "python"},
+		{"xcode", "", "ios"},
+		{"swiftpm", "", ""},
+	}
+	for _, c := range mapping {
+		if got := remoteCapabilityFor(c.buildTool, c.kindType); got != c.want {
+			t.Errorf("remoteCapabilityFor(%q,%q) = %q, want %q", c.buildTool, c.kindType, got, c.want)
+		}
+	}
+
+	matches := []struct {
+		caps, required string
+		want           bool
+	}{
+		{"linux-docker", "go", false},
+		{"go linux-docker", "go", true},
+		{"go,linux-docker", "go", true},
+		{"android-sdk", "android", true},
+		{"android-sdk ios-xcode", "ios", true},
+		{"java maven", "java", true},
+		{"ios-xcode", "go", false},
+		{"", "go", false},
+		{"  ", "go", false},
+	}
+	for _, m := range matches {
+		if got := nodeHasCapability(m.caps, m.required); got != m.want {
+			t.Errorf("nodeHasCapability(%q,%q) = %v, want %v", m.caps, m.required, got, m.want)
+		}
+	}
+}
+
+// intelTarGzBytes encodes a path->content map as a gzip tar byte stream, the
+// shape a remote `tar -czf - ...` pull produces (used to stub envagent.RunSSH
+// for remote report pull-back).
+func intelTarGzBytes(t *testing.T, files map[string]string) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gz)
+	for name, content := range files {
+		if err := tw.WriteHeader(&tar.Header{Name: name, Mode: 0o644, Size: int64(len(content)), Typeflag: tar.TypeReg}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tw.Write([]byte(content)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := gz.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
+
+// TestRemoteReportPullParsesSurefire verifies the report pull-back plumbing: a
+// remote surefire TEST-*.xml fetched as a path->bytes map materializes into a
+// temp dir that parseReport then reads into per-case results.
+func TestRemoteReportPullParsesSurefire(t *testing.T) {
+	old := envagent.PullArtifacts
+	defer func() { envagent.PullArtifacts = old }()
+	envagent.PullArtifacts = func(ctx context.Context, host, user string, port int, workDir string, relPaths []string) (map[string][]byte, error) {
+		if len(relPaths) != 1 || relPaths[0] != "target/surefire-reports" {
+			t.Errorf("relPaths = %v, want [target/surefire-reports]", relPaths)
+		}
+		return map[string][]byte{
+			"target/surefire-reports/TEST-demo.UserTest.xml": []byte(`<testsuite name="demo.UserTest" tests="2">
+  <testcase classname="demo.UserTest" name="ok" time="0.01"/>
+  <testcase classname="demo.UserTest" name="boom" time="0.02"><failure message="boom">boom stack</failure></testcase>
+</testsuite>`),
+		}, nil
+	}
+
+	node := &store.RemoteNode{Host: "192.0.2.10", User: "runner", Port: 22}
+	pulled, err := pullRemoteReports(context.Background(), node, "/srv/demo", "surefire")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(pulled)
+	if pulled == "" {
+		t.Fatal("surefire must pull into a temp dir")
+	}
+	results := parseReport("surefire", pulled, nil)
+	if len(results) != 2 {
+		t.Fatalf("results = %d, want 2", len(results))
+	}
+	byName := map[string]*store.TestResult{}
+	for _, r := range results {
+		byName[r.Endpoint] = r
+	}
+	if !byName["demo.UserTest.ok"].Passed {
+		t.Error("ok case should pass")
+	}
+	if byName["demo.UserTest.boom"].Passed {
+		t.Error("boom case should fail")
+	}
+}
+
+// TestIntelRunRemoteSurefire verifies §11 偏差#2: a non-go report kind runs on
+// a remote node — the test command is driven over SSH and the on-disk surefire
+// XML is pulled back (fake tar on the stub ssh) and parsed into per-case
+// results instead of being rejected.
+func TestIntelRunRemoteSurefire(t *testing.T) {
+	s := newTestServer(t)
+	wh := loginWeb(t, s)
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	port := ln.Addr().(*net.TCPAddr).Port
+
+	root := t.TempDir()
+	writeTestFile(t, filepath.Join(root, "pom.xml"), `<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>demo</groupId><artifactId>demo</artifactId><version>1.0</version>
+</project>`)
+	writeTestFile(t, filepath.Join(root, "src/main/java/demo/Main.java"), `package demo;
+public class Main { public static void main(String[] a) {} }`)
+	writeTestFile(t, filepath.Join(root, "src/test/java/demo/UserTest.java"), `package demo;
+import org.junit.Test;
+public class UserTest {
+    @Test public void ok() {}
+    @Test public void boom() { throw new RuntimeException("boom"); }
+}`)
+
+	rec := s.do(t, http.MethodPost, "/api/intel/projects",
+		`{"name":"demo","source":"local","localPath":"`+filepath.ToSlash(root)+`"}`, wh)
+	var proj struct {
+		ID int64 `json:"id"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &proj); err != nil || proj.ID == 0 {
+		t.Fatalf("create project: %s", rec.Body.String())
+	}
+	rec = s.do(t, http.MethodPost, "/api/intel/analyze",
+		`{"projectId":`+jsonInt(proj.ID)+`}`, wh)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("analyze status %d: %s", rec.Code, rec.Body.String())
+	}
+	rec = s.do(t, http.MethodPost, "/api/intel/nodes",
+		`{"name":"java-ci","host":"127.0.0.1","port":`+jsonInt(int64(port))+`,"capabilities":"java linux-docker","workDir":"/srv/repos/demo"}`, wh)
+	var node struct {
+		Node struct {
+			ID int64 `json:"id"`
+		} `json:"node"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &node); err != nil || node.Node.ID == 0 {
+		t.Fatalf("create node: %s", rec.Body.String())
+	}
+
+	old := envagent.RunSSH
+	defer func() { envagent.RunSSH = old }()
+	surefireXML := `<testsuite name="demo.UserTest" tests="2">
+  <testcase classname="demo.UserTest" name="ok" time="0.01"/>
+  <testcase classname="demo.UserTest" name="boom" time="0.02"><failure message="boom">boom stack</failure></testcase>
+</testsuite>`
+	envagent.RunSSH = func(ctx context.Context, args ...string) (string, error) {
+		joined := strings.Join(args, " ")
+		if strings.Contains(joined, "tar -czf") {
+			return string(intelTarGzBytes(t, map[string]string{
+				"target/surefire-reports/TEST-demo.UserTest.xml": surefireXML,
+			})), nil
+		}
+		return "BUILD SUCCESS", nil
+	}
+
+	rec = s.do(t, http.MethodPost, "/api/intel/run",
+		`{"projectId":`+jsonInt(proj.ID)+`,"node":`+jsonInt(node.Node.ID)+`}`, wh)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("run status %d: %s", rec.Code, rec.Body.String())
+	}
+	var enq struct {
+		Run struct {
+			ID int64 `json:"id"`
+		} `json:"run"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &enq); err != nil || enq.Run.ID == 0 {
+		t.Fatalf("run enqueue parse: %s", rec.Body.String())
+	}
+	if status := waitIntelRunFinished(t, s, wh, enq.Run.ID); status != "failed" {
+		t.Fatalf("run status = %q, want failed (boom case)", status)
+	}
+	rec = s.do(t, http.MethodGet, "/api/intel/runs/"+jsonInt(enq.Run.ID), "", wh)
+	var detail struct {
+		Results []struct {
+			Endpoint string `json:"endpoint"`
+			Passed   bool   `json:"passed"`
+		} `json:"results"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &detail); err != nil {
+		t.Fatalf("run detail parse: %v", err)
+	}
+	passed, failed := 0, 0
+	for _, r := range detail.Results {
+		if r.Passed {
+			passed++
+		} else {
+			failed++
+		}
+	}
+	if passed != 1 || failed != 1 {
+		t.Fatalf("results = %d passed / %d failed, want 1/1: %s", passed, failed, rec.Body.String())
 	}
 }
