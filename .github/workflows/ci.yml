@@ -143,8 +143,12 @@ jobs:
           name="starburst-backend-${{ matrix.os }}-${{ matrix.arch }}"
           if [ "${{ matrix.os }}" = "windows" ]; then name="$name.exe"; fi
           mkdir -p dist
+          # 剥离 tag 的 v 前缀，使 --version / /api/system 的 version 与 config.Version
+          # 默认值同为纯语义化版本（2.0.0 而非 v2.0.0），与客户端 compareVersions 格式一致。
+          version="${GITHUB_REF_NAME#v}"
+          echo "building $name with Version=$version"
           go build -trimpath \
-            -ldflags "-s -w -X github.com/hiylo/starburst-backend/internal/config.Version=${GITHUB_REF_NAME}" \
+            -ldflags "-s -w -X github.com/hiylo/starburst-backend/internal/config.Version=$version" \
             -o "dist/$name" ./cmd/starburst-backend
       - uses: actions/upload-artifact@v4
         with:
