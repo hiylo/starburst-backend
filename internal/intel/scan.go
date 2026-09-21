@@ -1,12 +1,14 @@
 package intel
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 
 	"github.com/hiylo/starburst-backend/internal/intel/android"
+	"github.com/hiylo/starburst-backend/internal/intel/bff"
 	"github.com/hiylo/starburst-backend/internal/intel/ios"
 	"github.com/hiylo/starburst-backend/internal/intel/web"
 	"github.com/hiylo/starburst-backend/internal/store"
@@ -203,16 +205,19 @@ type scanSummary struct {
 
 // ScanModule scans a single module directory for its contracts, dispatched by
 // the build anchor found in the module dir. iOS/Swift (.xcodeproj/Package.swift)
-// goes through ios.ScanSwift (Codable entities + network endpoints), Web/Node
-// (package.json) through web.ScanWeb (axios/fetch endpoints), Android/Kotlin
+// goes through ios.ScanSwift (Codable entities + network endpoints), a
+// package.json module through bff.ScanBFF when it looks like a Node backend/BFF
+// (GraphQL schema + REST routes, merged with web.ScanWeb's frontend bindings)
+// and otherwise through web.ScanWeb (axios/fetch endpoints), Android/Kotlin
 // (.kt) through android.ScanKotlin (Kotlin entities + Retrofit endpoints, merged
 // with any Java files), a Go module (go.mod) through scanGoFiles (exported types
 // + standard-library HTTP routes), and a Java module (pom.xml / build.gradle*)
 // through scanJavaFiles (JPA @Entity/@Table/@Column + Controller @*Mapping).
 // All results carry per-file:line provenance. A go.mod anchor wins outright, so
-// a directory holding both Go and Java sources is scanned as Go. GraphQL/BFF
-// structured scanners are not yet dedicated: such modules still record their
-// type/role but yield no entity/endpoint contracts.
+// a directory holding both Go and Java sources is scanned as Go. The bff/web
+// decision for a package.json module is: backend features win (bff scanner plus
+// web bindings merged), otherwise the existing pure-web web.ScanWeb behavior is
+// preserved.
 func ScanModule(root, relPath string) (*scanSummary, error) {
 	dir := filepath.Join(root, relPath)
 	if fi, err := os.Stat(dir); err == nil && !fi.IsDir() {
@@ -232,11 +237,25 @@ func ScanModule(root, relPath string) (*scanSummary, error) {
 		}
 		return &scanSummary{Entities: ents, Endpoints: eps}, nil
 	}
-	// Web/Node 前端（package.json）：契约来自 axios/fetch API 调用。
+	// Web/Node（package.json）：bff 后端特征优先——目录存在 Node 服务入口 /
+	// 后端框架依赖 / GraphQL schema 时走 bff.ScanBFF（GraphQL 实体+端点、REST
+	// 路由），并仍合并 web.ScanWeb 的前端绑定端点（仓库可能前后端同仓）；
+	// 否则保持纯前端 web.ScanWeb（axios/fetch API 调用）行为。
 	if len(pkgJSON) > 0 {
 		eps, err := web.ScanWeb(dir)
 		if err != nil {
 			return &scanSummary{}, nil
+		}
+		var pkg map[string]any
+		data, rerr := os.ReadFile(filepath.Join(dir, "package.json"))
+		if rerr == nil {
+			_ = json.Unmarshal(data, &pkg)
+		}
+		if bff.LooksLikeBackend(dir, pkg) {
+			ents, bffEps, berr := bff.ScanBFF(dir)
+			if berr == nil {
+				return &scanSummary{Entities: ents, Endpoints: append(eps, bffEps...)}, nil
+			}
 		}
 		return &scanSummary{Endpoints: eps}, nil
 	}
