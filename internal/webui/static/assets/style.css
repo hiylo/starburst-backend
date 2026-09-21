@@ -627,11 +627,15 @@ td .actions { display: inline-flex; gap: 6px; }
   /* 中窄屏动态栏整条横排，不做横向拖拽 */
   .wb-events-handle { display: none; }
   .wb-grid.ev-collapsed .wb-col-events { display: none; }
+  /* 收起后取消底部动态行占位，避免竖屏整块留白 */
+  .wb-grid.ev-collapsed { grid-template-rows: minmax(0, 1fr); }
 }
 /* 超窄：单列堆叠。列表定高 200px，聊天详情吃掉余下的高度——
    给面板写死 72dvh 会把输入区顶出视口，手机上必须滚动才能发送。 */
 @media (max-width: 640px) {
   .wb-grid { grid-template-columns: minmax(0, 1fr); grid-template-rows: 200px minmax(0, 1fr); }
+  /* 超窄屏事件列恒隐藏，收起态不应改变行结构 */
+  .wb-grid.ev-collapsed { grid-template-columns: minmax(0, 1fr); grid-template-rows: 200px minmax(0, 1fr); }
   /* 移动端不展示实时动态 */
   .wb-grid .wb-col-events { display: none; }
   .wb-events-expand { display: none !important; }
