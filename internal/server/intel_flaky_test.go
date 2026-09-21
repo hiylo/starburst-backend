@@ -12,8 +12,8 @@ import (
 
 // TestFlakyRerunArgs covers the deterministic re-run command builder for every
 // supported framework combination: go filter, surefire maven -Dtest, surefire
-// gradle --tests and pytest -k, plus the early-return kinds that have no
-// deterministic selector.
+// gradle --tests, pytest -k and playwright --grep, plus the early-return kinds
+// that have no deterministic selector (xctest without a scheme, npm).
 func TestFlakyRerunArgs(t *testing.T) {
 	cases := []struct {
 		name       string
@@ -57,6 +57,20 @@ func TestFlakyRerunArgs(t *testing.T) {
 			names:      []string{"test_alpha", "demo.test_beta"},
 			want:       []string{"pytest", "-q", "--junitxml=junit.xml", "-k", "test_alpha or test_beta"},
 		},
+		{
+			name:       "playwright",
+			reportKind: "playwright",
+			buildTool:  "npm",
+			names:      []string{"example.spec.ts.should render", "auth.spec.ts.login"},
+			want:       []string{"npx", "playwright", "test", "--reporter=json", "--grep", `should render|login`},
+		},
+		{
+			name:       "playwright title with regex meta",
+			reportKind: "playwright",
+			buildTool:  "node",
+			names:      []string{"home.spec.ts.total is $42"},
+			want:       []string{"npx", "playwright", "test", "--reporter=json", "--grep", `total is \$42`},
+		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -67,11 +81,13 @@ func TestFlakyRerunArgs(t *testing.T) {
 		})
 	}
 
-	// Kinds without a deterministic re-run selector produce no command.
+	// Kinds without a deterministic re-run selector produce no command: xctest
+	// needs an xcodebuild -scheme that flakyRetry does not carry, npm test has
+	// no per-case selector, and surefire without a known build tool (maven or
+	// gradle) cannot select deterministically either.
 	none := []struct {
 		reportKind, buildTool string
 	}{
-		{"playwright", "npm"},
 		{"xctest", "xcode"},
 		{"npm", "npm"},
 		{"surefire", "unknown"},
@@ -149,6 +165,45 @@ func TestFlakyRetryPytest(t *testing.T) {
 	s.flakyRetry(context.Background(), 0, 0, dir, "pytest", "pytest", results)
 
 	want := "pytest -q --junitxml=junit.xml -k test_alpha or test_beta"
+	if strings.Join(gotCmd, " ") != want {
+		t.Errorf("rerun command = %q, want %q", strings.Join(gotCmd, " "), want)
+	}
+	for _, r := range results {
+		if !r.Passed {
+			t.Errorf("%s should be marked flaky-passed", r.Endpoint)
+		}
+		if !strings.Contains(r.FailuresJSON, "flaky") {
+			t.Errorf("flaky marker missing on %s: %s", r.Endpoint, r.FailuresJSON)
+		}
+	}
+}
+
+// TestFlakyRetryPlaywright verifies the flaky chain for playwright: failed
+// cases (parsed from the JSON report as "<spec title>.<test title>") that pass
+// on the --grep re-run are marked flaky (recorded as passed).
+func TestFlakyRetryPlaywright(t *testing.T) {
+	old := runCmd
+	defer func() { runCmd = old }()
+	s := newTestServer(t)
+	dir := t.TempDir()
+
+	var gotCmd []string
+	runCmd = func(ctx context.Context, d, name string, args ...string) ([]byte, error) {
+		gotCmd = append([]string{name}, args...)
+		// The re-run writes a fresh playwright JSON report with both cases
+		// green; parseReport reads it from stdout.
+		return []byte(`{"suites":[{"title":"example.spec.ts","specs":[{"title":"example.spec.ts","tests":[
+{"projectName":"chromium","title":"should render","status":"passed","duration":123,"results":[{"status":"passed","duration":123}]},
+{"projectName":"chromium","title":"should submit","status":"passed","duration":456,"results":[{"status":"passed","duration":456}]}
+]}]}]}`), nil
+	}
+	results := []*store.TestResult{
+		{Endpoint: "example.spec.ts.should render", Kind: "playwright", Passed: false, FailuresJSON: `{"error":"x"}`},
+		{Endpoint: "example.spec.ts.should submit", Kind: "playwright", Passed: false, FailuresJSON: `{"error":"y"}`},
+	}
+	s.flakyRetry(context.Background(), 0, 0, dir, "playwright", "npm", results)
+
+	want := `npx playwright test --reporter=json --grep should render|should submit`
 	if strings.Join(gotCmd, " ") != want {
 		t.Errorf("rerun command = %q, want %q", strings.Join(gotCmd, " "), want)
 	}

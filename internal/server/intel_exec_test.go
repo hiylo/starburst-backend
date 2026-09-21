@@ -225,11 +225,11 @@ func TestFlakyRetry(t *testing.T) {
 	}
 
 	// Report kinds without a deterministic re-run selector never re-execute
-	// (playwright/xctest/npm).
+	// (xctest without a scheme / npm).
 	calls = 0
-	s.flakyRetry(context.Background(), 0, 0, "/tmp", "playwright", "npm", results)
+	s.flakyRetry(context.Background(), 0, 0, "/tmp", "xctest", "xcode", results)
 	if calls != 0 {
-		t.Errorf("playwright triggered rerun (%d calls)", calls)
+		t.Errorf("xctest triggered rerun (%d calls)", calls)
 	}
 
 	// Rerun still fails -> stays failed.

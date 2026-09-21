@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -709,14 +710,15 @@ const flakyRetryMaxRetries = 1
 
 // flakyRetry re-runs the failed cases once (bounded by a per-framework filter)
 // and marks the results that then pass as flaky, still recording them as
-// passed. Supported report kinds are go, surefire (maven/gradle) and pytest,
-// whose per-case identifiers select deterministically; playwright/xctest/npm
-// stay out because their re-run selectors (spec titles / project names) are not
-// deterministic. A build/test command failure aborts the retry (no unbounded
-// re-execution).
+// passed. Supported report kinds are go, surefire (maven/gradle), pytest and
+// playwright, whose per-case identifiers select deterministically; xctest and
+// npm stay out because a re-run selector cannot be built: xctest needs an
+// xcodebuild -scheme that is not carried into the flaky retry, and npm test has
+// no per-case selector at all. A build/test command failure aborts the retry
+// (no unbounded re-execution).
 func (s *Server) flakyRetry(ctx context.Context, projectID, moduleID int64, dir, reportKind, buildTool string, results []*store.TestResult) {
 	switch reportKind {
-	case "go", "surefire", "pytest":
+	case "go", "surefire", "pytest", "playwright":
 	default:
 		return
 	}
@@ -785,7 +787,10 @@ func (s *Server) flakyRetry(ctx context.Context, projectID, moduleID int64, dir,
 // ("Class.method" or "method"). go filters by test name regex; surefire selects
 // class#method joined by "+" for maven or repeated --tests "class.method" for
 // gradle; pytest uses the method fragment as a -k substring expression (pytest
-// matches it anywhere in the node id). Unsupported combinations return nil.
+// matches it anywhere in the node id); playwright selects by the test title as
+// an escaped --grep regex (see the branch below for the endpoint mapping).
+// xctest and npm return nil: xcodebuild needs a -scheme that flakyRetry does
+// not carry, and npm test exposes no per-case selector.
 func flakyRerunArgs(reportKind, buildTool string, names []string) []string {
 	switch reportKind {
 	case "go":
@@ -818,6 +823,24 @@ func flakyRerunArgs(reportKind, buildTool string, names []string) []string {
 			expr = append(expr, method)
 		}
 		return []string{"pytest", "-q", "--junitxml=junit.xml", "-k", strings.Join(expr, " or ")}
+	case "playwright":
+		// ParsePlaywrightJSON maps an endpoint to "<spec title>.<test title>"
+		// (CaseResult.Class = spec title, CaseResult.Name = test title), so
+		// splitRerunName strips the spec prefix and the test title remains.
+		// Playwright's --grep regex is matched against each test's full title
+		// (spec file + describe titles + test title), which contains the test
+		// title verbatim; escaping it with regexp.QuoteMeta makes the selector
+		// exact for that title. Like pytest -k this is a substring match, so a
+		// title that prefixes another test's title re-runs that sibling too —
+		// harmless: flaky marking is keyed to the originally-failed endpoints.
+		// The build tool (npm/node) never changes the npx playwright invocation.
+		// --reporter=json is kept so parseReport can read the re-run stdout.
+		expr := make([]string, 0, len(names))
+		for _, n := range names {
+			_, title := splitRerunName(n)
+			expr = append(expr, regexp.QuoteMeta(title))
+		}
+		return []string{"npx", "playwright", "test", "--reporter=json", "--grep", strings.Join(expr, "|")}
 	}
 	return nil
 }
