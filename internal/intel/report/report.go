@@ -198,10 +198,11 @@ type junitTestSuites struct {
 // ParseXCTestJUnit parses an Xcode XCTest JUnit XML report (fastlane/scan or
 // xcresulttool exports) into normalized case results. Both a <testsuites>
 // root wrapping multiple suites and a bare <testsuite> root are accepted.
-// XCTest encodes the owning class and method in classname as "Class.method",
-// so Class holds the part before the first dot and Name the part after it; a
-// classname without a dot falls back to the name attribute. Status is derived
-// from the <failure>/<error>/<skipped> child elements.
+// XCTest encodes the owning class and method in classname as "Class.method"
+// (fastlane/scan may prefix the bundle: "Bundle.Class.method"); splitXCTestName
+// splits at the last dot so Class holds bundle+class and Name the method, and
+// a classname without a dot falls back to the name attribute. Status is
+// derived from the <failure>/<error>/<skipped> child elements.
 func ParseXCTestJUnit(data []byte) ([]CaseResult, error) {
 	var ts junitTestSuites
 	if err := xml.Unmarshal(data, &ts); err != nil {
@@ -234,14 +235,19 @@ func ParseXCTestJUnit(data []byte) ([]CaseResult, error) {
 	return results, nil
 }
 
-// splitXCTestName maps XCTest's "Class.method" classname into (Class, Name).
-// A classname without a dot yields an empty Class and uses the name attribute
-// as the Name fallback.
+// splitXCTestName maps an XCTest classname onto (Class, Name). The classname's
+// last dot separates the method name; everything left of it is the class, which
+// may itself contain dots for the bundle prefix — fastlane/scan emits both
+// "Class.method" and "Bundle.Class.method", and the multi-dot form also matches
+// the class part of "-only-testing:Class/method", which Xcode 13+ accepts with
+// the target/bundle omitted. A classname without a dot yields an empty Class
+// and uses the name attribute as the Name fallback.
 func splitXCTestName(classname, fallback string) (class, name string) {
-	if before, after, ok := strings.Cut(classname, "."); ok {
-		return before, after
+	idx := strings.LastIndexByte(classname, '.')
+	if idx < 0 {
+		return "", fallback
 	}
-	return "", fallback
+	return classname[:idx], classname[idx+1:]
 }
 
 // ParsePytestJUnit parses a pytest --junitxml report into normalized case
@@ -418,18 +424,25 @@ type playwrightReport struct {
 }
 
 // playwrightSuite is a suite in a Playwright JSON report. The top-level suites
-// hold one file each; describe blocks appear as nested suites (suites can nest
-// arbitrarily).
+// hold one file each (title mirrors the spec file path, file carries it too);
+// describe blocks appear as nested suites (suites can nest arbitrarily). File
+// is the report file path this suite maps to, present on the top-level file
+// suites and any describe suite that carries one.
 type playwrightSuite struct {
 	Title  string            `json:"title"`
+	File   string            `json:"file"`
 	Specs  []playwrightSpec  `json:"specs"`
 	Suites []playwrightSuite `json:"suites"`
 }
 
-// playwrightSpec is one spec file within a suite (in this repo's normalized
-// model spec.Title is the spec file name, e.g. "example.spec.ts").
+// playwrightSpec is one spec within a suite (in this repo's normalized model
+// spec.Title is the spec file name, e.g. "example.spec.ts", reused as the
+// endpoint class part). File is the spec file path as emitted by the real
+// Playwright reporter; it is preferred over Title when building the full grep
+// title, with Title kept as the fallback for reports that omit it.
 type playwrightSpec struct {
 	Title string           `json:"title"`
+	File  string           `json:"file"`
 	Tests []playwrightTest `json:"tests"`
 }
 
@@ -460,10 +473,11 @@ type playwrightError struct {
 // timedOut counts as an error; the duration falls back to the first result's
 // duration when the test-level value is absent. FullTitle carries the string
 // Playwright matches its --grep regex against — the space-joined
-// "<project name> <spec title> [<describe title>...] <test title>" grep title
+// "<project name> <file> [<describe title>...] <test title>" grep title
 // (Playwright joins test._grepTitleWithTags() parts with a space, project name
-// first) — so a flaky re-run can select exactly one test by anchoring it with
-// ^...$.
+// first), where <file> is the closest spec/suite "file" path (falling back to
+// the spec title for reports that omit it) — so a flaky re-run can select
+// exactly one test by anchoring it with ^...$.
 func ParsePlaywrightJSON(data []byte) ([]CaseResult, error) {
 	var rep playwrightReport
 	if err := json.Unmarshal(data, &rep); err != nil {
@@ -479,17 +493,35 @@ func ParsePlaywrightJSON(data []byte) ([]CaseResult, error) {
 // appendPlaywrightSuite flattens a (possibly nested) playwright suite into case
 // results. describe carries the titles of the enclosing describe blocks in
 // outer → inner order; the current suite's own title is never pushed here —
-// only nested suites contribute their title when recursing, and the top-level
-// file suite (whose title mirrors the spec file name) is therefore not
-// duplicated with the spec component.
+// only nested suites contribute their title when recursing. The top-level file
+// suite (whose title mirrors the file path already used as the file component)
+// is therefore not duplicated with the file segment.
 func appendPlaywrightSuite(results []CaseResult, s playwrightSuite, describe []string) []CaseResult {
+	return appendPlaywrightSuiteFile(results, s, describe, "")
+}
+
+// appendPlaywrightSuiteFile is the recursive worker for appendPlaywrightSuite;
+// inheritedFile is the nearest enclosing suite's effective file path, used as a
+// further fallback when a spec carries no file of its own.
+func appendPlaywrightSuiteFile(results []CaseResult, s playwrightSuite, describe []string, inheritedFile string) []CaseResult {
+	suiteFile := s.File
+	if suiteFile == "" {
+		suiteFile = inheritedFile
+	}
 	for _, spec := range s.Specs {
+		file := spec.File
+		if file == "" {
+			file = suiteFile
+		}
+		if file == "" {
+			file = spec.Title
+		}
 		for _, t := range spec.Tests {
 			r := CaseResult{
 				Suite:      t.ProjectName,
 				Class:      spec.Title,
 				Name:       t.Title,
-				FullTitle:  playwrightFullTitle(t.ProjectName, spec.Title, describe, t.Title),
+				FullTitle:  playwrightFullTitle(t.ProjectName, file, describe, t.Title),
 				Status:     playwrightStatus(t.Status),
 				DurationMs: t.Duration,
 			}
@@ -507,18 +539,18 @@ func appendPlaywrightSuite(results []CaseResult, s playwrightSuite, describe []s
 		if sub.Title != "" {
 			next = append(append([]string{}, describe...), sub.Title)
 		}
-		results = appendPlaywrightSuite(results, sub, next)
+		results = appendPlaywrightSuiteFile(results, sub, next, suiteFile)
 	}
 	return results
 }
 
 // playwrightFullTitle builds the --grep match string for one test: the
-// space-joined, empty-parts-omitted "<project name> <spec title> [<describe
+// space-joined, empty-parts-omitted "<project name> <file> [<describe
 // title>...] <test title>" grep title. This mirrors the string Playwright
 // matches its --grep regex against, so anchoring it with ^...$ selects a
 // single test (a title that prefixes a sibling's no longer drags it in).
-func playwrightFullTitle(project, spec string, describe []string, test string) string {
-	parts := []string{project, spec}
+func playwrightFullTitle(project, file string, describe []string, test string) string {
+	parts := []string{project, file}
 	parts = append(parts, describe...)
 	parts = append(parts, test)
 	return strings.Join(nonEmptyStrings(parts), " ")

@@ -198,9 +198,11 @@ func TestParsePlaywrightJSON(t *testing.T) {
   "suites": [
     {
       "title": "example.spec.ts",
+      "file": "tests/example.spec.ts",
       "specs": [
         {
           "title": "example.spec.ts",
+          "file": "tests/example.spec.ts",
           "tests": [
             {
               "projectName": "chromium",
@@ -247,14 +249,14 @@ func TestParsePlaywrightJSON(t *testing.T) {
 	if r := byName["should render"]; r.Status != "passed" || r.DurationMs != 100 || r.Suite != "chromium" || r.Class != "example.spec.ts" {
 		t.Errorf("should render = %+v, want passed/100ms/chromium/example.spec.ts", r)
 	}
-	if r := byName["should render"]; r.FullTitle != "chromium example.spec.ts should render" {
-		t.Errorf("should render FullTitle = %q, want %q", r.FullTitle, "chromium example.spec.ts should render")
+	if r := byName["should render"]; r.FullTitle != "chromium tests/example.spec.ts should render" {
+		t.Errorf("should render FullTitle = %q, want %q", r.FullTitle, "chromium tests/example.spec.ts should render")
 	}
 	if r := byName["should submit"]; r.Status != "failed" || r.DurationMs != 456 || !strings.Contains(r.ErrorXML, "expect(true).toBe(false)") {
 		t.Errorf("should submit = %+v, want failed/456ms with error", r)
 	}
-	if r := byName["should submit"]; r.FullTitle != "chromium example.spec.ts should submit" {
-		t.Errorf("should submit FullTitle = %q, want %q", r.FullTitle, "chromium example.spec.ts should submit")
+	if r := byName["should submit"]; r.FullTitle != "chromium tests/example.spec.ts should submit" {
+		t.Errorf("should submit FullTitle = %q, want %q", r.FullTitle, "chromium tests/example.spec.ts should submit")
 	}
 	if r := byName["should skip"]; r.Status != "skipped" {
 		t.Errorf("should skip = %+v, want skipped", r)
@@ -262,23 +264,27 @@ func TestParsePlaywrightJSON(t *testing.T) {
 	if r := byName["should timeout"]; r.Status != "error" || r.DurationMs != 30000 {
 		t.Errorf("should timeout = %+v, want error/30000ms", r)
 	}
-	if r := byName["should timeout"]; r.FullTitle != "webkit example.spec.ts should timeout" {
-		t.Errorf("should timeout FullTitle = %q, want %q", r.FullTitle, "webkit example.spec.ts should timeout")
+	if r := byName["should timeout"]; r.FullTitle != "webkit tests/example.spec.ts should timeout" {
+		t.Errorf("should timeout FullTitle = %q, want %q", r.FullTitle, "webkit tests/example.spec.ts should timeout")
 	}
 }
 
 // TestParsePlaywrightJSONFullTitle verifies the describe-chain contribution to
 // the Playwright grep title: nested suites become space-joined describe parts
-// between the spec name and the test title, and the top-level file suite (whose
-// title mirrors the spec file name) is not duplicated.
+// between the file name and the test title, and the top-level file suite
+// (whose title mirrors the spec file path) is not duplicated — the file
+// segment of the grep title uses the "file" field preferred over the spec
+// title, so reports carrying both still pick the real file path.
 func TestParsePlaywrightJSONFullTitle(t *testing.T) {
 	const pwJSON = `{
   "suites": [
     {
       "title": "example.spec.ts",
+      "file": "tests/example.spec.ts",
       "specs": [
         {
           "title": "example.spec.ts",
+          "file": "tests/example.spec.ts",
           "tests": [
             {"projectName": "chromium", "title": "should render", "status": "passed", "duration": 1, "results": []}
           ]
@@ -287,9 +293,11 @@ func TestParsePlaywrightJSONFullTitle(t *testing.T) {
       "suites": [
         {
           "title": "Auth",
+          "file": "tests/example.spec.ts",
           "specs": [
             {
               "title": "example.spec.ts",
+              "file": "tests/example.spec.ts",
               "tests": [
                 {"projectName": "chromium", "title": "should login", "status": "passed", "duration": 1, "results": []},
                 {"projectName": "firefox", "title": "should logout", "status": "passed", "duration": 1, "results": []}
@@ -299,9 +307,11 @@ func TestParsePlaywrightJSONFullTitle(t *testing.T) {
           "suites": [
             {
               "title": "MFA",
+              "file": "tests/example.spec.ts",
               "specs": [
                 {
                   "title": "example.spec.ts",
+                  "file": "tests/example.spec.ts",
                   "tests": [
                     {"projectName": "chromium", "title": "should verify", "status": "passed", "duration": 1, "results": []}
                   ]
@@ -326,10 +336,10 @@ func TestParsePlaywrightJSONFullTitle(t *testing.T) {
 		byName[r.Name] = r
 	}
 	want := map[string]string{
-		"should render": "chromium example.spec.ts should render",
-		"should login":  "chromium example.spec.ts Auth should login",
-		"should logout": "firefox example.spec.ts Auth should logout",
-		"should verify": "chromium example.spec.ts Auth MFA should verify",
+		"should render": "chromium tests/example.spec.ts should render",
+		"should login":  "chromium tests/example.spec.ts Auth should login",
+		"should logout": "firefox tests/example.spec.ts Auth should logout",
+		"should verify": "chromium tests/example.spec.ts Auth MFA should verify",
 	}
 	for name, full := range want {
 		if r := byName[name]; r.Class != "example.spec.ts" || r.FullTitle != full {
@@ -388,7 +398,7 @@ FAIL
 
 func TestParseXCTestJUnit(t *testing.T) {
 	const multi = `<testsuites>
-  <testsuite name="LoginTests" tests="6" failures="1" errors="1" skipped="1">
+  <testsuite name="LoginTests" tests="7" failures="1" errors="1" skipped="1">
     <testcase classname="LoginTests.testValidLogin" name="testValidLogin" time="0.123"/>
     <testcase classname="LoginTests.testWrongPassword" name="testWrongPassword" time="0.200">
       <failure message="XCTAssertTrue failed">LoginTests.swift:42: XCTAssertTrue failed: wrong password</failure>
@@ -400,6 +410,7 @@ func TestParseXCTestJUnit(t *testing.T) {
       <skipped message="simulator only"/>
     </testcase>
     <testcase classname="nodot" name="nodot" time=""/>
+    <testcase classname="MyApp.LoginTests.testBundleLogin" name="testBundleLogin" time="0.030"/>
   </testsuite>
   <testsuite name="ProfileTests" tests="1" failures="0" errors="0" skipped="0">
     <testcase classname="ProfileTests.testAvatar" name="testAvatar" time="0.5"/>
@@ -409,8 +420,8 @@ func TestParseXCTestJUnit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got) != 6 {
-		t.Fatalf("ParseXCTestJUnit() returned %d results, want 6", len(got))
+	if len(got) != 7 {
+		t.Fatalf("ParseXCTestJUnit() returned %d results, want 7", len(got))
 	}
 	byName := map[string]CaseResult{}
 	for _, r := range got {
@@ -433,6 +444,10 @@ func TestParseXCTestJUnit(t *testing.T) {
 	}
 	if r := byName["nodot"]; r.Class != "" || r.Name != "nodot" || r.Status != "passed" || r.DurationMs != 0 {
 		t.Errorf("nodot = %+v, want empty class/passed/0ms falling back to name attr", r)
+	}
+	if r := byName["testBundleLogin"]; r.Class != "MyApp.LoginTests" || r.Name != "testBundleLogin" ||
+		r.Status != "passed" || r.DurationMs != 30 {
+		t.Errorf("testBundleLogin = %+v, want class MyApp.LoginTests (bundle+class, last-dot split) and 30ms", r)
 	}
 	if r := byName["testAvatar"]; r.Suite != "ProfileTests" || r.Class != "ProfileTests" || r.DurationMs != 500 {
 		t.Errorf("testAvatar = %+v, want ProfileTests.testAvatar at 500ms from the second suite", r)

@@ -828,22 +828,31 @@ func (s *Server) flakyRetry(ctx context.Context, projectID, moduleID int64, dir,
 	}
 }
 
-// playwrightRerunFullTitle rebuilds the Playwright --grep title for a failed
-// result from what parseReport persisted: the project name (FailuresJSON
-// "suite") plus the spec title and test title encoded in the endpoint
-// ("<spec title>.<test title>"). It returns "" when any part is missing so the
-// caller falls back to the bare title substring. The describe chain is not
-// carried through store.TestResult, so tests nested in describe blocks anchor
-// at best on project+spec+test here (the report-layer CaseResult.FullTitle
-// includes the full describe chain when the report is re-parsed).
+// playwrightRerunFullTitle returns the Playwright --grep title for a failed
+// result. It first reads the "fullTitle" key that parseReport persists into
+// FailuresJSON when the report carried one — the report-layer
+// CaseResult.FullTitle, which includes the full describe chain. When that is
+// absent (reports/historical rows written before the key existed, or a result
+// that never had a full title) it rebuilds the title from the project name
+// (FailuresJSON "suite") plus the spec title and test title encoded in the
+// endpoint ("<spec title>.<test title>"), which drops the describe chain. It
+// returns "" when no full title can be produced so the caller falls back to
+// the bare title substring.
 func playwrightRerunFullTitle(reportKind string, res *store.TestResult) string {
 	if reportKind != "playwright" {
 		return ""
 	}
 	var meta struct {
-		Suite string `json:"suite"`
+		Suite     string `json:"suite"`
+		FullTitle string `json:"fullTitle"`
 	}
-	if err := json.Unmarshal([]byte(res.FailuresJSON), &meta); err != nil || meta.Suite == "" {
+	if err := json.Unmarshal([]byte(res.FailuresJSON), &meta); err != nil {
+		return ""
+	}
+	if meta.FullTitle != "" {
+		return meta.FullTitle
+	}
+	if meta.Suite == "" {
 		return ""
 	}
 	class, method := splitRerunName(strings.TrimPrefix(res.Endpoint, "."))
@@ -1103,7 +1112,7 @@ func parseReport(reportKind, dir string, output []byte) []*store.TestResult {
 			Kind:         reportKind,
 			Passed:       passed,
 			Endpoint:     c.Class + "." + c.Name,
-			FailuresJSON: encodeJSON(map[string]any{"suite": c.Suite, "error": c.ErrorXML}),
+			FailuresJSON: encodeJSON(parseReportMeta(c)),
 		}
 		if !passed {
 			res.RootcauseJSON = encodeJSON(rootcause.Analyze(c.ErrorXML, nil))
@@ -1111,6 +1120,19 @@ func parseReport(reportKind, dir string, output []byte) []*store.TestResult {
 		out = append(out, res)
 	}
 	return out
+}
+
+// parseReportMeta builds the FailuresJSON payload stored on a per-case result.
+// The "fullTitle" key is written only when the report carried one (currently
+// only Playwright), so other report kinds and historical rows keep their
+// existing shape and FailuresJSON consumers that read keys (isFlakyResult, the
+// run-issue detail) are unaffected.
+func parseReportMeta(c report.CaseResult) map[string]any {
+	meta := map[string]any{"suite": c.Suite, "error": c.ErrorXML}
+	if c.FullTitle != "" {
+		meta["fullTitle"] = c.FullTitle
+	}
+	return meta
 }
 
 // recordRunIssues turns failed results into intel_issues (closed-loop).

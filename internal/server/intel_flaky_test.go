@@ -294,6 +294,43 @@ func TestFlakyRetryPlaywrightPrefixFallback(t *testing.T) {
 	}
 }
 
+// TestFlakyRetryPlaywrightFullTitlePersisted verifies the describe chain is no
+// longer lost across the store boundary: when parseReport persisted the report
+// layer's FullTitle (project + file + describe titles + test) into
+// FailuresJSON's "fullTitle" key, the flaky re-run anchors --grep on exactly
+// that string — even when the endpoint alone ("spec.test") carries no describe
+// parts, so a nested test no longer drags in a same-titled sibling.
+func TestFlakyRetryPlaywrightFullTitlePersisted(t *testing.T) {
+	old := runCmd
+	defer func() { runCmd = old }()
+	s := newTestServer(t)
+	dir := t.TempDir()
+
+	var gotCmd []string
+	runCmd = func(ctx context.Context, d, name string, args ...string) ([]byte, error) {
+		gotCmd = append([]string{name}, args...)
+		return []byte(`{"suites":[{"title":"example.spec.ts","file":"tests/example.spec.ts","specs":[{"title":"example.spec.ts","file":"tests/example.spec.ts","tests":[
+{"projectName":"chromium","title":"should login","status":"passed","duration":123,"results":[{"status":"passed","duration":123}]}
+]}]}]}`), nil
+	}
+	results := []*store.TestResult{
+		{Endpoint: "example.spec.ts.should login", Kind: "playwright", Passed: false,
+			FailuresJSON: `{"suite":"chromium","fullTitle":"chromium tests/example.spec.ts Auth should login","error":"x"}`},
+	}
+	s.flakyRetry(context.Background(), 0, 0, dir, "playwright", "npm", results)
+
+	want := `npx playwright test --reporter=json --grep ^chromium tests/example\.spec\.ts Auth should login$`
+	if strings.Join(gotCmd, " ") != want {
+		t.Errorf("rerun command = %q, want %q", strings.Join(gotCmd, " "), want)
+	}
+	if !results[0].Passed {
+		t.Errorf("should login should be marked flaky-passed")
+	}
+	if !strings.Contains(results[0].FailuresJSON, "flaky") {
+		t.Errorf("flaky marker missing on %s: %s", results[0].Endpoint, results[0].FailuresJSON)
+	}
+}
+
 // TestFlakyRetryXCTest verifies the flaky chain for xctest when the executed
 // command carried an xcodebuild -scheme: the re-run selects the failed methods
 // with -only-testing:<Class>/<method>, and the passing re-run is marked flaky.
