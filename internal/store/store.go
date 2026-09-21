@@ -354,6 +354,12 @@ type Store interface {
 	ListIntelIssues(ctx context.Context, projectID int64, status string) ([]*IntelIssue, error)
 	// UpdateIntelIssue persists mutable issue fields (status/resolution).
 	UpdateIntelIssue(ctx context.Context, issue *IntelIssue) error
+	// MarkIntelIssueResolved sets an issue's status and resolved_at timestamp
+	// (closed-loop acknowledgement); ErrNotFound when the issue is absent.
+	MarkIntelIssueResolved(ctx context.Context, id int64, status string) error
+	// LinkIntelIssueFeature assigns a feature point to an issue; ErrNotFound
+	// when the issue is absent.
+	LinkIntelIssueFeature(ctx context.Context, issueID, featureID int64) error
 	// ReplaceIntelFeatures replaces a project's feature-point set (rescan).
 	ReplaceIntelFeatures(ctx context.Context, projectID int64, feats []*IntelFeature) error
 	// GetIntelFeature loads a single feature point by id.

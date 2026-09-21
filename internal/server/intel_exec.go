@@ -302,8 +302,9 @@ func (s *Server) handleIntelRuns(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"runs": runs})
 }
 
-// handleIntelRunByID returns one run with its per-case results (GET), or
-// cancels a running run (POST .../cancel).
+// handleIntelRunByID returns one run with its per-case results (GET), cancels
+// a running run (POST .../cancel), or returns just the per-case results
+// (GET .../results).
 func (s *Server) handleIntelRunByID(w http.ResponseWriter, r *http.Request) {
 	if !s.requireWeb(r) {
 		if _, ok := s.requireToken(r); !ok {
@@ -324,6 +325,23 @@ func (s *Server) handleIntelRunByID(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+		return
+	}
+	// GET /api/intel/runs/{id}/results → 只返回该 run 的逐用例结果。
+	if strings.HasSuffix(rest, "/results") && r.Method == http.MethodGet {
+		id, err := strconv.ParseInt(strings.TrimSuffix(rest, "/results"), 10, 64)
+		if err != nil || id <= 0 {
+			writeErr(w, http.StatusBadRequest, "invalid run id")
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+		defer cancel()
+		results, err := s.store.ListIntelTestResults(ctx, id)
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, "load results failed")
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"results": results})
 		return
 	}
 	if r.Method != http.MethodGet {
