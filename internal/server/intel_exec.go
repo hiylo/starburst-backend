@@ -529,7 +529,7 @@ func (s *Server) runIntelTests(ctx context.Context, projectID, moduleID, nodeID 
 		res.ProjectID = projectID
 		res.ModuleID = module.ID
 	}
-	s.flakyRetry(ctx, projectID, module.ID, dir, reportKind, results)
+	s.flakyRetry(ctx, projectID, module.ID, dir, reportKind, module.BuildTool, results)
 	// npm/other script runners produce no per-case report on stdout; synthesize a
 	// single whole-run result so the run has a definite pass/fail to display.
 	if len(results) == 0 && reportKind == "npm" {
@@ -707,11 +707,17 @@ var runCmd = runCommand
 // (still recorded as passed) instead of becoming a bug issue.
 const flakyRetryMaxRetries = 1
 
-// flakyRetry re-runs the failed Go tests once (bounded by filter) and marks the
-// results that then pass as flaky. Non-Go report kinds and build failures abort
-// the retry deterministically (no unbounded re-execution).
-func (s *Server) flakyRetry(ctx context.Context, projectID, moduleID int64, dir, reportKind string, results []*store.TestResult) {
-	if reportKind != "go" {
+// flakyRetry re-runs the failed cases once (bounded by a per-framework filter)
+// and marks the results that then pass as flaky, still recording them as
+// passed. Supported report kinds are go, surefire (maven/gradle) and pytest,
+// whose per-case identifiers select deterministically; playwright/xctest/npm
+// stay out because their re-run selectors (spec titles / project names) are not
+// deterministic. A build/test command failure aborts the retry (no unbounded
+// re-execution).
+func (s *Server) flakyRetry(ctx context.Context, projectID, moduleID int64, dir, reportKind, buildTool string, results []*store.TestResult) {
+	switch reportKind {
+	case "go", "surefire", "pytest":
+	default:
 		return
 	}
 	// 已隔离的用例不再参与 flaky 重跑（已连续 flaky 达阈值，重跑无意义）。
@@ -739,13 +745,16 @@ func (s *Server) flakyRetry(ctx context.Context, projectID, moduleID int64, dir,
 	if len(failed) == 0 || len(names) == 0 {
 		return
 	}
-	filter := "^(" + strings.Join(names, "|") + ")$"
+	args := flakyRerunArgs(reportKind, buildTool, names)
+	if len(args) == 0 {
+		return // surefire without a known build tool: no deterministic selector
+	}
 	for attempt := 0; attempt < flakyRetryMaxRetries; attempt++ {
-		out, err := runCmd(ctx, dir, "go", "test", "-count=1", "-run", filter, "./...")
+		out, err := runCmd(ctx, dir, args[0], args[1:]...)
 		if err != nil {
 			return // build/test command failure aborts flaky retry
 		}
-		rerun := parseReport("go", dir, out)
+		rerun := parseReport(reportKind, dir, out)
 		passed := map[string]bool{}
 		for _, r := range rerun {
 			if r != nil && r.Passed {
@@ -769,6 +778,59 @@ func (s *Server) flakyRetry(ctx context.Context, projectID, moduleID int64, dir,
 			return
 		}
 	}
+}
+
+// flakyRerunArgs builds the argv (never a shell) for a bounded flaky re-run of
+// the failed names, each an endpoint with any leading "." stripped
+// ("Class.method" or "method"). go filters by test name regex; surefire selects
+// class#method joined by "+" for maven or repeated --tests "class.method" for
+// gradle; pytest uses the method fragment as a -k substring expression (pytest
+// matches it anywhere in the node id). Unsupported combinations return nil.
+func flakyRerunArgs(reportKind, buildTool string, names []string) []string {
+	switch reportKind {
+	case "go":
+		return []string{"go", "test", "-count=1", "-run", "^(" + strings.Join(names, "|") + ")$", "./..."}
+	case "surefire":
+		switch buildTool {
+		case "maven":
+			classes := make([]string, 0, len(names))
+			for _, n := range names {
+				class, method := splitRerunName(n)
+				classes = append(classes, class+"#"+method)
+			}
+			return []string{"mvn", "test", "-Dtest=" + strings.Join(classes, "+")}
+		case "gradle":
+			args := []string{"./gradlew", "test"}
+			for _, n := range names {
+				class, method := splitRerunName(n)
+				sel := method
+				if class != "" {
+					sel = class + "." + method
+				}
+				args = append(args, "--tests", sel)
+			}
+			return args
+		}
+	case "pytest":
+		expr := make([]string, 0, len(names))
+		for _, n := range names {
+			_, method := splitRerunName(n)
+			expr = append(expr, method)
+		}
+		return []string{"pytest", "-q", "--junitxml=junit.xml", "-k", strings.Join(expr, " or ")}
+	}
+	return nil
+}
+
+// splitRerunName splits a re-run selector endpoint into class and method at the
+// last dot ("com.example.Suite.method" → "com.example.Suite" + "method"; a name
+// without a dot is all method).
+func splitRerunName(name string) (class, method string) {
+	idx := strings.LastIndexByte(name, '.')
+	if idx < 0 {
+		return "", name
+	}
+	return name[:idx], name[idx+1:]
 }
 
 // recordTestCaseOutcomes writes each run result back to its discovered test

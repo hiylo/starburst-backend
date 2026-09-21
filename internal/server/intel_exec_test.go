@@ -189,7 +189,7 @@ func TestFlakyRetry(t *testing.T) {
 		{Endpoint: ".TestBar", Kind: "go", Passed: false, FailuresJSON: `{"error":"y"}`},
 		{Endpoint: ".TestOk", Kind: "go", Passed: true},
 	}
-	s.flakyRetry(context.Background(), 0, 0, "/tmp", "go", results)
+	s.flakyRetry(context.Background(), 0, 0, "/tmp", "go", "go", results)
 	if calls != 1 {
 		t.Fatalf("rerun calls = %d, want 1", calls)
 	}
@@ -206,11 +206,12 @@ func TestFlakyRetry(t *testing.T) {
 		t.Error("passing case must stay passed")
 	}
 
-	// Non-Go report kinds never re-execute.
+	// Report kinds without a deterministic re-run selector never re-execute
+	// (playwright/xctest/npm).
 	calls = 0
-	s.flakyRetry(context.Background(), 0, 0, "/tmp", "surefire", results)
+	s.flakyRetry(context.Background(), 0, 0, "/tmp", "playwright", "npm", results)
 	if calls != 0 {
-		t.Errorf("surefire triggered rerun (%d calls)", calls)
+		t.Errorf("playwright triggered rerun (%d calls)", calls)
 	}
 
 	// Rerun still fails -> stays failed.
@@ -220,7 +221,7 @@ func TestFlakyRetry(t *testing.T) {
 `), nil
 	}
 	results2 := []*store.TestResult{{Endpoint: ".TestFoo", Kind: "go", Passed: false}}
-	s.flakyRetry(context.Background(), 0, 0, "/tmp", "go", results2)
+	s.flakyRetry(context.Background(), 0, 0, "/tmp", "go", "go", results2)
 	if results2[0].Passed {
 		t.Error("still-failing case must stay failed")
 	}
