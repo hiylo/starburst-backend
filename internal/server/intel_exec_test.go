@@ -763,6 +763,268 @@ func TestRemoteReportPullParsesSurefire(t *testing.T) {
 	}
 }
 
+// TestIntelRunRemoteEndRepoWD verifies the @end/ multi-repo remote path
+// alignment: a module that lives in an associated source repo maps its remote
+// working directory to node WorkDir + the repo-relative module path, and the
+// SSH command runs with that aligned `cd`.
+func TestIntelRunRemoteEndRepoWD(t *testing.T) {
+	s := newTestServer(t)
+	wh := loginWeb(t, s)
+
+	// A reachable node target (keeps reachable=true).
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	port := ln.Addr().(*net.TCPAddr).Port
+
+	mainRoot := t.TempDir()
+	writeTestFile(t, filepath.Join(mainRoot, "pom.xml"), `<project></project>`)
+	endRoot := t.TempDir()
+	writeTestFile(t, filepath.Join(endRoot, "core", "go.mod"), "module demo\n\ngo 1.22\n")
+	writeTestFile(t, filepath.Join(endRoot, "core", "main.go"), "package main\nfunc main() {}\n")
+
+	rec := s.do(t, http.MethodPost, "/api/intel/projects",
+		`{"name":"multi","source":"local","localPath":"`+filepath.ToSlash(mainRoot)+`"}`, wh)
+	var proj struct {
+		ID int64 `json:"id"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &proj); err != nil || proj.ID == 0 {
+		t.Fatalf("create project: %s", rec.Body.String())
+	}
+	rec = s.do(t, http.MethodPut, "/api/intel/projects/"+jsonInt(proj.ID)+"/sources",
+		`{"sources":[{"endName":"end","source":"local","localPath":"`+filepath.ToSlash(endRoot)+`"}]}`, wh)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("put sources status %d: %s", rec.Code, rec.Body.String())
+	}
+	rec = s.do(t, http.MethodPost, "/api/intel/analyze",
+		`{"projectId":`+jsonInt(proj.ID)+`}`, wh)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("analyze status %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// Locate the "@end/core" module id.
+	var endModID int64
+	rec = s.do(t, http.MethodGet, "/api/intel/projects/"+jsonInt(proj.ID), "", wh)
+	var detail struct {
+		Modules []struct {
+			ID      int64  `json:"id"`
+			RelPath string `json:"relPath"`
+		} `json:"modules"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &detail); err != nil {
+		t.Fatalf("detail parse: %v", err)
+	}
+	for _, m := range detail.Modules {
+		if m.RelPath == "@end/core" {
+			endModID = m.ID
+		}
+	}
+	if endModID == 0 {
+		t.Fatalf("@end/core module not found: %+v", detail.Modules)
+	}
+
+	// Node workDir is the *associated repo checkout root* on the node.
+	rec = s.do(t, http.MethodPost, "/api/intel/nodes",
+		`{"name":"end-runner","host":"127.0.0.1","port":`+jsonInt(int64(port))+`,"capabilities":"go linux-docker","workDir":"/srv/end"}`, wh)
+	var node struct {
+		Node struct {
+			ID int64 `json:"id"`
+		} `json:"node"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &node); err != nil || node.Node.ID == 0 {
+		t.Fatalf("create node: %s", rec.Body.String())
+	}
+
+	old := envagent.RunSSH
+	defer func() { envagent.RunSSH = old }()
+	var sshArgs []string
+	envagent.RunSSH = func(ctx context.Context, args ...string) (string, error) {
+		sshArgs = args
+		return `{"Action":"pass","Test":"TestPing","Package":"demo","Elapsed":0.01}
+`, nil
+	}
+
+	rec = s.do(t, http.MethodPost, "/api/intel/run",
+		`{"projectId":`+jsonInt(proj.ID)+`,"moduleId":`+jsonInt(endModID)+`,"node":`+jsonInt(node.Node.ID)+`}`, wh)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("remote run status %d: %s", rec.Code, rec.Body.String())
+	}
+	waitIntelCondition(t, func() bool { return len(sshArgs) > 0 }, "RunSSH 未在后台任务中被调用")
+	joined := strings.Join(sshArgs, " ")
+	// The module's repo-relative path ("core") must be appended to WorkDir.
+	if !strings.Contains(joined, "cd /srv/end/core &&") {
+		t.Errorf("ssh args workDir not aligned to associated repo subdir: %v", sshArgs)
+	}
+	if !strings.Contains(joined, "go test") {
+		t.Errorf("ssh args missing test command: %v", sshArgs)
+	}
+}
+
+// TestIntelRunAutoPickNode verifies capability-based auto node selection:
+// with nodeID=0 and a reachable node declaring the matching capability, the run
+// routes over SSH to that node's workDir instead of running locally.
+func TestIntelRunAutoPickNode(t *testing.T) {
+	s := newTestServer(t)
+	wh := loginWeb(t, s)
+
+	// A reachable node target (keeps reachable=true).
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	port := ln.Addr().(*net.TCPAddr).Port
+
+	root := t.TempDir()
+	writeTestFile(t, filepath.Join(root, "go.mod"), "module demo\n\ngo 1.22\n")
+	writeTestFile(t, filepath.Join(root, "main.go"), "package main\nfunc main() {}\n")
+
+	rec := s.do(t, http.MethodPost, "/api/intel/projects",
+		`{"name":"demo","source":"local","localPath":"`+filepath.ToSlash(root)+`"}`, wh)
+	var proj struct {
+		ID int64 `json:"id"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &proj); err != nil || proj.ID == 0 {
+		t.Fatalf("create project: %s", rec.Body.String())
+	}
+	rec = s.do(t, http.MethodPost, "/api/intel/analyze",
+		`{"projectId":`+jsonInt(proj.ID)+`}`, wh)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("analyze status %d: %s", rec.Code, rec.Body.String())
+	}
+
+	rec = s.do(t, http.MethodPost, "/api/intel/nodes",
+		`{"name":"go-runner","host":"127.0.0.1","port":`+jsonInt(int64(port))+`,"capabilities":"go linux-docker","workDir":"/srv/go"}`, wh)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("create node: %s", rec.Body.String())
+	}
+
+	old := envagent.RunSSH
+	defer func() { envagent.RunSSH = old }()
+	var sshArgs []string
+	envagent.RunSSH = func(ctx context.Context, args ...string) (string, error) {
+		sshArgs = args
+		return `{"Action":"pass","Test":"TestPing","Package":"demo","Elapsed":0.01}
+`, nil
+	}
+
+	// No node specified: auto-pick must route the go module to the go node.
+	rec = s.do(t, http.MethodPost, "/api/intel/run",
+		`{"projectId":`+jsonInt(proj.ID)+`}`, wh)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("auto-pick run status %d: %s", rec.Code, rec.Body.String())
+	}
+	waitIntelCondition(t, func() bool { return len(sshArgs) > 0 }, "RunSSH 未在后台任务中被调用（未路由到自动选择的节点）")
+	joined := strings.Join(sshArgs, " ")
+	if !strings.Contains(joined, "cd /srv/go &&") {
+		t.Errorf("ssh args workDir wrong: %v", sshArgs)
+	}
+	if !strings.Contains(joined, "go test") {
+		t.Errorf("ssh args missing test command: %v", sshArgs)
+	}
+}
+
+// TestIntelRunAutoPickFallbackLocal verifies that when no reachable node
+// declares the required capability, a nodeID=0 run falls back to local
+// execution (runCmd is invoked, RunSSH never). A reachable but
+// capability-mismatched node and a capability-matching but unreachable node
+// must both be skipped by the picker.
+func TestIntelRunAutoPickFallbackLocal(t *testing.T) {
+	s := newTestServer(t)
+	wh := loginWeb(t, s)
+
+	root := t.TempDir()
+	writeTestFile(t, filepath.Join(root, "go.mod"), "module demo\n\ngo 1.22\n")
+	writeTestFile(t, filepath.Join(root, "main.go"), "package main\nfunc main() {}\n")
+
+	rec := s.do(t, http.MethodPost, "/api/intel/projects",
+		`{"name":"demo","source":"local","localPath":"`+filepath.ToSlash(root)+`"}`, wh)
+	var proj struct {
+		ID int64 `json:"id"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &proj); err != nil || proj.ID == 0 {
+		t.Fatalf("create project: %s", rec.Body.String())
+	}
+	rec = s.do(t, http.MethodPost, "/api/intel/analyze",
+		`{"projectId":`+jsonInt(proj.ID)+`}`, wh)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("analyze status %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// A reachable node with the WRONG capability (skipped by the picker).
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	port := ln.Addr().(*net.TCPAddr).Port
+	rec = s.do(t, http.MethodPost, "/api/intel/nodes",
+		`{"name":"python-runner","host":"127.0.0.1","port":`+jsonInt(int64(port))+`,"capabilities":"python","workDir":"/srv/py"}`, wh)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("create python node: %s", rec.Body.String())
+	}
+	// A capability-matching node that is NOT reachable (closed port): skipped.
+	ln2, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	deadPort := ln2.Addr().(*net.TCPAddr).Port
+	ln2.Close()
+	rec = s.do(t, http.MethodPost, "/api/intel/nodes",
+		`{"name":"go-dead","host":"127.0.0.1","port":`+jsonInt(int64(deadPort))+`,"capabilities":"go","workDir":"/srv/go"}`, wh)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("create dead node: %s", rec.Body.String())
+	}
+	var deadNode struct {
+		Node struct {
+			Reachable bool `json:"reachable"`
+		} `json:"node"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &deadNode); err != nil {
+		t.Fatalf("dead node parse: %v", err)
+	}
+	if deadNode.Node.Reachable {
+		t.Fatal("closed-port node should be recorded unreachable")
+	}
+
+	oldCmd := runCmd
+	defer func() { runCmd = oldCmd }()
+	called := false
+	runCmd = func(ctx context.Context, dir, name string, args ...string) ([]byte, error) {
+		called = true
+		return []byte(`{"Action":"pass","Test":"TestPing","Package":"demo","Elapsed":0.01}
+`), nil
+	}
+	old := envagent.RunSSH
+	defer func() { envagent.RunSSH = old }()
+	sshCalled := false
+	envagent.RunSSH = func(ctx context.Context, args ...string) (string, error) {
+		sshCalled = true
+		return "", nil
+	}
+
+	rec = s.do(t, http.MethodPost, "/api/intel/run",
+		`{"projectId":`+jsonInt(proj.ID)+`}`, wh)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("run status %d: %s", rec.Code, rec.Body.String())
+	}
+	var enq struct {
+		Run struct {
+			ID int64 `json:"id"`
+		} `json:"run"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &enq)
+	waitIntelCondition(t, func() bool { return called }, "本地回退未调用 runCmd")
+	if sshCalled {
+		t.Error("RunSSH 不应被调用（无匹配节点应回退本地）")
+	}
+	if status := waitIntelRunFinished(t, s, wh, enq.Run.ID); status != "passed" {
+		t.Fatalf("run status = %q, want passed", status)
+	}
+}
+
 // TestIntelRunRemoteSurefire verifies §11 偏差#2: a non-go report kind runs on
 // a remote node — the test command is driven over SSH and the on-disk surefire
 // XML is pulled back (fake tar on the stub ssh) and parsed into per-case

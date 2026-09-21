@@ -391,15 +391,19 @@ func (s *Server) runIntelTests(ctx context.Context, projectID, moduleID, nodeID 
 	}
 
 	// 模块可能来自关联源码仓库（多端多仓库，"@end/" 前缀）：用该仓库的根目录，
-	// 否则用项目主源码根目录。
+	// 否则用项目主源码根目录。sourceModuleRoot 的二次返回值为模块在其归属关联
+	// 仓库内的相对路径 srcRel（"@end/app" → "app"，仓库根模块为 "."），远端执行
+	// 时把它接到节点 WorkDir 之后，使远端 cwd 与本地 dir 语义一致。
 	dir := filepath.Join(root, module.RelPath)
 	if module.RelPath == "." {
 		dir = root
 	}
+	srcRel := ""
 	sources, _ := s.store.ListIntelProjectSources(ctx, projectID)
-	if srcRoot, srcRel, ok := s.sourceModuleRoot(ctx, p, sources, module.RelPath); ok {
-		dir = filepath.Join(srcRoot, srcRel)
-		if srcRel == "." {
+	if srcRoot, rel, ok := s.sourceModuleRoot(ctx, p, sources, module.RelPath); ok {
+		dir = filepath.Join(srcRoot, rel)
+		srcRel = rel
+		if rel == "." {
 			dir = srcRoot
 		}
 	}
@@ -470,12 +474,25 @@ func (s *Server) runIntelTests(ctx context.Context, projectID, moduleID, nodeID 
 		}
 		remoteNode = node
 	} else if !force {
-		if err := s.envGate(ctx, projectID); err != nil {
-			// Environment gate (§3.6): reject the run before executing when
-			// required middleware/toolchains are missing, with a per-item list.
-			// Local runs are gated unless force bypasses; routed runs rely on the
-			// node's capability labels instead.
-			return err
+		// 未显式指定节点时，按模块所需的 capability 自动挑选一个可达的匹配节点；
+		// 找到则改走远程执行（不再走本地 envGate）。找不到匹配节点（包括未声明
+		// capability 的旧节点）时回退本地 envGate，保留「无节点就本地跑」的既有
+		// 语义；未知 buildTool（remoteCapabilityFor 返回空）同样保持本地。
+		if need := remoteCapabilityFor(module.BuildTool, module.KindType); need != "" {
+			picked, err := s.pickRemoteNode(ctx, need)
+			if err != nil {
+				return fmt.Errorf("自动选择远程节点失败：%w", err)
+			}
+			remoteNode = picked
+		}
+		if remoteNode == nil {
+			if err := s.envGate(ctx, projectID); err != nil {
+				// Environment gate (§3.6): reject the run before executing when
+				// required middleware/toolchains are missing, with a per-item list.
+				// Local runs are gated unless force bypasses; routed runs rely on the
+				// node's capability labels instead.
+				return err
+			}
 		}
 	}
 
@@ -487,6 +504,13 @@ func (s *Server) runIntelTests(ctx context.Context, projectID, moduleID, nodeID 
 		wd = remoteNode.WorkDir
 		if wd == "" {
 			wd = "~"
+		}
+		// @end/ 关联仓库模块：约定节点 WorkDir ≈ 本地 srcRoot（该仓库在节点上
+		// 的检出根），把仓库内相对路径 srcRel 接到其后（"app" → WorkDir/app；
+		// 仓库根模块 srcRel="." 保持 WorkDir 不变）。拼接后的 wd 在下方统一做
+		// shell 元字符校验。
+		if srcRel != "" && srcRel != "." {
+			wd = filepath.Join(wd, srcRel)
 		}
 		// ssh runs the remote command through the login shell, so any token with
 		// shell metacharacters would be interpreted on the node. Reject such
@@ -508,7 +532,7 @@ func (s *Server) runIntelTests(ctx context.Context, projectID, moduleID, nodeID 
 		out, execErr = envagent.RunSSH(ctx, sshArgs...)
 		output = []byte(out)
 	} else {
-		output, execErr = runCommand(ctx, dir, cmdArgs[0], cmdArgs[1:]...)
+		output, execErr = runCmd(ctx, dir, cmdArgs[0], cmdArgs[1:]...)
 	}
 	// A test framework signals failures through its exit code, so a non-zero
 	// exit still comes with a parseable report. Bailing out on any error meant
@@ -717,8 +741,9 @@ func hasTestIntent(argv []string) bool {
 	return false
 }
 
-// runCmd is the process runner used by the test flow (overridable in tests to
-// stub the flaky-retry re-run).
+// runCmd is the process runner used by the local test execution path and the
+// flaky-retry re-run (overridable in tests to stub either). It defaults to
+// runCommand, so production behavior is unchanged.
 var runCmd = runCommand
 
 // flakyRetryMaxRetries is the fixed re-run budget for flaky detection: a case
