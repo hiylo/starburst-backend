@@ -1,100 +1,118 @@
 package envagent
 
 import (
-	"archive/tar"
-	"bytes"
-	"compress/gzip"
 	"context"
-	"io"
 	"path"
 	"strings"
 )
 
-// PullArtifacts pulls a set of relative paths from a remote node by tarring
-// them to stdout over SSH and unpacking the gzip stream in memory, returning a
-// map of relative path -> file bytes. It is a package variable so tests can
-// substitute a deterministic stub (a real pull needs a live node).
+// PullArtifacts pulls a set of relative paths from a remote node by listing the
+// regular files under them (a remote find) and streaming each back over its own
+// cat session — a plain text transfer that needs no tar binary on the node.
+// Returns a map of workDir-relative path -> file bytes. It is a package
+// variable so tests can substitute a deterministic stub (a real pull needs a
+// live node).
 var PullArtifacts = pullArtifactsExec
 
 // PullJUnitXML pulls every JUnit-style *.xml report found recursively under a
 // remote node's workDir (the same discovery parseReport's collectJUnitXML
-// performs locally for xctest), delivered as a single find|xargs tar pipeline.
-// It is overridable in tests like RunSSH.
+// performs locally for xctest). It is overridable in tests like RunSSH.
 var PullJUnitXML = pullJUnitXMLExec
 
-// pullArtifactsExec is the default artifact pull: run
-// `tar -czf - -C <workDir> <relPaths...> 2>/dev/null` on the node. stdout is
-// the gzip tar byte stream; stderr is dropped remotely so a tar warning cannot
-// corrupt the archive. The trailing `; true` keeps a missing glob from
-// surfacing as a terminal execution error — a suite that failed before writing
-// its reports simply yields an empty (parseable) result. workDir/relPaths are
+// pullArtifactsExec lists the regular files under each requested relative path
+// with a remote find and reads them back one cat session at a time. Missing
+// files / empty listings degrade to an empty map (a suite that failed before
+// writing its reports simply yields nothing to parse). workDir/relPaths are
 // reviewed constants or pass the caller's shell-metacharacter guard, so the
-// interpolated shell string stays injectable-free.
+// interpolated shell strings stay injectable-free.
 func pullArtifactsExec(ctx context.Context, host, user string, port int, workDir string, relPaths []string) (map[string][]byte, error) {
 	if len(relPaths) == 0 {
 		return map[string][]byte{}, nil
 	}
-	command := "cd " + workDir + " && tar -czf - " + strings.Join(relPaths, " ") + " 2>/dev/null; true"
-	return runTarPull(ctx, host, user, port, command)
+	c, err := DialSSH(ctx, host, port, user, "")
+	if err != nil {
+		return nil, err
+	}
+	defer c.Close()
+	roots := make([]string, 0, len(relPaths))
+	for _, rp := range relPaths {
+		roots = append(roots, shellWord(rp))
+	}
+	listCmd := "cd " + shellWord(workDir) + " && find " + strings.Join(roots, " ") + " -type f -print 2>/dev/null; true"
+	out, err := commandOn(ctx, c, listCmd)
+	if err != nil {
+		return nil, err
+	}
+	return catFiles(ctx, c, workDir, splitLines(string(out)))
 }
 
-// pullJUnitXMLExec is the recursive JUnit pull used for xctest reports: a
-// remote find locates junit XML files under workDir and feeds them to tar.
-// Pipeline failures and empty results both degrade to an empty map (the local
-// parseReport path already tolerates missing reports).
+// pullJUnitXMLExec lists junit XML files recursively under workDir with a
+// remote find and reads each back via cat. Recursive discovery mirrors the
+// local xctest path; pipeline failures and empty results both degrade to an
+// empty map.
 func pullJUnitXMLExec(ctx context.Context, host, user string, port int, workDir string) (map[string][]byte, error) {
-	command := "cd " + workDir + " && find . -iname '*junit*.xml' -print0 2>/dev/null | xargs -0 tar -czf - 2>/dev/null; true"
-	return runTarPull(ctx, host, user, port, command)
-}
-
-// runTarPull runs a remote command whose stdout is a gzip tar byte stream and
-// unpacks it into a path->bytes map. The command string is assembled from
-// reviewed inputs only.
-func runTarPull(ctx context.Context, host, user string, port int, command string) (map[string][]byte, error) {
-	args := SSHCommandArgs(host, user, port, command)
-	out, err := RunSSH(ctx, args...)
+	c, err := DialSSH(ctx, host, port, user, "")
 	if err != nil {
 		return nil, err
 	}
-	return unpackTarGz([]byte(out))
-}
-
-// unpackTarGz decodes a gzip tar byte stream into a map keyed by cleaned
-// relative path. Directory entries are skipped and path-traversal entries
-// (absolute or ..) are dropped defensively, so a compromised/misbehaving node
-// cannot have its archives written outside the destination directory when the
-// map is later materialized.
-func unpackTarGz(data []byte) (map[string][]byte, error) {
-	if len(data) == 0 {
-		return map[string][]byte{}, nil
-	}
-	gz, err := gzip.NewReader(bytes.NewReader(data))
+	defer c.Close()
+	listCmd := "cd " + shellWord(workDir) + " && find . -iname '*junit*.xml' -type f -print 2>/dev/null; true"
+	out, err := commandOn(ctx, c, listCmd)
 	if err != nil {
 		return nil, err
 	}
-	defer gz.Close()
-	tr := tar.NewReader(gz)
+	return catFiles(ctx, c, workDir, splitLines(string(out)))
+}
+
+// catFiles reads each workDir-relative path back over its own cat session and
+// returns the path -> bytes map. Traversal entries (absolute / ..) are dropped
+// defensively so a compromised node cannot smuggle arbitrary paths in.
+func catFiles(ctx context.Context, c SSHConnection, workDir string, rels []string) (map[string][]byte, error) {
 	files := map[string][]byte{}
-	for {
-		hdr, err := tr.Next()
-		if err == io.EOF {
-			break
+	for _, rel := range rels {
+		rel = strings.TrimSpace(rel)
+		if rel == "" {
+			continue
 		}
+		clean := path.Clean(strings.TrimPrefix(rel, "./"))
+		if clean == "." || path.IsAbs(clean) || clean == ".." || strings.HasPrefix(clean, "../") {
+			continue
+		}
+		remote := path.Join(workDir, clean)
+		out, err := commandOn(ctx, c, "cat "+shellWord(remote)+"; true")
 		if err != nil {
 			return nil, err
 		}
-		if hdr.Typeflag == tar.TypeDir {
-			continue
-		}
-		rel := path.Clean(strings.TrimPrefix(hdr.Name, "./"))
-		if rel == "." || path.IsAbs(rel) || rel == ".." || strings.HasPrefix(rel, "../") {
-			continue
-		}
-		content, err := io.ReadAll(tr)
-		if err != nil {
-			return nil, err
-		}
-		files[rel] = content
+		files[clean] = out
 	}
 	return files, nil
+}
+
+// splitLines splits a remote command's stdout into its lines (an empty stream
+// yields nil).
+func splitLines(s string) []string {
+	if s == "" {
+		return nil
+	}
+	return strings.Split(strings.TrimSuffix(s, "\n"), "\n")
+}
+
+// shellWord returns s safe for interpolation into a remote shell command: a
+// leading "~" stays unquoted so it expands to the remote home, and any
+// space/quotes are single-quoted. Paths are reviewed constants or have passed
+// the caller's shell-metacharacter guard, so no injection surface opens here.
+func shellWord(s string) string {
+	if s != "" && !strings.ContainsAny(s, " \t\n'\"\\") {
+		return s
+	}
+	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
+}
+
+// commandOn runs one remote command on an existing ssh connection. It is a
+// package variable so pull tests can record the issued find/cat command
+// sequence and answer canned output without a live session.
+var commandOn = commandOnSession
+
+func commandOnSession(ctx context.Context, c SSHConnection, command string) ([]byte, error) {
+	return SSHCommand(ctx, c, command)
 }

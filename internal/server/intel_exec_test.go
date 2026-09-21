@@ -1,18 +1,18 @@
 package server
 
 import (
-	"archive/tar"
-	"bytes"
-	"compress/gzip"
 	"context"
 	"encoding/json"
+	"errors"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/hiylo/starburst-backend/internal/intel/envagent"
 	"github.com/hiylo/starburst-backend/internal/store"
@@ -20,20 +20,47 @@ import (
 )
 
 // startTestIntelRunner wires a shared-executor worker pool that claims
-// kind=test-run tasks (the intel run-all mirror) and drives them through the
-// server's RunIntelAllTask callback. Run-all is executor-driven, so these
-// tests must run the executor for the aggregate run to actually execute. The
-// pool's prompt workers find no prompt tasks here and only idle, and retries
-// are disabled so a failing run fails the mirror deterministically without
-// re-running the suite.
+// kind=test-run tasks (the intel run-all and single-module mirrors) and drives
+// them through the server's RunIntelTask dispatcher callback. Both run-all and
+// single-module runs are executor-driven, so these tests must run the executor
+// for the run to actually execute. The pool's prompt workers find no prompt
+// tasks here and only idle, and retries are disabled so a failing run fails the
+// mirror deterministically without re-running the suite.
 func startTestIntelRunner(t *testing.T, s *Server) {
 	t.Helper()
 	exec := tasks.NewExecutor(s.store, s.hub, "http://127.0.0.1:1")
-	exec.WithIntelRunner(s.RunIntelAllTask)
+	exec.WithIntelRunner(s.RunIntelTask)
 	exec.WithMaxRetries(0)
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	go exec.Run(ctx)
+}
+
+// findIntelTrackingTask polls the task list for a kind=test-run tracking task
+// whose instruction references runID, waiting for it to reach a terminal
+// status. The association lives in the Prompt: CreateTask does not persist the
+// pre-set Result column (the executor writes the completion summary into it),
+// so the instruction JSON is parsed to match the run.
+func findIntelTrackingTask(t *testing.T, s *Server, runID int64) *store.Task {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		tasks, _ := s.store.ListTasks(context.Background(), "", 200, 0)
+		for _, tk := range tasks {
+			if tk == nil || tk.Kind != "test-run" {
+				continue
+			}
+			var instr intelRunTaskInstr
+			if json.Unmarshal([]byte(tk.Prompt), &instr) != nil || instr.RunID != runID {
+				continue
+			}
+			if tk.Status != store.TaskQueued && tk.Status != store.TaskRunning {
+				return tk
+			}
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	return nil
 }
 
 // TestIntelFeatureSingleTest verifies the feature single-test: it calls a
@@ -251,6 +278,7 @@ func TestFlakyRetry(t *testing.T) {
 func TestIntelRunRemoteNode(t *testing.T) {
 	s := newTestServer(t)
 	wh := loginWeb(t, s)
+	startTestIntelRunner(t, s)
 
 	// A reachable node target (keeps reachable=true).
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -288,13 +316,13 @@ func TestIntelRunRemoteNode(t *testing.T) {
 		t.Fatalf("create node: %s", rec.Body.String())
 	}
 
-	old := envagent.RunSSH
-	defer func() { envagent.RunSSH = old }()
+	old := envagent.RunCommandOn
+	defer func() { envagent.RunCommandOn = old }()
 	called := false
 	var sshArgs []string
-	envagent.RunSSH = func(ctx context.Context, args ...string) (string, error) {
+	envagent.RunCommandOn = func(ctx context.Context, host string, port int, user, authText, command string) (string, error) {
 		called = true
-		sshArgs = args
+		sshArgs = []string{host, strconv.Itoa(port), user, command}
 		return `{"Action":"pass","Test":"TestPing","Package":"demo","Elapsed":0.01}
 `, nil
 	}
@@ -304,10 +332,10 @@ func TestIntelRunRemoteNode(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("remote run status %d: %s", rec.Code, rec.Body.String())
 	}
-	// 异步执行：等待后台任务真正路由到 RunSSH。
-	waitIntelCondition(t, func() bool { return called }, "RunSSH 未在后台任务中被调用")
+	// 异步执行：等待后台任务真正路由到 RunCommandOn。
+	waitIntelCondition(t, func() bool { return called }, "RunCommandOn 未在后台任务中被调用")
 	if !called {
-		t.Error("RunSSH was not invoked (run did not route to node)")
+		t.Error("RunCommandOn was not invoked (run did not route to node)")
 	}
 	joined := strings.Join(sshArgs, " ")
 	if !strings.Contains(joined, "127.0.0.1") {
@@ -327,6 +355,7 @@ func TestIntelRunRemoteNode(t *testing.T) {
 func TestIntelRunCancel(t *testing.T) {
 	s := newTestServer(t)
 	wh := loginWeb(t, s)
+	startTestIntelRunner(t, s)
 
 	// A reachable node target (keeps reachable=true).
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -364,10 +393,10 @@ func TestIntelRunCancel(t *testing.T) {
 		t.Fatalf("create node: %s", rec.Body.String())
 	}
 
-	// RunSSH blocks until its ctx is cancelled, letting us cancel mid-run.
-	old := envagent.RunSSH
-	defer func() { envagent.RunSSH = old }()
-	envagent.RunSSH = func(ctx context.Context, args ...string) (string, error) {
+	// RunCommandOn blocks until its ctx is cancelled, letting us cancel mid-run.
+	old := envagent.RunCommandOn
+	defer func() { envagent.RunCommandOn = old }()
+	envagent.RunCommandOn = func(ctx context.Context, host string, port int, user, authText, command string) (string, error) {
 		<-ctx.Done()
 		return "", ctx.Err()
 	}
@@ -695,31 +724,6 @@ func TestRemoteCapabilityRouting(t *testing.T) {
 	}
 }
 
-// intelTarGzBytes encodes a path->content map as a gzip tar byte stream, the
-// shape a remote `tar -czf - ...` pull produces (used to stub envagent.RunSSH
-// for remote report pull-back).
-func intelTarGzBytes(t *testing.T, files map[string]string) []byte {
-	t.Helper()
-	var buf bytes.Buffer
-	gz := gzip.NewWriter(&buf)
-	tw := tar.NewWriter(gz)
-	for name, content := range files {
-		if err := tw.WriteHeader(&tar.Header{Name: name, Mode: 0o644, Size: int64(len(content)), Typeflag: tar.TypeReg}); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := tw.Write([]byte(content)); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := tw.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if err := gz.Close(); err != nil {
-		t.Fatal(err)
-	}
-	return buf.Bytes()
-}
-
 // TestRemoteReportPullParsesSurefire verifies the report pull-back plumbing: a
 // remote surefire TEST-*.xml fetched as a path->bytes map materializes into a
 // temp dir that parseReport then reads into per-case results.
@@ -770,6 +774,7 @@ func TestRemoteReportPullParsesSurefire(t *testing.T) {
 func TestIntelRunRemoteEndRepoWD(t *testing.T) {
 	s := newTestServer(t)
 	wh := loginWeb(t, s)
+	startTestIntelRunner(t, s)
 
 	// A reachable node target (keeps reachable=true).
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -837,11 +842,11 @@ func TestIntelRunRemoteEndRepoWD(t *testing.T) {
 		t.Fatalf("create node: %s", rec.Body.String())
 	}
 
-	old := envagent.RunSSH
-	defer func() { envagent.RunSSH = old }()
+	old := envagent.RunCommandOn
+	defer func() { envagent.RunCommandOn = old }()
 	var sshArgs []string
-	envagent.RunSSH = func(ctx context.Context, args ...string) (string, error) {
-		sshArgs = args
+	envagent.RunCommandOn = func(ctx context.Context, host string, port int, user, authText, command string) (string, error) {
+		sshArgs = []string{host, strconv.Itoa(port), user, command}
 		return `{"Action":"pass","Test":"TestPing","Package":"demo","Elapsed":0.01}
 `, nil
 	}
@@ -851,7 +856,7 @@ func TestIntelRunRemoteEndRepoWD(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("remote run status %d: %s", rec.Code, rec.Body.String())
 	}
-	waitIntelCondition(t, func() bool { return len(sshArgs) > 0 }, "RunSSH 未在后台任务中被调用")
+	waitIntelCondition(t, func() bool { return len(sshArgs) > 0 }, "RunCommandOn 未在后台任务中被调用")
 	joined := strings.Join(sshArgs, " ")
 	// The module's repo-relative path ("core") must be appended to WorkDir.
 	if !strings.Contains(joined, "cd /srv/end/core &&") {
@@ -868,6 +873,7 @@ func TestIntelRunRemoteEndRepoWD(t *testing.T) {
 func TestIntelRunAutoPickNode(t *testing.T) {
 	s := newTestServer(t)
 	wh := loginWeb(t, s)
+	startTestIntelRunner(t, s)
 
 	// A reachable node target (keeps reachable=true).
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -901,11 +907,11 @@ func TestIntelRunAutoPickNode(t *testing.T) {
 		t.Fatalf("create node: %s", rec.Body.String())
 	}
 
-	old := envagent.RunSSH
-	defer func() { envagent.RunSSH = old }()
+	old := envagent.RunCommandOn
+	defer func() { envagent.RunCommandOn = old }()
 	var sshArgs []string
-	envagent.RunSSH = func(ctx context.Context, args ...string) (string, error) {
-		sshArgs = args
+	envagent.RunCommandOn = func(ctx context.Context, host string, port int, user, authText, command string) (string, error) {
+		sshArgs = []string{host, strconv.Itoa(port), user, command}
 		return `{"Action":"pass","Test":"TestPing","Package":"demo","Elapsed":0.01}
 `, nil
 	}
@@ -916,7 +922,7 @@ func TestIntelRunAutoPickNode(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("auto-pick run status %d: %s", rec.Code, rec.Body.String())
 	}
-	waitIntelCondition(t, func() bool { return len(sshArgs) > 0 }, "RunSSH 未在后台任务中被调用（未路由到自动选择的节点）")
+	waitIntelCondition(t, func() bool { return len(sshArgs) > 0 }, "RunCommandOn 未在后台任务中被调用（未路由到自动选择的节点）")
 	joined := strings.Join(sshArgs, " ")
 	if !strings.Contains(joined, "cd /srv/go &&") {
 		t.Errorf("ssh args workDir wrong: %v", sshArgs)
@@ -934,6 +940,7 @@ func TestIntelRunAutoPickNode(t *testing.T) {
 func TestIntelRunAutoPickFallbackLocal(t *testing.T) {
 	s := newTestServer(t)
 	wh := loginWeb(t, s)
+	startTestIntelRunner(t, s)
 
 	root := t.TempDir()
 	writeTestFile(t, filepath.Join(root, "go.mod"), "module demo\n\ngo 1.22\n")
@@ -997,10 +1004,10 @@ func TestIntelRunAutoPickFallbackLocal(t *testing.T) {
 		return []byte(`{"Action":"pass","Test":"TestPing","Package":"demo","Elapsed":0.01}
 `), nil
 	}
-	old := envagent.RunSSH
-	defer func() { envagent.RunSSH = old }()
+	old := envagent.RunCommandOn
+	defer func() { envagent.RunCommandOn = old }()
 	sshCalled := false
-	envagent.RunSSH = func(ctx context.Context, args ...string) (string, error) {
+	envagent.RunCommandOn = func(ctx context.Context, host string, port int, user, authText, command string) (string, error) {
 		sshCalled = true
 		return "", nil
 	}
@@ -1018,7 +1025,7 @@ func TestIntelRunAutoPickFallbackLocal(t *testing.T) {
 	_ = json.Unmarshal(rec.Body.Bytes(), &enq)
 	waitIntelCondition(t, func() bool { return called }, "本地回退未调用 runCmd")
 	if sshCalled {
-		t.Error("RunSSH 不应被调用（无匹配节点应回退本地）")
+		t.Error("RunCommandOn 不应被调用（无匹配节点应回退本地）")
 	}
 	if status := waitIntelRunFinished(t, s, wh, enq.Run.ID); status != "passed" {
 		t.Fatalf("run status = %q, want passed", status)
@@ -1032,6 +1039,7 @@ func TestIntelRunAutoPickFallbackLocal(t *testing.T) {
 func TestIntelRunRemoteSurefire(t *testing.T) {
 	s := newTestServer(t)
 	wh := loginWeb(t, s)
+	startTestIntelRunner(t, s)
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -1078,20 +1086,24 @@ public class UserTest {
 		t.Fatalf("create node: %s", rec.Body.String())
 	}
 
-	old := envagent.RunSSH
-	defer func() { envagent.RunSSH = old }()
+	old := envagent.RunCommandOn
+	defer func() { envagent.RunCommandOn = old }()
+	oldPull := envagent.PullArtifacts
+	defer func() { envagent.PullArtifacts = oldPull }()
 	surefireXML := `<testsuite name="demo.UserTest" tests="2">
   <testcase classname="demo.UserTest" name="ok" time="0.01"/>
   <testcase classname="demo.UserTest" name="boom" time="0.02"><failure message="boom">boom stack</failure></testcase>
 </testsuite>`
-	envagent.RunSSH = func(ctx context.Context, args ...string) (string, error) {
-		joined := strings.Join(args, " ")
-		if strings.Contains(joined, "tar -czf") {
-			return string(intelTarGzBytes(t, map[string]string{
-				"target/surefire-reports/TEST-demo.UserTest.xml": surefireXML,
-			})), nil
-		}
+	envagent.RunCommandOn = func(ctx context.Context, host string, port int, user, authText, command string) (string, error) {
 		return "BUILD SUCCESS", nil
+	}
+	envagent.PullArtifacts = func(ctx context.Context, host, user string, port int, workDir string, relPaths []string) (map[string][]byte, error) {
+		if len(relPaths) != 1 || relPaths[0] != "target/surefire-reports" {
+			t.Errorf("relPaths = %v, want [target/surefire-reports]", relPaths)
+		}
+		return map[string][]byte{
+			"target/surefire-reports/TEST-demo.UserTest.xml": []byte(surefireXML),
+		}, nil
 	}
 
 	rec = s.do(t, http.MethodPost, "/api/intel/run",
@@ -1130,5 +1142,297 @@ public class UserTest {
 	}
 	if passed != 1 || failed != 1 {
 		t.Fatalf("results = %d passed / %d failed, want 1/1: %s", passed, failed, rec.Body.String())
+	}
+}
+
+// TestIntelModuleRunViaExecutor verifies the single-module run is executed by
+// the shared executor's test-run worker (no standalone goroutine): the run
+// reaches "passed" and a kind=test-run tracking task is recorded as succeeded
+// with the run id in Result and the module-suffixed Name.
+func TestIntelModuleRunViaExecutor(t *testing.T) {
+	s := newTestServer(t)
+	wh := loginWeb(t, s)
+	startTestIntelRunner(t, s)
+
+	root := t.TempDir()
+	writeTestFile(t, filepath.Join(root, "go.mod"), "module demo\n\ngo 1.22\n")
+	writeTestFile(t, filepath.Join(root, "main.go"), "package main\nfunc main() {}\n")
+
+	rec := s.do(t, http.MethodPost, "/api/intel/projects",
+		`{"name":"demo","source":"local","localPath":"`+filepath.ToSlash(root)+`"}`, wh)
+	var proj struct {
+		ID int64 `json:"id"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &proj); err != nil || proj.ID == 0 {
+		t.Fatalf("create project: %s", rec.Body.String())
+	}
+	rec = s.do(t, http.MethodPost, "/api/intel/analyze",
+		`{"projectId":`+jsonInt(proj.ID)+`}`, wh)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("analyze status %d: %s", rec.Code, rec.Body.String())
+	}
+	ctx := context.Background()
+	mods, err := s.store.ListIntelModules(ctx, proj.ID)
+	if err != nil || len(mods) == 0 {
+		t.Fatalf("list modules: %v len=%d", err, len(mods))
+	}
+
+	// force bypasses the env gate so the test-run worker can drive the run
+	// regardless of the local toolchain gate.
+	rec = s.do(t, http.MethodPost, "/api/intel/run",
+		`{"projectId":`+jsonInt(proj.ID)+`,"moduleId":`+jsonInt(mods[0].ID)+`,"force":true}`, wh)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("run status %d: %s", rec.Code, rec.Body.String())
+	}
+	var enq struct {
+		Run struct {
+			ID int64 `json:"id"`
+		} `json:"run"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &enq); err != nil || enq.Run.ID == 0 {
+		t.Fatalf("run enqueue parse: %s", rec.Body.String())
+	}
+	if status := waitIntelRunFinished(t, s, wh, enq.Run.ID); status != "passed" {
+		t.Fatalf("module run status = %q, want passed", status)
+	}
+
+	// The run is mirrored on a kind=test-run tracking task that the worker
+	// completed. The single-module task carries the module-suffixed Name; the
+	// applied run id lives in the instruction Prompt (CreateTask does not
+	// persist the pre-set Result column, only the completion summary).
+	got := findIntelTrackingTask(t, s, enq.Run.ID)
+	if got == nil {
+		t.Fatalf("no kind=test-run tracking task for run %d", enq.Run.ID)
+	}
+	if got.Name != "智能测试 · 模块" {
+		t.Errorf("task name = %q, want %q", got.Name, "智能测试 · 模块")
+	}
+	if got.Status != store.TaskSucceeded {
+		t.Errorf("task status = %q, want succeeded", got.Status)
+	}
+}
+
+// TestIntelModuleRunFailingTests covers the single-module path for a suite
+// that fails: the run row reaches "failed" with per-case results recorded, and
+// the tracking task is marked succeeded (the module callback never returns the
+// execution outcome as an error — see RunIntelModuleTask).
+func TestIntelModuleRunFailingTests(t *testing.T) {
+	s := newTestServer(t)
+	wh := loginWeb(t, s)
+	startTestIntelRunner(t, s)
+
+	root := t.TempDir()
+	writeTestFile(t, filepath.Join(root, "go.mod"), "module demo\n\ngo 1.22\n")
+	writeTestFile(t, filepath.Join(root, "main.go"), "package main\nfunc main() {}\n")
+	writeTestFile(t, filepath.Join(root, "main_test.go"),
+		"package main\n\nimport \"testing\"\n\nfunc TestBoom(t *testing.T) {\n\tt.Fatal(\"boom\")\n}\n")
+
+	rec := s.do(t, http.MethodPost, "/api/intel/projects",
+		`{"name":"demo","source":"local","localPath":"`+filepath.ToSlash(root)+`"}`, wh)
+	var proj struct {
+		ID int64 `json:"id"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &proj); err != nil || proj.ID == 0 {
+		t.Fatalf("create project: %s", rec.Body.String())
+	}
+	rec = s.do(t, http.MethodPost, "/api/intel/analyze",
+		`{"projectId":`+jsonInt(proj.ID)+`}`, wh)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("analyze status %d: %s", rec.Code, rec.Body.String())
+	}
+
+	rec = s.do(t, http.MethodPost, "/api/intel/run",
+		`{"projectId":`+jsonInt(proj.ID)+`,"force":true}`, wh)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("run status %d: %s", rec.Code, rec.Body.String())
+	}
+	var enq struct {
+		Run struct {
+			ID int64 `json:"id"`
+		} `json:"run"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &enq); err != nil || enq.Run.ID == 0 {
+		t.Fatalf("run enqueue parse: %s", rec.Body.String())
+	}
+	if status := waitIntelRunFinished(t, s, wh, enq.Run.ID); status != "failed" {
+		t.Fatalf("module run status = %q, want failed", status)
+	}
+
+	// Per-case results are recorded against the run.
+	rec = s.do(t, http.MethodGet, "/api/intel/runs/"+jsonInt(enq.Run.ID), "", wh)
+	var detail struct {
+		Results []struct {
+			Endpoint string `json:"endpoint"`
+			Passed   bool   `json:"passed"`
+		} `json:"results"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &detail); err != nil {
+		t.Fatalf("run detail parse: %v", err)
+	}
+	failedCases := 0
+	for _, r := range detail.Results {
+		if !r.Passed {
+			failedCases++
+		}
+	}
+	if failedCases == 0 {
+		t.Fatalf("expected at least one failed case: %s", rec.Body.String())
+	}
+
+	// The tracking task is succeeded (module callback swallows the outcome).
+	got := findIntelTrackingTask(t, s, enq.Run.ID)
+	if got == nil {
+		t.Fatalf("no kind=test-run tracking task for run %d", enq.Run.ID)
+	}
+	if got.Status != store.TaskSucceeded {
+		t.Errorf("tracking task status = %q, want succeeded (outcome swallowed)", got.Status)
+	}
+}
+
+// TestIntelModuleRunSyncRetry exercises the runIntelJobSync internal retry: an
+// execution failure (command error) on the first attempt is retried with a
+// fresh run row up to intelMaxRunAttempts. The original attempt is marked
+// failed and the retry row carries the passing outcome. It also documents that
+// the executor's own retry would double this, which is why RunIntelModuleTask
+// never returns the outcome as an error.
+func TestIntelModuleRunSyncRetry(t *testing.T) {
+	s := newTestServer(t)
+	wh := loginWeb(t, s)
+
+	root := t.TempDir()
+	writeTestFile(t, filepath.Join(root, "go.mod"), "module demo\n\ngo 1.22\n")
+	writeTestFile(t, filepath.Join(root, "main.go"), "package main\nfunc main() {}\n")
+
+	rec := s.do(t, http.MethodPost, "/api/intel/projects",
+		`{"name":"demo","source":"local","localPath":"`+filepath.ToSlash(root)+`"}`, wh)
+	var proj struct {
+		ID int64 `json:"id"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &proj); err != nil || proj.ID == 0 {
+		t.Fatalf("create project: %s", rec.Body.String())
+	}
+	rec = s.do(t, http.MethodPost, "/api/intel/analyze",
+		`{"projectId":`+jsonInt(proj.ID)+`}`, wh)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("analyze status %d: %s", rec.Code, rec.Body.String())
+	}
+	ctx := context.Background()
+	mods, err := s.store.ListIntelModules(ctx, proj.ID)
+	if err != nil || len(mods) == 0 {
+		t.Fatalf("list modules: %v len=%d", err, len(mods))
+	}
+
+	// Create a queued run row directly (bypassing enqueueIntelRun's task
+	// creation) so runIntelJobSync is exercised in isolation.
+	run := &store.TestRun{
+		ProjectID: proj.ID,
+		ModuleID:  mods[0].ID,
+		Scope:     "module",
+		Status:    "queued",
+		Progress:  "排队中",
+	}
+	if err := s.store.CreateIntelTestRun(ctx, run); err != nil {
+		t.Fatalf("create run: %v", err)
+	}
+
+	// runCmd: first call errors (command spawn failure), second call returns
+	// passing go-test JSON. flakyRetry finds no failing case on the retry, so
+	// there is no further re-run.
+	old := runCmd
+	defer func() { runCmd = old }()
+	calls := 0
+	runCmd = func(ctx context.Context, dir, name string, args ...string) ([]byte, error) {
+		calls++
+		if calls == 1 {
+			return nil, errors.New("go: command not found")
+		}
+		return []byte(`{"Action":"pass","Test":"TestPing","Package":"demo","Elapsed":0.01}
+`), nil
+	}
+
+	if err := s.runIntelJobSync(ctx, proj.ID, mods[0].ID, 0, true, run); err != nil {
+		t.Fatalf("runIntelJobSync returned error: %v", err)
+	}
+	if calls != 2 {
+		t.Errorf("runCmd calls = %d, want 2 (attempt + retry)", calls)
+	}
+
+	runs, err := s.store.ListIntelTestRuns(ctx, proj.ID)
+	if err != nil {
+		t.Fatalf("list runs: %v", err)
+	}
+	var orig, retry *store.TestRun
+	for _, r := range runs {
+		if r.ID == run.ID {
+			orig = r
+		} else {
+			retry = r
+		}
+	}
+	if orig == nil {
+		t.Fatal("original run row not found")
+	}
+	if orig.Status != "failed" {
+		t.Errorf("original run status = %q, want failed (execution failed, retried)", orig.Status)
+	}
+	if !strings.Contains(orig.Progress, "自动重试") {
+		t.Errorf("original run progress = %q, want retry note", orig.Progress)
+	}
+	if retry == nil {
+		t.Fatal("retry run row not created")
+	}
+	if retry.Status != "passed" {
+		t.Errorf("retry run status = %q, want passed", retry.Status)
+	}
+}
+
+// TestIntelRunTaskInstrRoundTrip covers the instruction serialization: a
+// single-module instruction round-trips moduleId/nodeId; a run-all instruction
+// (no module/node) unmarshals with nil ModuleID so the dispatcher routes to
+// run-all; a root-module run carries moduleId=0 (pointer non-nil) so it still
+// routes to the module pipeline.
+func TestIntelRunTaskInstrRoundTrip(t *testing.T) {
+	mid := int64(7)
+	nid := int64(3)
+	src := intelRunTaskInstr{ProjectID: 1, RunID: 2, Force: true, ModuleID: &mid, NodeID: &nid}
+	b, err := json.Marshal(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got intelRunTaskInstr
+	if err := json.Unmarshal(b, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.ProjectID != 1 || got.RunID != 2 || !got.Force {
+		t.Errorf("round-trip base fields wrong: %+v", got)
+	}
+	if got.ModuleID == nil || *got.ModuleID != 7 {
+		t.Errorf("round-trip moduleId = %v, want 7", got.ModuleID)
+	}
+	if got.NodeID == nil || *got.NodeID != 3 {
+		t.Errorf("round-trip nodeId = %v, want 3", got.NodeID)
+	}
+
+	// A run-all instruction (as produced before the module fields existed)
+	// unmarshals with nil ModuleID/NodeID.
+	var all intelRunTaskInstr
+	if err := json.Unmarshal([]byte(`{"projectId":9,"runId":5,"force":false}`), &all); err != nil {
+		t.Fatal(err)
+	}
+	if all.ModuleID != nil || all.NodeID != nil {
+		t.Errorf("run-all instr has module/node: %+v", all)
+	}
+
+	// A root-module run (moduleId=0) keeps a non-nil pointer so the dispatcher
+	// routes it to the module pipeline, not run-all.
+	var root intelRunTaskInstr
+	if err := json.Unmarshal([]byte(`{"projectId":9,"runId":5,"force":false,"moduleId":0}`), &root); err != nil {
+		t.Fatal(err)
+	}
+	if root.ModuleID == nil {
+		t.Error("root-module instruction has nil moduleId (would misroute to run-all)")
+	}
+	if *root.ModuleID != 0 {
+		t.Errorf("root-module moduleId = %d, want 0", *root.ModuleID)
 	}
 }

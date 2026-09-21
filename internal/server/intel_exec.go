@@ -21,6 +21,7 @@ import (
 	"github.com/hiylo/starburst-backend/internal/intel/report"
 	"github.com/hiylo/starburst-backend/internal/intel/rootcause"
 	"github.com/hiylo/starburst-backend/internal/store"
+	"golang.org/x/crypto/ssh"
 )
 
 // handleIntelTestCases lists discovered test cases for a project (and optional
@@ -527,9 +528,9 @@ func (s *Server) runIntelTests(ctx context.Context, projectID, moduleID, nodeID 
 		if !strings.HasPrefix(strings.TrimSpace(command), "cd ") {
 			command = "cd " + wd + " && " + command
 		}
-		sshArgs := envagent.SSHCommandArgs(remoteNode.Host, remoteNode.User, remoteNode.Port, command)
+		// 库直连（crypto/ssh）：认证沿用节点 Auth（私钥/口令），不再起系统 ssh。
 		var out string
-		out, execErr = envagent.RunSSH(ctx, sshArgs...)
+		out, execErr = envagent.RunCommandOn(ctx, remoteNode.Host, remoteNode.Port, remoteNode.User, remoteNode.Auth, command)
 		output = []byte(out)
 	} else {
 		output, execErr = runCmd(ctx, dir, cmdArgs[0], cmdArgs[1:]...)
@@ -538,9 +539,12 @@ func (s *Server) runIntelTests(ctx context.Context, projectID, moduleID, nodeID 
 	// exit still comes with a parseable report. Bailing out on any error meant
 	// the runs that most need per-case results were exactly the ones that got
 	// none; only a command that never ran (spawn failure, cancelled ctx) is
-	// terminal here.
+	// terminal here. Remote runs surface a non-zero exit as an *ssh.ExitError
+	// (library transport), the local path as an *exec.ExitError — both count as
+	// "ran" and carry on to report parsing.
 	var exitErr *exec.ExitError
-	if execErr != nil && !errors.As(execErr, &exitErr) {
+	var sshExitErr *ssh.ExitError
+	if execErr != nil && !errors.As(execErr, &exitErr) && !errors.As(execErr, &sshExitErr) {
 		// 保留输出尾部（截断到上限），失败原因一并记录，供详情页排查。
 		run.Output = truncateOutput(output)
 		return fmt.Errorf("test command failed: %w", execErr)
@@ -603,6 +607,10 @@ func (s *Server) runIntelTests(ctx context.Context, projectID, moduleID, nodeID 
 		// command, a crash before the report was written. Not a pass.
 		run.Status = "failed"
 		run.Progress = fmt.Sprintf("命令退出码 %d，未解析到失败用例", exitErr.ExitCode())
+	case sshExitErr != nil:
+		// Remote (crypto/ssh) counterpart of the local path above.
+		run.Status = "failed"
+		run.Progress = fmt.Sprintf("命令退出码 %d，未解析到失败用例", sshExitErr.ExitStatus())
 	default:
 		run.Status = "passed"
 		run.Progress = fmt.Sprintf("通过 %d 个用例", len(results))

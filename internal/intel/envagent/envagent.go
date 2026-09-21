@@ -7,18 +7,26 @@
 package envagent
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"log"
 	"net"
 	"os"
 	"os/exec"
+	"os/user"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/hiylo/starburst-backend/internal/netguard"
+	"golang.org/x/crypto/ssh"
+	"golang.org/x/crypto/ssh/agent"
+	"golang.org/x/crypto/ssh/knownhosts"
 )
 
 // Status values for a probed environment item.
@@ -424,13 +432,64 @@ func ToolchainInstallCommand(service, version string) []string {
 	return nil
 }
 
-// RunSSH executes an ssh command against a remote node (argv direct). Tests
-// substitute a deterministic stub since real ssh needs a node.
+// RunSSH executes a command on a remote node via the library ssh client
+// (no system ssh binary). Args follow SSHCommandArgs; authentication comes from
+// the ssh-agent or default ~/.ssh keys (defaultKeyAuth), matching the old
+// system-ssh non-interactive behaviour. Tests substitute a deterministic stub.
 var RunSSH = runSSHExec
 
 func runSSHExec(ctx context.Context, args ...string) (string, error) {
-	cmd := exec.CommandContext(ctx, "ssh", args...)
-	out, err := cmd.CombinedOutput()
+	host, user, command, port, timeout, err := parseSSHArgs(args)
+	if err != nil {
+		return "", err
+	}
+	client, err := sshDialTimeout(ctx, host, port, user, "", timeout)
+	if err != nil {
+		return "", err
+	}
+	defer client.Close()
+	out, err := SSHCommand(ctx, client, command)
+	return string(out), err
+}
+
+// RunSSHStream is the streaming sibling of RunSSH: stdout chunks are handed to
+// onStdout as they are produced (edge output of long test commands) while the
+// full stdout is still returned. Args and authentication behave exactly like
+// RunSSH.
+func RunSSHStream(ctx context.Context, onStdout func([]byte), args ...string) (string, error) {
+	host, user, command, port, timeout, err := parseSSHArgs(args)
+	if err != nil {
+		return "", err
+	}
+	client, err := sshDialTimeout(ctx, host, port, user, "", timeout)
+	if err != nil {
+		return "", err
+	}
+	defer client.Close()
+	var full bytes.Buffer
+	_, err = SSHSessionOutput(ctx, client, command, func(p []byte) {
+		if onStdout != nil {
+			onStdout(p)
+		}
+		full.Write(p)
+	})
+	return full.String(), err
+}
+
+// RunCommandOn executes a command on a remote node via the library ssh client,
+// authenticating with authText (same semantics as SSHClient: private key,
+// password, or agent/default keys when empty). It is a package variable so the
+// server layer can substitute a deterministic stub in tests without dialing a
+// node.
+var RunCommandOn = runCommandOnSSH
+
+func runCommandOnSSH(ctx context.Context, host string, port int, user, authText, command string) (string, error) {
+	client, err := SSHClient(ctx, host, port, user, authText)
+	if err != nil {
+		return "", err
+	}
+	defer client.Close()
+	out, err := SSHCommand(ctx, client, command)
 	return string(out), err
 }
 
@@ -449,4 +508,311 @@ func SSHCommandArgs(host, user string, port int, command string) []string {
 	}
 	args = append(args, target, command)
 	return args
+}
+
+// DialSSH connects to a node host:port with the library ssh client, using an
+// empty authText (agent/default keys — see defaultKeyAuth), and returns the
+// connection. It is a package variable so pull tests can substitute a fake that
+// records the issued commands instead of dialing a real node.
+var DialSSH = dialSSHClient
+
+func dialSSHClient(ctx context.Context, host string, port int, user, authText string) (SSHConnection, error) {
+	return SSHClient(ctx, host, port, user, authText)
+}
+
+// sshDialTimeout dials like SSHClient but with an explicit connect budget,
+// used by the argv-compatible RunSSH/RunSSHStream path.
+func sshDialTimeout(ctx context.Context, host string, port int, user, authText string, connectTimeout time.Duration) (*ssh.Client, error) {
+	return SSHClientWithOptions(ctx, host, port, user, authText, SSHClientOptions{ConnectTimeout: connectTimeout})
+}
+
+// SSHClientOptions configures SSHClientWithOptions dialing.
+type SSHClientOptions struct {
+	// HostKeyCallback verifies the node host key; nil selects the strict
+	// known_hosts check described in hostKeyCallback.
+	HostKeyCallback ssh.HostKeyCallback
+	// HostKeyPath is the known_hosts file to load (default
+	// ~/.ssh/known_hosts). Empty falls back per hostKeyCallback.
+	HostKeyPath string
+	// ConnectTimeout bounds the TCP dial + handshake (default 10s).
+	ConnectTimeout time.Duration
+}
+
+// SSHClient dials host:port with the library ssh client and authenticates with
+// authText: a PEM/OpenSSH private key ("-----BEGIN ... PRIVATE KEY") is parsed
+// as a public-key credential, any other non-empty value is treated as a
+// password, and an empty value falls back to the ssh-agent then default ~/.ssh
+// keys. The TCP dial goes through netguard so a caller-supplied node host
+// cannot point the backend at link-local or metadata addresses.
+func SSHClient(ctx context.Context, host string, port int, user, authText string) (*ssh.Client, error) {
+	return SSHClientWithOptions(ctx, host, port, user, authText, SSHClientOptions{})
+}
+
+// SSHClientWithOptions is SSHClient with explicit connect options.
+func SSHClientWithOptions(ctx context.Context, host string, port int, user, authText string, opt SSHClientOptions) (*ssh.Client, error) {
+	if opt.ConnectTimeout <= 0 {
+		opt.ConnectTimeout = 10 * time.Second
+	}
+	methods, err := sshAuthMethods(authText)
+	if err != nil {
+		return nil, err
+	}
+	if len(methods) == 0 {
+		return nil, errors.New("envagent: 没有可用的认证方式：请填写口令/私钥，或配置 SSH_AUTH_SOCK agent / ~/.ssh 私钥")
+	}
+	if user == "" {
+		user = defaultSSHUser()
+	}
+	if opt.HostKeyCallback == nil {
+		opt.HostKeyCallback = hostKeyCallback(opt.HostKeyPath)
+	}
+	addr := net.JoinHostPort(host, strconv.Itoa(port))
+	cfg := &ssh.ClientConfig{
+		User:            user,
+		Auth:            methods,
+		HostKeyCallback: opt.HostKeyCallback,
+	}
+	ctx, cancel := context.WithTimeout(ctx, opt.ConnectTimeout)
+	defer cancel()
+	conn, err := netguard.Dial(ctx, "tcp", addr)
+	if err != nil {
+		return nil, err
+	}
+	type handshake struct {
+		cc  ssh.Conn
+		ch  <-chan ssh.NewChannel
+		req <-chan *ssh.Request
+		err error
+	}
+	done := make(chan handshake, 1)
+	go func() {
+		cc, ch, req, herr := ssh.NewClientConn(conn, addr, cfg)
+		done <- handshake{cc, ch, req, herr}
+	}()
+	select {
+	case h := <-done:
+		if h.err != nil {
+			_ = conn.Close()
+			return nil, fmt.Errorf("ssh handshake: %w", h.err)
+		}
+		return ssh.NewClient(h.cc, h.ch, h.req), nil
+	case <-ctx.Done():
+		_ = conn.Close()
+		return nil, fmt.Errorf("ssh connect %s: %w", addr, ctx.Err())
+	}
+}
+
+// hostKeyCallback returns a strict known_hosts host-key verifier for the given
+// file (default ~/.ssh/known_hosts). When the file cannot be read — typically
+// a node that has never been contacted — it falls back to accepting any key
+// with a warning. This is a documented TOFU risk put in place deliberately:
+// like the old StrictHostKeyChecking=accept-new the first contact is trusted,
+// but unlike it the key is not pinned for later connections. Once the node is
+// recorded in known_hosts, changed keys are rejected deterministically.
+func hostKeyCallback(knownHostsPath string) ssh.HostKeyCallback {
+	if knownHostsPath == "" {
+		if home, err := os.UserHomeDir(); err == nil {
+			knownHostsPath = filepath.Join(home, ".ssh", "known_hosts")
+		}
+	}
+	cb, err := knownhosts.New(knownHostsPath)
+	if err != nil {
+		log.Printf("envagent: known_hosts %q 不可读，回退为不校验 host key（TOFU 风险）：%v", knownHostsPath, err)
+		return ssh.InsecureIgnoreHostKey()
+	}
+	return cb
+}
+
+// sshAuthMethods turns a node's Auth text into ssh auth methods: a
+// PEM/OpenSSH private key ("-----BEGIN ... PRIVATE KEY") is parsed as a
+// public-key signer, any other non-empty value is used as a password, and an
+// empty value (the legacy argv path) falls back to defaultKeyAuth. A password
+// protected private key is rejected: RemoteNode.Auth carries a single text
+// field with no passphrase slot, so the admin must store an unencrypted key or
+// a password instead.
+func sshAuthMethods(authText string) ([]ssh.AuthMethod, error) {
+	authText = strings.TrimSpace(authText)
+	if strings.HasPrefix(authText, "-----BEGIN") {
+		signer, err := ssh.ParsePrivateKey([]byte(authText))
+		if err != nil {
+			var missing *ssh.PassphraseMissingError
+			if errors.As(err, &missing) {
+				return nil, errors.New("envagent: Auth 是口令加密的私钥，RemoteNode.Auth 无法携带 passphrase，请改用未加密私钥或口令认证")
+			}
+			return nil, fmt.Errorf("envagent: parse private key: %w", err)
+		}
+		return []ssh.AuthMethod{ssh.PublicKeys(signer)}, nil
+	}
+	if authText == "" {
+		return defaultKeyAuth(), nil
+	}
+	return []ssh.AuthMethod{ssh.Password(authText)}, nil
+}
+
+// defaultKeyAuth returns ssh-agent + default ~/.ssh key auth, mirroring what
+// the old system-ssh non-interactive invocation relied on (BatchMode +
+// IdentitiesOnly with no explicit identity, so only the agent) plus the common
+// default keys. nil means no credential source exists at all.
+func defaultKeyAuth() []ssh.AuthMethod {
+	if sock := os.Getenv("SSH_AUTH_SOCK"); sock != "" {
+		if conn, err := net.Dial("unix", sock); err == nil {
+			ag := agent.NewClient(conn)
+			return []ssh.AuthMethod{ssh.PublicKeysCallback(ag.Signers)}
+		}
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil
+	}
+	for _, name := range []string{"id_ed25519", "id_ecdsa", "id_rsa"} {
+		data, err := os.ReadFile(filepath.Join(home, ".ssh", name))
+		if err != nil {
+			continue
+		}
+		signer, err := ssh.ParsePrivateKey(data)
+		if err != nil {
+			continue
+		}
+		return []ssh.AuthMethod{ssh.PublicKeys(signer)}
+	}
+	return nil
+}
+
+// defaultSSHUser mirrors the system-ssh behaviour of using the local user as
+// the remote user when the node row does not configure one.
+func defaultSSHUser() string {
+	if u := os.Getenv("USER"); u != "" {
+		return u
+	}
+	if cu, err := user.Current(); err == nil && cu.Username != "" {
+		return cu.Username
+	}
+	return ""
+}
+
+// SSHConnection is the ssh client surface the command helpers need. *ssh.Client
+// satisfies it; tests substitute a recording fake.
+type SSHConnection interface {
+	NewSession() (*ssh.Session, error)
+	Close() error
+}
+
+// SSHCommand runs command on an existing ssh connection and returns its
+// combined stdout+stderr. ctx cancellation closes the session so a stalled
+// remote command cannot block the caller forever.
+func SSHCommand(ctx context.Context, c SSHConnection, command string) ([]byte, error) {
+	sess, err := c.NewSession()
+	if err != nil {
+		return nil, err
+	}
+	defer sess.Close()
+	var buf bytes.Buffer
+	sess.Stdout = &buf
+	sess.Stderr = &buf
+	errCh := make(chan error, 1)
+	go func() { errCh <- sess.Run(command) }()
+	select {
+	case err := <-errCh:
+		return buf.Bytes(), err
+	case <-ctx.Done():
+		_ = sess.Close()
+		<-errCh
+		return buf.Bytes(), ctx.Err()
+	}
+}
+
+// chunkWriter forwards each write to onChunk so a session's stdout streams out
+// in bounded chunks instead of being buffered until the command completes.
+type chunkWriter struct{ onChunk func([]byte) }
+
+func (w chunkWriter) Write(p []byte) (int, error) {
+	w.onChunk(append([]byte(nil), p...))
+	return len(p), nil
+}
+
+// SSHSessionOutput runs command on an existing ssh connection streaming stdout
+// to onStdout as chunks arrive (edge-produced output for long test commands);
+// stderr is collected and returned together with the run error. Whether the
+// exit status signals an ssh.ExitError is the caller's concern.
+func SSHSessionOutput(ctx context.Context, c SSHConnection, command string, onStdout func([]byte)) ([]byte, error) {
+	sess, err := c.NewSession()
+	if err != nil {
+		return nil, err
+	}
+	defer sess.Close()
+	var stderr bytes.Buffer
+	sess.Stderr = &stderr
+	if onStdout != nil {
+		sess.Stdout = chunkWriter{onChunk: onStdout}
+	}
+	errCh := make(chan error, 1)
+	go func() { errCh <- sess.Run(command) }()
+	select {
+	case err := <-errCh:
+		return stderr.Bytes(), err
+	case <-ctx.Done():
+		_ = sess.Close()
+		<-errCh
+		return stderr.Bytes(), ctx.Err()
+	}
+}
+
+// parseSSHArgs decodes the argv produced by SSHCommandArgs
+// ("-p port -o options... [user@]host command") back into its parts for the
+// library ssh path. Recognised options: -p port and -o ConnectTimeout=N (dial
+// budget); the remaining -o settings (BatchMode, IdentitiesOnly, ...) are
+// subsumed by the library client's always non-interactive single-command
+// session.
+func parseSSHArgs(args []string) (host, user, command string, port int, connectTimeout time.Duration, err error) {
+	port = 22
+	connectTimeout = 10 * time.Second
+	var target string
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch a {
+		case "-p":
+			if i+1 >= len(args) {
+				return "", "", "", 0, 0, errors.New("envagent: -p 缺少端口参数")
+			}
+			i++
+			p, perr := strconv.Atoi(args[i])
+			if perr != nil || p <= 0 {
+				return "", "", "", 0, 0, fmt.Errorf("envagent: 非法端口 %q", args[i])
+			}
+			port = p
+		case "-o":
+			if i+1 >= len(args) {
+				return "", "", "", 0, 0, errors.New("envagent: -o 缺少选项")
+			}
+			i++
+			if v, ok := strings.CutPrefix(args[i], "ConnectTimeout="); ok {
+				if secs, serr := strconv.Atoi(v); serr == nil && secs > 0 {
+					connectTimeout = time.Duration(secs) * time.Second
+				}
+			}
+		default:
+			if strings.HasPrefix(a, "-") {
+				continue // 其它未知开关忽略，库会话本身保证非交互
+			}
+			if target == "" {
+				target = a
+				continue
+			}
+			command = strings.Join(args[i:], " ")
+			i = len(args)
+		}
+	}
+	if target == "" {
+		return "", "", "", 0, 0, errors.New("envagent: 未找到远端目标 host")
+	}
+	if at := strings.LastIndexByte(target, '@'); at >= 0 {
+		user = target[:at]
+		host = target[at+1:]
+	} else {
+		host = target
+	}
+	if command == "" {
+		return "", "", "", 0, 0, errors.New("envagent: 缺少远端命令")
+	}
+	return host, user, command, port, connectTimeout, nil
 }

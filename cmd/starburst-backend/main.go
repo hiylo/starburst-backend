@@ -153,7 +153,10 @@ func main() {
 	// upstream OpenCode server. Runs for the lifetime of the process.
 	exec := tasks.NewExecutor(st, hub, cfg.OpenCodeURL)
 	exec.WithLLM(llmClient)
-	exec.WithIntelRunner(srv.RunIntelAllTask)
+	// RunIntelTask dispatches kind=test-run tracking tasks to the right intel
+	// pipeline: run-all (RunIntelAllTask) or single-module (RunIntelModuleTask),
+	// both executed by the shared test-run worker.
+	exec.WithIntelRunner(srv.RunIntelTask)
 	exec.WithWorkers(cfg.Workers)
 	exec.WithRetention(cfg.TaskRetention)
 	exec.WithConcurrencyCap(cfg.MaxConcurrency)

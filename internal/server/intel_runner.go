@@ -153,11 +153,16 @@ func (s *Server) intelExecMutex(projectID int64) *sync.Mutex {
 	return mu.(*sync.Mutex)
 }
 
-// enqueueIntelRun creates a queued run and executes it asynchronously. The
-// caller gets the run id immediately; progress flows through the hub and the
-// run row. Same-project runs serialize on intelExecMutex. When nodeID is 0 and
-// force is false the environment gate is checked synchronously so a gate
-// rejection surfaces to the caller before anything is enqueued. An optional
+// enqueueIntelRun creates a queued run and hands the actual execution to the
+// shared task executor: a kind=test-run tracking task is enqueued and the
+// executor's dedicated test-run worker claims it and drives the single-module
+// job through the injected RunIntelTask callback (routed to RunIntelModuleTask).
+// This mirrors how run-all is executed and buys the module run the same worker
+// pool, priority ordering, crash recovery and janitor cleanup. The caller gets
+// the run id immediately; progress flows through the hub and the run row.
+// Same-project runs serialize on intelExecMutex. When nodeID is 0 and force is
+// false the environment gate is checked synchronously so a gate rejection
+// surfaces to the caller before anything is enqueued. An optional
 // IntelRunOptions.Priority (default 0) stamps the run row for scheduling.
 func (s *Server) enqueueIntelRun(ctx context.Context, projectID, moduleID, nodeID int64, force bool, opts ...IntelRunOptions) (*store.TestRun, error) {
 	if nodeID == 0 && !force && !s.hasRemoteNodeFor(ctx, moduleID) {
@@ -177,32 +182,82 @@ func (s *Server) enqueueIntelRun(ctx context.Context, projectID, moduleID, nodeI
 		return nil, err
 	}
 	s.pushIntelRunEvent(run)
-	go s.runIntelJob(projectID, moduleID, nodeID, force, run)
+	// 追踪任务：注册为 kind=test-run 任务交给共享 executor 的 test-run worker
+	// claim 执行，在任务列表统一展示这次单模块 run 的生命周期。
+	s.trackIntelRun(ctx, run, force, nodeID)
 	return run, nil
 }
 
 // intelMaxRunAttempts bounds automatic retries of a module run whose execution
-// itself failed (command error, timeout, build failure) — a bounded substitute
-// for the full task-state-machine retry while intel stays on its own runner.
+// itself failed (command error, build failure). The retry happens synchronously
+// inside runIntelJobSync with fresh run rows; the executor never re-queues a
+// module task for an executed outcome (see RunIntelModuleTask), so this budget
+// is the single retry layer for transient execution failures.
 const intelMaxRunAttempts = 2
 
-// runIntelJob executes one queued module run under the per-project lock and
-// the global concurrency cap.
-func (s *Server) runIntelJob(projectID, moduleID, nodeID int64, force bool, run *store.TestRun) {
+// runIntelJobSync executes one queued module run under the per-project lock and
+// the global concurrency cap, synchronously in the caller's goroutine. It is
+// the executor-driven backend of the single-module run traced by
+// RunIntelModuleTask. Execution-level failures (command error, build failure)
+// are retried with fresh run rows up to intelMaxRunAttempts; test-case failures
+// are not retried (runIntelTests marks the run failed with a nil error). It
+// returns nil when the final attempt passed, otherwise an error describing the
+// terminal failure. Timeout / cancel / slot-timeout are terminal: they fail the
+// run and return immediately.
+func (s *Server) runIntelJobSync(ctx context.Context, projectID, moduleID, nodeID int64, force bool, run *store.TestRun) error {
+	for {
+		attemptErr := s.runIntelJobAttempt(ctx, projectID, moduleID, nodeID, force, run)
+		if attemptErr == nil {
+			// 执行完成：runIntelTests 已把 status 置为 passed/failed。
+			if run.Status != "passed" {
+				return fmt.Errorf("intel run %d ended with status %s", run.ID, run.Status)
+			}
+			return nil
+		}
+		// 执行异常：在 intelMaxRunAttempts 预算内新建 retry 行继续，否则终态返回。
+		if run.Attempts >= intelMaxRunAttempts {
+			return attemptErr
+		}
+		retry := &store.TestRun{
+			ProjectID: projectID,
+			ModuleID:  moduleID,
+			Scope:     "module",
+			Status:    "queued",
+			Progress:  fmt.Sprintf("自动重试（第 %d 次）", run.Attempts+1),
+			Attempts:  run.Attempts + 1,
+			Priority:  run.Priority,
+		}
+		if cerr := s.store.CreateIntelTestRun(context.Background(), retry); cerr != nil {
+			log.Printf("intel run %d retry create failed: %v", run.ID, cerr)
+			return attemptErr
+		}
+		s.pushIntelRunEvent(retry)
+		// 本次 attempt 置为终态（失败），重试结果由新 run 行承载。
+		s.failIntelRun(projectID, run, "执行异常（已自动重试，原因为 "+attemptErr.Error()+"）")
+		run = retry
+	}
+}
+
+// runIntelJobAttempt runs a module's tests once under the per-project lock and
+// the global concurrency cap. It returns nil when the test command completed
+// (run.Status is passed/failed); a non-nil error means the execution itself
+// failed (command error, build failure, timeout, cancelled context) — the
+// caller decides whether to retry with a fresh run row.
+func (s *Server) runIntelJobAttempt(ctx context.Context, projectID, moduleID, nodeID int64, force bool, run *store.TestRun) error {
 	mu := s.intelExecMutex(projectID)
 	mu.Lock()
 	defer mu.Unlock()
 
 	// 全局并发水位：拿不到槽位时保持排队状态等待。
-	semCtx, cancelSem := context.WithTimeout(context.Background(), intelRunTimeout)
+	semCtx, cancelSem := context.WithTimeout(ctx, intelRunTimeout)
 	defer cancelSem()
 	if !s.intelSem.acquire(semCtx) {
 		s.failIntelRun(projectID, run, "排队超时，未获得执行槽位")
-		return
+		return fmt.Errorf("intel run %d: 排队超时，未获得执行槽位", run.ID)
 	}
 	defer s.intelSem.release()
 
-	execCtx, cancel := context.WithTimeout(context.Background(), intelRunTimeout)
+	execCtx, cancel := context.WithTimeout(ctx, intelRunTimeout)
 	s.registerIntelCancel(run.ID, cancel)
 	defer s.unregisterIntelCancel(run.ID)
 	defer cancel()
@@ -219,35 +274,12 @@ func (s *Server) runIntelJob(projectID, moduleID, nodeID int64, force bool, run 
 	if err := s.runIntelTests(execCtx, projectID, moduleID, nodeID, force, run, nil); err != nil {
 		if execCtx.Err() != nil {
 			s.failIntelRun(projectID, run, "执行超时或已取消："+execCtx.Err().Error())
-			return
+			return fmt.Errorf("intel run %d: 执行超时或已取消：%v", run.ID, execCtx.Err())
 		}
-		// 执行异常（命令失败/构建失败）自动重试，最多 intelMaxRunAttempts 次。
-		// 测试用例失败走 run.Status=failed 且 err==nil 路径，不重试。
-		if run.Attempts < intelMaxRunAttempts {
-			retry := &store.TestRun{
-				ProjectID: projectID,
-				ModuleID:  moduleID,
-				Scope:     "module",
-				Status:    "queued",
-				Progress:  fmt.Sprintf("自动重试（第 %d 次）", run.Attempts+1),
-				Attempts:  run.Attempts + 1,
-				Priority:  run.Priority,
-			}
-			if cerr := s.store.CreateIntelTestRun(context.Background(), retry); cerr == nil {
-				s.pushIntelRunEvent(retry)
-				run.Progress = fmt.Sprintf("执行失败，已自动重试（原因为 %s）", err.Error())
-				if uerr := s.store.UpdateIntelTestRun(context.Background(), run); uerr != nil {
-					log.Printf("intel run %d retry note update: %v", run.ID, uerr)
-				}
-				go s.runIntelJob(projectID, moduleID, nodeID, force, retry)
-				return
-			} else {
-				log.Printf("intel run %d retry create failed: %v", run.ID, cerr)
-			}
-		}
-		s.failIntelRun(projectID, run, err.Error())
-		return
+		// 执行异常（命令失败/构建失败）：超时/取消已判终态，其余交由调用方决定重试。
+		return fmt.Errorf("intel run %d: %v", run.ID, err)
 	}
+	return nil
 }
 
 // failIntelRun marks a run failed with the given reason and broadcasts it.
@@ -296,7 +328,7 @@ func (s *Server) enqueueIntelRunAll(ctx context.Context, projectID int64, force 
 	s.pushIntelRunEvent(run)
 	// 追踪任务：注册为 kind=test-run 任务交给共享 executor 的 test-run worker
 	// claim 执行，在任务列表统一展示这次 run-all 的生命周期。
-	s.trackIntelRun(ctx, run, force)
+	s.trackIntelRun(ctx, run, force, 0)
 	return run, nil
 }
 
@@ -336,31 +368,51 @@ func (s *Server) hasAnyRemoteNode(ctx context.Context) bool {
 }
 
 // intelRunTaskInstr is the internal instruction JSON stored in the tracking
-// task's Prompt field. RunIntelAllTask parses it back to find the run and the
-// project that owns it, so the executor worker needs no intel-specific state.
+// task's Prompt field. The executor callback parses it back to find the run
+// and the project that owns it, so the executor worker needs no intel-specific
+// state. ModuleID and NodeID are pointers so a scope=all instruction (written
+// without either) stays byte-compatible with instructions produced before the
+// module path existed; RunIntelTask routes to the single-module pipeline when
+// ModuleID is non-nil. For a module run ModuleID is always set (even to 0, the
+// root module) so a root-module run is distinguishable from a run-all.
 type intelRunTaskInstr struct {
-	ProjectID int64 `json:"projectId"`
-	RunID     int64 `json:"runId"`
-	Force     bool  `json:"force"`
+	ProjectID int64  `json:"projectId"`
+	RunID     int64  `json:"runId"`
+	Force     bool   `json:"force"`
+	ModuleID  *int64 `json:"moduleId,omitempty"`
+	NodeID    *int64 `json:"nodeId,omitempty"`
 }
 
-// trackIntelRun mirrors a scope=all intel run as a kind=test-run task row the
-// executor claims and drives to completion, so the task list shows the run's
-// lifecycle (queued → running → succeeded/failed).
-func (s *Server) trackIntelRun(ctx context.Context, run *store.TestRun, force bool) {
-	if run.Scope != "all" {
-		return
+// trackIntelRun mirrors an intel run (scope=all or scope=module) as a
+// kind=test-run task row the executor claims and drives to completion, so the
+// task list shows the run's lifecycle (queued → running → succeeded/failed).
+// For a module run ModuleID is stamped on the instruction (and NodeID when a
+// node was selected); for a run-all only ProjectID/RunID/Force are written,
+// keeping older instruction parsers working.
+func (s *Server) trackIntelRun(ctx context.Context, run *store.TestRun, force bool, nodeID int64) {
+	instr := intelRunTaskInstr{ProjectID: run.ProjectID, RunID: run.ID, Force: force}
+	if run.Scope == "module" {
+		mid := run.ModuleID
+		instr.ModuleID = &mid
+		if nodeID > 0 {
+			nid := nodeID
+			instr.NodeID = &nid
+		}
 	}
-	instr, err := json.Marshal(intelRunTaskInstr{ProjectID: run.ProjectID, RunID: run.ID, Force: force})
+	b, err := json.Marshal(instr)
 	if err != nil {
 		log.Printf("intel track run %d marshal: %v", run.ID, err)
 		return
 	}
+	name := "智能测试 · 一键回归"
+	if run.Scope == "module" {
+		name = "智能测试 · 模块"
+	}
 	t := &store.Task{
 		ID:       newTaskID(),
 		Kind:     "test-run",
-		Name:     "智能测试 · 一键回归",
-		Prompt:   string(instr),
+		Name:     name,
+		Prompt:   string(b),
 		Priority: run.Priority,
 		Result:   strconv.FormatInt(run.ID, 10),
 	}
@@ -391,6 +443,58 @@ func (s *Server) RunIntelAllTask(ctx context.Context, t *store.Task) (string, er
 	}
 	if run.Status != "passed" {
 		return summary, fmt.Errorf("intel run-all %d ended with status %s: %s", run.ID, run.Status, summary)
+	}
+	return summary, nil
+}
+
+// RunIntelTask is the single executor callback for kind=test-run tracking
+// tasks: it dispatches on the internal instruction — a ModuleID-bearing
+// instruction (single-module run) goes to RunIntelModuleTask, everything else
+// (run-all) to RunIntelAllTask. main.go wires this one callback because the
+// executor accepts a single injected intel runner.
+func (s *Server) RunIntelTask(ctx context.Context, t *store.Task) (string, error) {
+	var instr intelRunTaskInstr
+	if err := json.Unmarshal([]byte(t.Prompt), &instr); err != nil {
+		return "", fmt.Errorf("parse intel run instruction: %w", err)
+	}
+	if instr.ModuleID != nil {
+		return s.RunIntelModuleTask(ctx, t)
+	}
+	return s.RunIntelAllTask(ctx, t)
+}
+
+// RunIntelModuleTask is the executor callback for a single-module
+// (scope=module) kind=test-run task: it decodes the instruction, loads the run
+// row and drives the runIntelJob pipeline synchronously. The run-level retry
+// (intelMaxRunAttempts) happens inside runIntelJobSync, so this callback never
+// returns an error for an executed outcome — doing so would make the executor
+// re-enqueue the whole task and re-run the pipeline, doubling the retries that
+// run-all (which has no internal retry) pays only once. It returns the run's
+// final progress summary; the run row itself carries the pass/fail result.
+func (s *Server) RunIntelModuleTask(ctx context.Context, t *store.Task) (string, error) {
+	var instr intelRunTaskInstr
+	if err := json.Unmarshal([]byte(t.Prompt), &instr); err != nil {
+		return "", fmt.Errorf("parse intel run instruction: %w", err)
+	}
+	if instr.ModuleID == nil {
+		return "", fmt.Errorf("intel module task %s: instruction missing moduleId", t.ID)
+	}
+	run, err := s.store.GetIntelTestRun(ctx, instr.RunID)
+	if err != nil {
+		return "", fmt.Errorf("load intel run %d: %w", instr.RunID, err)
+	}
+	var nodeID int64
+	if instr.NodeID != nil {
+		nodeID = *instr.NodeID
+	}
+	if err := s.runIntelJobSync(ctx, instr.ProjectID, *instr.ModuleID, nodeID, instr.Force, run); err != nil {
+		// run 行已由 runIntelJobSync/failIntelRun 置为终态；任务侧只记录摘要，
+		// 不把执行结果当作 executor 重试信号（见函数注释）。
+		log.Printf("intel module run %d: %v", run.ID, err)
+	}
+	summary := run.Progress
+	if summary == "" {
+		summary = "intel module run " + run.Status
 	}
 	return summary, nil
 }

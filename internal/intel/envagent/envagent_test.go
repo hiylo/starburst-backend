@@ -4,6 +4,9 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
+
+	"golang.org/x/crypto/ssh"
 )
 
 func TestContainerRunArgs(t *testing.T) {
@@ -134,5 +137,87 @@ func TestToolchainInstallCommand(t *testing.T) {
 	}
 	if ToolchainInstallCommand("android-sdk", "") != nil {
 		t.Error("android-sdk should have no auto-install command")
+	}
+}
+
+func TestParseSSHArgs(t *testing.T) {
+	host, user, command, port, timeout, err := parseSSHArgs(SSHCommandArgs("192.0.2.50", "runner", 2222,
+		"cd /srv && go test -count=1 ./..."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if host != "192.0.2.50" || user != "runner" || port != 2222 {
+		t.Errorf("parseSSHArgs = %q/%q/%d, want 192.0.2.50/runner/2222", host, user, port)
+	}
+	if command != "cd /srv && go test -count=1 ./..." {
+		t.Errorf("command = %q", command)
+	}
+	if timeout != 10*time.Second {
+		t.Errorf("timeout = %v, want 10s", timeout)
+	}
+
+	// Bare host (no user) defaults to port 22; ConnectTimeout is honoured.
+	host, user, _, port, timeout, err = parseSSHArgs([]string{
+		"-p", "22", "-o", "ConnectTimeout=5", "-o", "BatchMode=yes", "node.int", "true",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if host != "node.int" || user != "" || port != 22 || timeout != 5*time.Second {
+		t.Errorf("parseSSHArgs(bare) = %q/%q/%d/%v, want node.int//22/5s", host, user, port, timeout)
+	}
+}
+
+// testSSHKey is a throwaway ed25519 key generated only for these tests; it is
+// not a production credential.
+const testSSHKey = `-----BEGIN OPENSSH PRIVATE KEY-----
+b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW
+QyNTUxOQAAACC448ylQZEA5Zhv695fm/r4Q9LRdi0peAedv8pRFEiu+AAAAKhhOy5sYTsu
+bAAAAAtzc2gtZWQyNTUxOQAAACC448ylQZEA5Zhv695fm/r4Q9LRdi0peAedv8pRFEiu+A
+AAAEBUvYILe+TKCT7EO7k3c9h2EXDNV4pjLt18wnp5qMdmCLjjzKVBkQDlmG/r3l+b+vhD
+0tF2LSl4B52/ylEUSK74AAAAH3Jvb3RAaGl5bG8tUHJlY2lzaW9uLTc5MjAtVG93ZXIBAg
+MEBQY=
+-----END OPENSSH PRIVATE KEY-----
+`
+
+// testSSHKeyEncrypted is the same throwaway ed25519 key, passphrase-protected
+// with "secret-pass"; it cannot be authenticated through RemoteNode.Auth.
+const testSSHKeyEncrypted = `-----BEGIN OPENSSH PRIVATE KEY-----
+b3BlbnNzaC1rZXktdjEAAAAACmFlczI1Ni1jdHIAAAAGYmNyeXB0AAAAGAAAABCV030X6F
+voDS1UMWT+aMSyAAAAGAAAAAEAAAAzAAAAC3NzaC1lZDI1NTE5AAAAICdXBQZGTgYN5dbY
+xIrplvBzgUYNFcZ/+4fiFwyvjNwBAAAAsE/nGWob+4ucWvCN3wx36UvbUGrQ7xcNzajMyH
+Tkp9dtJtaTbxQdF05i1XfjyBkKzAKtEKCweq2+lC52gfrB2oMK+FRwyhJ4JcPCYeyH1qyT
+PT9qC2RjX8EsztfXjFJOGULUVCxNfnPx/cbM2RI+9OXUd/A8k6SwvaXvVmTZ7BGM+qJmxk
+zPjBQrrQ5pXdMo0QxZdSkcsfe224cUTuB+RLR03mMCChklTLuGv8TTTL3f
+-----END OPENSSH PRIVATE KEY-----
+`
+
+func TestSSHAuthMethods(t *testing.T) {
+	// A private key text selects public-key signer auth.
+	methods, err := sshAuthMethods(testSSHKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(methods) == 0 {
+		t.Fatal("private key produced no auth methods")
+	}
+	if _, ok := methods[0].(ssh.AuthMethod); !ok {
+		t.Errorf("unexpected auth method type: %T", methods[0])
+	}
+
+	// Any other non-empty text is treated as a password.
+	methods, err = sshAuthMethods("s3cret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(methods) != 1 {
+		t.Fatalf("password produced %d methods, want 1", len(methods))
+	}
+
+	// A password-protected private key cannot carry its passphrase in
+	// RemoteNode.Auth: it must fail with a clear error mentioning passphrase.
+	if _, err := sshAuthMethods(testSSHKeyEncrypted); err == nil ||
+		!strings.Contains(err.Error(), "passphrase") {
+		t.Errorf("encrypted key error = %v, want passphrase mention", err)
 	}
 }
