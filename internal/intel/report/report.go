@@ -9,6 +9,8 @@ import (
 	"bytes"
 	"encoding/json"
 	"encoding/xml"
+	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
 )
@@ -188,11 +190,63 @@ func (c *surefireCase) errorXML() string {
 	}
 }
 
+// reXCTestCase matches one xcodebuild "Test Case" progress line, which is the
+// native line of evidence for XCTest runs that do not produce a JUnit report:
+//
+//	Test Case '-[LoginTests testLogin]' passed (0.005 seconds).
+//	Test Case '-[MyApp.LoginTests testLogin]' failed (0.006 seconds).
+//
+// Group 1 is the "Class method" selector inside '-[', group 2 the status
+// (passed/failed/skipped), group 3 the decimal seconds. "started" lines carry
+// no trailing state and are deliberately not matched.
+var reXCTestCase = regexp.MustCompile(`Test Case '-\[([^\] ]+ [^\] ]+)\]' (passed|failed|skipped) \(([0-9]+(?:\.[0-9]+)?) seconds\)\.`)
+
 // junitTestSuites mirrors a <testsuites> root element that wraps one or more
 // <testsuite> elements, as emitted by Xcode XCTest tooling and fastlane/scan.
 // The inner suites reuse surefireSuite because the element layout is shared.
 type junitTestSuites struct {
 	Suites []surefireSuite `xml:"testsuite"`
+}
+
+// ParseXCTestConsole parses xcodebuild's own stdout "Test Case" progress lines
+// into normalized case results — the line of evidence for XCTest runs that
+// produce no JUnit XML (xcodebuild only writes .xcresult, not an XML report).
+// Each matching "Test Case '-[Class method]' (passed|failed|skipped)"
+// contributes one case: Class holds everything left of the last space
+// (bundle.Class in project-qualified form), Name the method, and the trailing
+// seconds become DurationMs. Status is taken verbatim from the line. Lines that
+// do not match (non test-case output, "started" lines, suite summaries) are
+// skipped, so a mixed xcodebuild log still parses. An empty match set is an
+// error so the caller can fall back to JUnit discovery.
+func ParseXCTestConsole(data []byte) ([]CaseResult, error) {
+	var results []CaseResult
+	for _, m := range reXCTestCase.FindAllSubmatch(data, -1) {
+		sel := string(m[1])
+		// "Class method" → split at the last space: Class keeps bundle/class
+		// (bundle.Class.method-qualified selectors come out as bundle.Class),
+		// Name the method. A selector without a space is skipped.
+		sp := strings.LastIndexByte(sel, ' ')
+		if sp <= 0 || sp == len(sel)-1 {
+			continue
+		}
+		dur := secondsToMillis(string(m[3]))
+		r := CaseResult{
+			Class:      sel[:sp],
+			Name:       sel[sp+1:],
+			Status:     string(m[2]),
+			DurationMs: dur,
+		}
+		if r.Status != "passed" {
+			// xcodebuild prints failure detail on separate lines; we keep the
+			// reported status and leave the message for the JUnit fallback.
+			r.ErrorXML = ""
+		}
+		results = append(results, r)
+	}
+	if len(results) == 0 {
+		return nil, fmt.Errorf("no xcodebuild Test Case lines in output")
+	}
+	return results, nil
 }
 
 // ParseXCTestJUnit parses an Xcode XCTest JUnit XML report (fastlane/scan or

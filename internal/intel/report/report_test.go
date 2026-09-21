@@ -470,6 +470,48 @@ func TestParseXCTestJUnit(t *testing.T) {
 	}
 }
 
+func TestParseXCTestConsole(t *testing.T) {
+	const out = `xcodebuild: note: Using new build system
+Test Suite 'All tests' started at 2026-09-21 10:00:00.000
+Test Suite 'LoginTests' started at 2026-09-21 10:00:01.000
+Test Case '-[LoginTests testValidLogin]' started.
+Test Case '-[LoginTests testValidLogin]' passed (0.123 seconds).
+Test Case '-[LoginTests testWrongPassword]' started.
+Test Case '-[LoginTests testWrongPassword]' failed (0.200 seconds).
+Test Case '-[MyApp.LoginTests testBundleLogin]' passed (0.030 seconds).
+Test Case '-[LoginTests testSkipOnSim]' skipped (0.000 seconds).
+Test Suite 'LoginTests' passed at 2026-09-21 10:00:02.000
+Executed 4 tests, with 1 failure (0 unexpected) in 0.353 seconds
+`
+	got, err := ParseXCTestConsole([]byte(out))
+	if err != nil {
+		t.Fatalf("ParseXCTestConsole() error: %v", err)
+	}
+	if len(got) != 4 {
+		t.Fatalf("ParseXCTestConsole() = %d results, want 4 (started/suite/summary lines skipped)", len(got))
+	}
+	byName := map[string]CaseResult{}
+	for _, r := range got {
+		byName[r.Name] = r
+	}
+	if r := byName["testValidLogin"]; r.Class != "LoginTests" || r.Status != "passed" || r.DurationMs != 123 {
+		t.Errorf("testValidLogin = %+v, want LoginTests passed 123ms", r)
+	}
+	if r := byName["testWrongPassword"]; r.Class != "LoginTests" || r.Status != "failed" || r.DurationMs != 200 {
+		t.Errorf("testWrongPassword = %+v, want LoginTests failed 200ms", r)
+	}
+	if r := byName["testBundleLogin"]; r.Class != "MyApp.LoginTests" || r.Name != "testBundleLogin" {
+		t.Errorf("testBundleLogin = %+v, want class MyApp.LoginTests (project-qualified)", r)
+	}
+	if r := byName["testSkipOnSim"]; r.Status != "skipped" {
+		t.Errorf("testSkipOnSim = %+v, want skipped", r)
+	}
+
+	if _, err := ParseXCTestConsole([]byte("Build succeeded\n")); err == nil {
+		t.Fatal("ParseXCTestConsole() = nil error, want error when no Test Case lines")
+	}
+}
+
 func TestParsePytestJUnit(t *testing.T) {
 	const xml = `<testsuite name="pytest" tests="6" errors="1" skipped="1" failures="1">
   <testcase classname="tests.test_math" name="test_add" time="0.01"/>

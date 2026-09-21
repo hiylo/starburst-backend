@@ -1087,8 +1087,15 @@ func parseReport(reportKind, dir string, output []byte) []*store.TestResult {
 			}
 		}
 	case "xctest":
-		// XCTest JUnit（xcodebuild/fastlane 导出）：stdout 可能是报告本身，
-		// 否则在模块下递归找 junit XML 文件（命令可能落盘）。
+		// XCTest 有两类报告来源：纯 `xcodebuild` 只产 .xcresult 而不写 XML，
+		// 其 stdout 的 "Test Case '-[Class method]' passed/failed" 进度行是原生
+		// 可解析的证据（ParseXCTestConsole）；fastlane/scan 或脚本会额外落盘
+		// JUnit XML。优先解析 stdout 进度行，失败再回退 JUnit（stdout 本身）与
+		// 递归寻找落盘的 junit 文件，兼容两类跑法。
+		if c, err := report.ParseXCTestConsole(output); err == nil {
+			cases = c
+			break
+		}
 		if c, err := report.ParseXCTestJUnit(output); err == nil && len(c) > 0 {
 			cases = c
 			break
