@@ -12,14 +12,18 @@ import (
 
 // TestFlakyRerunArgs covers the deterministic re-run command builder for every
 // supported framework combination: go filter, surefire maven -Dtest, surefire
-// gradle --tests, pytest -k and playwright --grep, plus the early-return kinds
-// that have no deterministic selector (xctest without a scheme, npm).
+// gradle --tests, pytest -k, playwright --grep (both the full-title anchor and
+// the bare-title substring fallback) and xctest with a -scheme, plus the
+// early-return kinds that have no deterministic selector (xctest without a
+// scheme, npm).
 func TestFlakyRerunArgs(t *testing.T) {
 	cases := []struct {
 		name       string
 		reportKind string
 		buildTool  string
 		names      []string
+		fullTitles []string
+		runArgs    []string
 		want       []string
 	}{
 		{
@@ -71,29 +75,63 @@ func TestFlakyRerunArgs(t *testing.T) {
 			names:      []string{"home.spec.ts.total is $42"},
 			want:       []string{"npx", "playwright", "test", "--reporter=json", "--grep", `total is \$42`},
 		},
+		{
+			name:       "playwright full title anchored",
+			reportKind: "playwright",
+			buildTool:  "npm",
+			names:      []string{"example.spec.ts.should render", "example.spec.ts.should render the modal"},
+			fullTitles: []string{"chromium example.spec.ts should render", "chromium example.spec.ts should render the modal"},
+			want:       []string{"npx", "playwright", "test", "--reporter=json", "--grep", `^chromium example\.spec\.ts should render$|^chromium example\.spec\.ts should render the modal$`},
+		},
+		{
+			name:       "playwright full title with describe chain",
+			reportKind: "playwright",
+			buildTool:  "npm",
+			names:      []string{"example.spec.ts.should login"},
+			fullTitles: []string{"chromium example.spec.ts Auth should login"},
+			want:       []string{"npx", "playwright", "test", "--reporter=json", "--grep", `^chromium example\.spec\.ts Auth should login$`},
+		},
+		{
+			name:       "playwright no full title falls back to title substring",
+			reportKind: "playwright",
+			buildTool:  "npm",
+			names:      []string{"example.spec.ts.should render", "example.spec.ts.should render the modal"},
+			fullTitles: []string{"", ""},
+			want:       []string{"npx", "playwright", "test", "--reporter=json", "--grep", `should render|should render the modal`},
+		},
+		{
+			name:       "xctest with scheme",
+			reportKind: "xctest",
+			buildTool:  "xcode",
+			names:      []string{"LoginTests.testValidLogin", "LoginTests.testWrongPassword"},
+			runArgs:    []string{"xcodebuild", "test", "-workspace", "App.xcworkspace", "-scheme", "MyApp", "-destination", "platform=iOS Simulator,name=iPhone 15"},
+			want:       []string{"xcodebuild", "test", "-scheme", "MyApp", "-workspace", "App.xcworkspace", "-destination", "platform=iOS Simulator,name=iPhone 15", "-only-testing:LoginTests/testValidLogin", "-only-testing:LoginTests/testWrongPassword"},
+		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got := flakyRerunArgs(c.reportKind, c.buildTool, c.names)
+			got := flakyRerunArgs(c.reportKind, c.buildTool, c.names, c.fullTitles, c.runArgs)
 			if !reflect.DeepEqual(got, c.want) {
-				t.Errorf("flakyRerunArgs(%q,%q,%v) = %v, want %v", c.reportKind, c.buildTool, c.names, got, c.want)
+				t.Errorf("flakyRerunArgs(%q,%q,%v,%v,%v) = %v, want %v", c.reportKind, c.buildTool, c.names, c.fullTitles, c.runArgs, got, c.want)
 			}
 		})
 	}
 
 	// Kinds without a deterministic re-run selector produce no command: xctest
-	// needs an xcodebuild -scheme that flakyRetry does not carry, npm test has
-	// no per-case selector, and surefire without a known build tool (maven or
-	// gradle) cannot select deterministically either.
+	// without an xcodebuild -scheme, npm test has no per-case selector, and
+	// surefire without a known build tool (maven or gradle) cannot select
+	// deterministically either.
 	none := []struct {
 		reportKind, buildTool string
+		runArgs               []string
 	}{
-		{"xctest", "xcode"},
-		{"npm", "npm"},
-		{"surefire", "unknown"},
+		{"xctest", "xcode", nil},
+		{"xctest", "xcode", []string{"xcodebuild", "test", "-workspace", "App.xcworkspace"}},
+		{"npm", "npm", nil},
+		{"surefire", "unknown", nil},
 	}
 	for _, c := range none {
-		if got := flakyRerunArgs(c.reportKind, c.buildTool, []string{"x"}); got != nil {
+		if got := flakyRerunArgs(c.reportKind, c.buildTool, []string{"x"}, nil, c.runArgs); got != nil {
 			t.Errorf("flakyRerunArgs(%q,%q) = %v, want nil", c.reportKind, c.buildTool, got)
 		}
 	}
@@ -180,7 +218,10 @@ func TestFlakyRetryPytest(t *testing.T) {
 
 // TestFlakyRetryPlaywright verifies the flaky chain for playwright: failed
 // cases (parsed from the JSON report as "<spec title>.<test title>") that pass
-// on the --grep re-run are marked flaky (recorded as passed).
+// on the --grep re-run are marked flaky (recorded as passed). The re-run's
+// --grep anchors the Playwright full grep title (project + spec + test,
+// recovered from the result's FailuresJSON "suite" and endpoint) with ^...$ so
+// a title that prefixes a sibling's does not drag it in.
 func TestFlakyRetryPlaywright(t *testing.T) {
 	old := runCmd
 	defer func() { runCmd = old }()
@@ -198,12 +239,12 @@ func TestFlakyRetryPlaywright(t *testing.T) {
 ]}]}]}`), nil
 	}
 	results := []*store.TestResult{
-		{Endpoint: "example.spec.ts.should render", Kind: "playwright", Passed: false, FailuresJSON: `{"error":"x"}`},
-		{Endpoint: "example.spec.ts.should submit", Kind: "playwright", Passed: false, FailuresJSON: `{"error":"y"}`},
+		{Endpoint: "example.spec.ts.should render", Kind: "playwright", Passed: false, FailuresJSON: `{"suite":"chromium","error":"x"}`},
+		{Endpoint: "example.spec.ts.should submit", Kind: "playwright", Passed: false, FailuresJSON: `{"suite":"chromium","error":"y"}`},
 	}
 	s.flakyRetry(context.Background(), 0, 0, dir, "playwright", "npm", results)
 
-	want := `npx playwright test --reporter=json --grep should render|should submit`
+	want := `npx playwright test --reporter=json --grep ^chromium example\.spec\.ts should render$|^chromium example\.spec\.ts should submit$`
 	if strings.Join(gotCmd, " ") != want {
 		t.Errorf("rerun command = %q, want %q", strings.Join(gotCmd, " "), want)
 	}
@@ -214,6 +255,105 @@ func TestFlakyRetryPlaywright(t *testing.T) {
 		if !strings.Contains(r.FailuresJSON, "flaky") {
 			t.Errorf("flaky marker missing on %s: %s", r.Endpoint, r.FailuresJSON)
 		}
+	}
+}
+
+// TestFlakyRetryPlaywrightPrefixFallback verifies the defensive fallback: when
+// the result carries no project name in FailuresJSON there is no exact full
+// title to anchor on, so the re-run keeps the previous bare-title substring
+// --grep (a title that prefixes a sibling may then re-run it, but the retry
+// still works for the common case).
+func TestFlakyRetryPlaywrightPrefixFallback(t *testing.T) {
+	old := runCmd
+	defer func() { runCmd = old }()
+	s := newTestServer(t)
+	dir := t.TempDir()
+
+	var gotCmd []string
+	runCmd = func(ctx context.Context, d, name string, args ...string) ([]byte, error) {
+		gotCmd = append([]string{name}, args...)
+		return []byte(`{"suites":[{"title":"example.spec.ts","specs":[{"title":"example.spec.ts","tests":[
+{"projectName":"chromium","title":"should render","status":"passed","duration":123,"results":[{"status":"passed","duration":123}]}
+]}]}]}`), nil
+	}
+	results := []*store.TestResult{
+		{Endpoint: "example.spec.ts.should render", Kind: "playwright", Passed: false, FailuresJSON: `{"error":"x"}`},
+		{Endpoint: "example.spec.ts.should render the modal", Kind: "playwright", Passed: false, FailuresJSON: `{"error":"y"}`},
+	}
+	s.flakyRetry(context.Background(), 0, 0, dir, "playwright", "npm", results)
+
+	want := `npx playwright test --reporter=json --grep should render|should render the modal`
+	if strings.Join(gotCmd, " ") != want {
+		t.Errorf("rerun command = %q, want %q", strings.Join(gotCmd, " "), want)
+	}
+	if !results[0].Passed {
+		t.Errorf("%s should be marked flaky-passed", results[0].Endpoint)
+	}
+	if results[1].Passed {
+		t.Errorf("%s should stay failed (missing from the re-run report)", results[1].Endpoint)
+	}
+}
+
+// TestFlakyRetryXCTest verifies the flaky chain for xctest when the executed
+// command carried an xcodebuild -scheme: the re-run selects the failed methods
+// with -only-testing:<Class>/<method>, and the passing re-run is marked flaky.
+func TestFlakyRetryXCTest(t *testing.T) {
+	old := runCmd
+	defer func() { runCmd = old }()
+	s := newTestServer(t)
+	dir := t.TempDir()
+
+	var gotCmd []string
+	runCmd = func(ctx context.Context, d, name string, args ...string) ([]byte, error) {
+		gotCmd = append([]string{name}, args...)
+		return []byte(`<testsuites>
+  <testsuite name="LoginTests" tests="2">
+    <testcase classname="LoginTests.testValidLogin" name="testValidLogin" time="0.01"/>
+    <testcase classname="LoginTests.testWrongPassword" name="testWrongPassword" time="0.02"/>
+  </testsuite>
+</testsuites>`), nil
+	}
+	results := []*store.TestResult{
+		{Endpoint: "LoginTests.testValidLogin", Kind: "xctest", Passed: false, FailuresJSON: `{"suite":"LoginTests","error":"x"}`},
+		{Endpoint: "LoginTests.testWrongPassword", Kind: "xctest", Passed: false, FailuresJSON: `{"suite":"LoginTests","error":"y"}`},
+	}
+	runArgs := []string{"xcodebuild", "test", "-workspace", "App.xcworkspace", "-scheme", "MyApp", "-destination", "platform=iOS Simulator,name=iPhone 15"}
+	s.flakyRetry(context.Background(), 0, 0, dir, "xctest", "xcode", results, runArgs...)
+
+	want := "xcodebuild test -scheme MyApp -workspace App.xcworkspace -destination platform=iOS Simulator,name=iPhone 15 -only-testing:LoginTests/testValidLogin -only-testing:LoginTests/testWrongPassword"
+	if strings.Join(gotCmd, " ") != want {
+		t.Errorf("rerun command = %q, want %q", strings.Join(gotCmd, " "), want)
+	}
+	for _, r := range results {
+		if !r.Passed {
+			t.Errorf("%s should be marked flaky-passed", r.Endpoint)
+		}
+		if !strings.Contains(r.FailuresJSON, "flaky") {
+			t.Errorf("flaky marker missing on %s: %s", r.Endpoint, r.FailuresJSON)
+		}
+	}
+}
+
+// TestFlakyRetryXCTestNoScheme verifies xctest without an xcodebuild -scheme in
+// the executed command never re-executes (the selector cannot be built).
+func TestFlakyRetryXCTestNoScheme(t *testing.T) {
+	old := runCmd
+	defer func() { runCmd = old }()
+	s := newTestServer(t)
+	calls := 0
+	runCmd = func(ctx context.Context, d, name string, args ...string) ([]byte, error) {
+		calls++
+		return []byte(""), nil
+	}
+	results := []*store.TestResult{
+		{Endpoint: "LoginTests.testValidLogin", Kind: "xctest", Passed: false},
+	}
+	s.flakyRetry(context.Background(), 0, 0, "/tmp", "xctest", "xcode", results, "xcodebuild", "test", "-workspace", "App.xcworkspace")
+	if calls != 0 {
+		t.Errorf("xctest without -scheme triggered rerun (%d calls)", calls)
+	}
+	if results[0].Passed {
+		t.Error("xctest without -scheme must not flip the case to passed")
 	}
 }
 

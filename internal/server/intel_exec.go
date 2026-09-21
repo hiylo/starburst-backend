@@ -572,7 +572,7 @@ func (s *Server) runIntelTests(ctx context.Context, projectID, moduleID, nodeID 
 		res.ProjectID = projectID
 		res.ModuleID = module.ID
 	}
-	s.flakyRetry(ctx, projectID, module.ID, dir, reportKind, module.BuildTool, results)
+	s.flakyRetry(ctx, projectID, module.ID, dir, reportKind, module.BuildTool, results, cmdArgs...)
 	// npm/other script runners produce no per-case report on stdout; synthesize a
 	// single whole-run result so the run has a definite pass/fail to display.
 	if len(results) == 0 && reportKind == "npm" {
@@ -754,14 +754,15 @@ const flakyRetryMaxRetries = 1
 // flakyRetry re-runs the failed cases once (bounded by a per-framework filter)
 // and marks the results that then pass as flaky, still recording them as
 // passed. Supported report kinds are go, surefire (maven/gradle), pytest and
-// playwright, whose per-case identifiers select deterministically; xctest and
-// npm stay out because a re-run selector cannot be built: xctest needs an
-// xcodebuild -scheme that is not carried into the flaky retry, and npm test has
-// no per-case selector at all. A build/test command failure aborts the retry
-// (no unbounded re-execution).
-func (s *Server) flakyRetry(ctx context.Context, projectID, moduleID int64, dir, reportKind, buildTool string, results []*store.TestResult) {
+// playwright, whose per-case identifiers select deterministically; xctest is
+// also re-runnable — but only when the command that actually ran carried an
+// xcodebuild -scheme, which flakyRerunArgs extracts from runArgs (the final
+// argv); without a -scheme the retry is skipped. npm stays out because it
+// exposes no per-case selector at all. A build/test command failure aborts the
+// retry (no unbounded re-execution).
+func (s *Server) flakyRetry(ctx context.Context, projectID, moduleID int64, dir, reportKind, buildTool string, results []*store.TestResult, runArgs ...string) {
 	switch reportKind {
-	case "go", "surefire", "pytest", "playwright":
+	case "go", "surefire", "pytest", "playwright", "xctest":
 	default:
 		return
 	}
@@ -773,6 +774,7 @@ func (s *Server) flakyRetry(ctx context.Context, projectID, moduleID int64, dir,
 	failed := make([]*store.TestResult, 0)
 	seen := map[string]bool{}
 	names := make([]string, 0)
+	fullTitles := make([]string, 0)
 	for _, r := range results {
 		if r == nil || r.Passed {
 			continue
@@ -785,14 +787,15 @@ func (s *Server) flakyRetry(ctx context.Context, projectID, moduleID int64, dir,
 		if n != "" && !seen[n] {
 			seen[n] = true
 			names = append(names, n)
+			fullTitles = append(fullTitles, playwrightRerunFullTitle(reportKind, r))
 		}
 	}
 	if len(failed) == 0 || len(names) == 0 {
 		return
 	}
-	args := flakyRerunArgs(reportKind, buildTool, names)
+	args := flakyRerunArgs(reportKind, buildTool, names, fullTitles, runArgs)
 	if len(args) == 0 {
-		return // surefire without a known build tool: no deterministic selector
+		return // surefire without a known build tool / xctest without -scheme: no deterministic selector
 	}
 	for attempt := 0; attempt < flakyRetryMaxRetries; attempt++ {
 		out, err := runCmd(ctx, dir, args[0], args[1:]...)
@@ -825,16 +828,45 @@ func (s *Server) flakyRetry(ctx context.Context, projectID, moduleID int64, dir,
 	}
 }
 
+// playwrightRerunFullTitle rebuilds the Playwright --grep title for a failed
+// result from what parseReport persisted: the project name (FailuresJSON
+// "suite") plus the spec title and test title encoded in the endpoint
+// ("<spec title>.<test title>"). It returns "" when any part is missing so the
+// caller falls back to the bare title substring. The describe chain is not
+// carried through store.TestResult, so tests nested in describe blocks anchor
+// at best on project+spec+test here (the report-layer CaseResult.FullTitle
+// includes the full describe chain when the report is re-parsed).
+func playwrightRerunFullTitle(reportKind string, res *store.TestResult) string {
+	if reportKind != "playwright" {
+		return ""
+	}
+	var meta struct {
+		Suite string `json:"suite"`
+	}
+	if err := json.Unmarshal([]byte(res.FailuresJSON), &meta); err != nil || meta.Suite == "" {
+		return ""
+	}
+	class, method := splitRerunName(strings.TrimPrefix(res.Endpoint, "."))
+	if class == "" || method == "" {
+		return ""
+	}
+	return meta.Suite + " " + class + " " + method
+}
+
 // flakyRerunArgs builds the argv (never a shell) for a bounded flaky re-run of
 // the failed names, each an endpoint with any leading "." stripped
 // ("Class.method" or "method"). go filters by test name regex; surefire selects
 // class#method joined by "+" for maven or repeated --tests "class.method" for
 // gradle; pytest uses the method fragment as a -k substring expression (pytest
-// matches it anywhere in the node id); playwright selects by the test title as
-// an escaped --grep regex (see the branch below for the endpoint mapping).
-// xctest and npm return nil: xcodebuild needs a -scheme that flakyRetry does
-// not carry, and npm test exposes no per-case selector.
-func flakyRerunArgs(reportKind, buildTool string, names []string) []string {
+// matches it anywhere in the node id); playwright anchors the escaped --grep
+// regex on the full title (see the branch below) so a title that prefixes a
+// sibling's no longer re-runs it. xctest re-runs the failed methods with
+// -only-testing: when runArgs carries an xcodebuild -scheme (the command that
+// actually ran, typically the whitelist or test-plan override); without one it
+// returns nil and the retry is skipped. npm has no per-case selector at all.
+// fullTitles is parallel to names: element i is the Playwright full title for
+// names[i], or "" to fall back to the bare title substring.
+func flakyRerunArgs(reportKind, buildTool string, names []string, fullTitles []string, runArgs []string) []string {
 	switch reportKind {
 	case "go":
 		return []string{"go", "test", "-count=1", "-run", "^(" + strings.Join(names, "|") + ")$", "./..."}
@@ -868,24 +900,80 @@ func flakyRerunArgs(reportKind, buildTool string, names []string) []string {
 		return []string{"pytest", "-q", "--junitxml=junit.xml", "-k", strings.Join(expr, " or ")}
 	case "playwright":
 		// ParsePlaywrightJSON maps an endpoint to "<spec title>.<test title>"
-		// (CaseResult.Class = spec title, CaseResult.Name = test title), so
-		// splitRerunName strips the spec prefix and the test title remains.
-		// Playwright's --grep regex is matched against each test's full title
-		// (spec file + describe titles + test title), which contains the test
-		// title verbatim; escaping it with regexp.QuoteMeta makes the selector
-		// exact for that title. Like pytest -k this is a substring match, so a
-		// title that prefixes another test's title re-runs that sibling too —
-		// harmless: flaky marking is keyed to the originally-failed endpoints.
-		// The build tool (npm/node) never changes the npx playwright invocation.
-		// --reporter=json is kept so parseReport can read the re-run stdout.
+		// (CaseResult.Class = spec title, CaseResult.Name = test title) and the
+		// report's FullTitle carries Playwright's grep title — the space-joined
+		// "<project name> <spec title> [<describe title>...] <test title>" that
+		// --grep is matched against (project name first). Anchoring the escaped
+		// full title with ^...$ therefore selects exactly that one test; a title
+		// that prefixes another test's no longer drags the sibling in. Without a
+		// full title (missing project/spec part) it falls back to the bare
+		// escaped title, which --grep matches as a substring (the previous
+		// behaviour). --reporter=json is kept so parseReport can read the
+		// re-run stdout; the build tool (npm/node) never changes the invocation.
 		expr := make([]string, 0, len(names))
-		for _, n := range names {
+		for i, n := range names {
+			if i < len(fullTitles) && fullTitles[i] != "" {
+				expr = append(expr, "^"+regexp.QuoteMeta(fullTitles[i])+"$")
+				continue
+			}
 			_, title := splitRerunName(n)
 			expr = append(expr, regexp.QuoteMeta(title))
 		}
 		return []string{"npx", "playwright", "test", "--reporter=json", "--grep", strings.Join(expr, "|")}
+	case "xctest":
+		// xcodebuild needs a -scheme; it comes from the command that actually
+		// ran (runArgs, the final argv), typically the whitelist or test-plan
+		// override. Without one there is no deterministic re-run, so return nil
+		// and flakyRetry skips the retry. With one, re-run just the failed
+		// methods: ParseXCTestJUnit produces classname "Class.method", so
+		// splitRerunName recovers the pair and -only-testing:<Class>/<method>
+		// pins the method (xcodebuild's shortened TestClass/TestMethod
+		// identifier form — the JUnit report does not carry the test
+		// bundle/target, so the class name leads). Selector-only flags that are
+		// unrelated to which scheme runs (workspace/project/destination etc.)
+		// are carried over so the re-run happens in the same context.
+		scheme := ""
+		for i := 0; i < len(runArgs); i++ {
+			if runArgs[i] == "-scheme" && i+1 < len(runArgs) {
+				scheme = runArgs[i+1]
+				break
+			}
+		}
+		if scheme == "" {
+			return nil
+		}
+		args := []string{"xcodebuild", "test", "-scheme", scheme}
+		for _, flag := range []string{"-workspace", "-project", "-destination", "-configuration", "-sdk", "-arch", "-derivedDataPath"} {
+			if v, ok := xcodeFlagValue(runArgs, flag); ok {
+				args = append(args, flag, v)
+			}
+		}
+		for _, n := range names {
+			class, method := splitRerunName(n)
+			sel := method
+			if class != "" {
+				sel = class + "/" + method
+			}
+			args = append(args, "-only-testing:"+sel)
+		}
+		return args
 	}
 	return nil
+}
+
+// xcodeFlagValue returns the token following flag in runArgs (the value of a
+// flag-value pair) when present.
+func xcodeFlagValue(runArgs []string, flag string) (string, bool) {
+	for i := 0; i < len(runArgs); i++ {
+		if runArgs[i] != flag {
+			continue
+		}
+		if i+1 < len(runArgs) {
+			return runArgs[i+1], true
+		}
+		break
+	}
+	return "", false
 }
 
 // splitRerunName splits a re-run selector endpoint into class and method at the

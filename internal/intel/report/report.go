@@ -15,9 +15,15 @@ import (
 
 // CaseResult is a single normalized per-test-case result.
 type CaseResult struct {
-	Suite      string `json:"suite"`
-	Class      string `json:"class"`
-	Name       string `json:"name"`
+	Suite string `json:"suite"`
+	Class string `json:"class"`
+	Name  string `json:"name"`
+	// FullTitle carries the framework-level fully qualified title of the case
+	// when the report provides one (currently only Playwright): the string
+	// `--grep` is matched against, so a flaky re-run can select exactly this
+	// case by anchoring it with ^...$. Empty for frameworks without such a
+	// notion. It is a report-layer field and is never persisted into store.
+	FullTitle  string `json:"fullTitle,omitempty"`
 	Status     string `json:"status"` // passed | failed | skipped | error
 	DurationMs int64  `json:"durationMs"`
 	ErrorXML   string `json:"errorXml"` // failure stack / error message, truncated
@@ -411,13 +417,17 @@ type playwrightReport struct {
 	Suites []playwrightSuite `json:"suites"`
 }
 
-// playwrightSuite is a top-level suite in a Playwright JSON report.
+// playwrightSuite is a suite in a Playwright JSON report. The top-level suites
+// hold one file each; describe blocks appear as nested suites (suites can nest
+// arbitrarily).
 type playwrightSuite struct {
-	Title string           `json:"title"`
-	Specs []playwrightSpec `json:"specs"`
+	Title  string            `json:"title"`
+	Specs  []playwrightSpec  `json:"specs"`
+	Suites []playwrightSuite `json:"suites"`
 }
 
-// playwrightSpec is one spec file within a suite.
+// playwrightSpec is one spec file within a suite (in this repo's normalized
+// model spec.Title is the spec file name, e.g. "example.spec.ts").
 type playwrightSpec struct {
 	Title string           `json:"title"`
 	Tests []playwrightTest `json:"tests"`
@@ -445,9 +455,15 @@ type playwrightError struct {
 	Stack   string `json:"stack"`
 }
 
-// ParsePlaywrightJSON parses a Playwright JSON report (suites → specs → tests)
-// into normalized case results. timedOut counts as an error; the duration falls
-// back to the first result's duration when the test-level value is absent.
+// ParsePlaywrightJSON parses a Playwright JSON report (suites → specs → tests,
+// with describe blocks nesting as sub-suites) into normalized case results.
+// timedOut counts as an error; the duration falls back to the first result's
+// duration when the test-level value is absent. FullTitle carries the string
+// Playwright matches its --grep regex against — the space-joined
+// "<project name> <spec title> [<describe title>...] <test title>" grep title
+// (Playwright joins test._grepTitleWithTags() parts with a space, project name
+// first) — so a flaky re-run can select exactly one test by anchoring it with
+// ^...$.
 func ParsePlaywrightJSON(data []byte) ([]CaseResult, error) {
 	var rep playwrightReport
 	if err := json.Unmarshal(data, &rep); err != nil {
@@ -455,26 +471,68 @@ func ParsePlaywrightJSON(data []byte) ([]CaseResult, error) {
 	}
 	var results []CaseResult
 	for _, s := range rep.Suites {
-		for _, spec := range s.Specs {
-			for _, t := range spec.Tests {
-				r := CaseResult{
-					Suite:      t.ProjectName,
-					Class:      spec.Title,
-					Name:       t.Title,
-					Status:     playwrightStatus(t.Status),
-					DurationMs: t.Duration,
-				}
-				if r.DurationMs == 0 && len(t.Results) > 0 {
-					r.DurationMs = t.Results[0].Duration
-				}
-				if r.Status != "passed" && len(t.Results) > 0 && t.Results[0].Error != nil {
-					r.ErrorXML = truncate(joinMsg(t.Results[0].Error.Message, t.Results[0].Error.Stack))
-				}
-				results = append(results, r)
-			}
-		}
+		results = appendPlaywrightSuite(results, s, nil)
 	}
 	return results, nil
+}
+
+// appendPlaywrightSuite flattens a (possibly nested) playwright suite into case
+// results. describe carries the titles of the enclosing describe blocks in
+// outer → inner order; the current suite's own title is never pushed here —
+// only nested suites contribute their title when recursing, and the top-level
+// file suite (whose title mirrors the spec file name) is therefore not
+// duplicated with the spec component.
+func appendPlaywrightSuite(results []CaseResult, s playwrightSuite, describe []string) []CaseResult {
+	for _, spec := range s.Specs {
+		for _, t := range spec.Tests {
+			r := CaseResult{
+				Suite:      t.ProjectName,
+				Class:      spec.Title,
+				Name:       t.Title,
+				FullTitle:  playwrightFullTitle(t.ProjectName, spec.Title, describe, t.Title),
+				Status:     playwrightStatus(t.Status),
+				DurationMs: t.Duration,
+			}
+			if r.DurationMs == 0 && len(t.Results) > 0 {
+				r.DurationMs = t.Results[0].Duration
+			}
+			if r.Status != "passed" && len(t.Results) > 0 && t.Results[0].Error != nil {
+				r.ErrorXML = truncate(joinMsg(t.Results[0].Error.Message, t.Results[0].Error.Stack))
+			}
+			results = append(results, r)
+		}
+	}
+	for _, sub := range s.Suites {
+		next := describe
+		if sub.Title != "" {
+			next = append(append([]string{}, describe...), sub.Title)
+		}
+		results = appendPlaywrightSuite(results, sub, next)
+	}
+	return results
+}
+
+// playwrightFullTitle builds the --grep match string for one test: the
+// space-joined, empty-parts-omitted "<project name> <spec title> [<describe
+// title>...] <test title>" grep title. This mirrors the string Playwright
+// matches its --grep regex against, so anchoring it with ^...$ selects a
+// single test (a title that prefixes a sibling's no longer drags it in).
+func playwrightFullTitle(project, spec string, describe []string, test string) string {
+	parts := []string{project, spec}
+	parts = append(parts, describe...)
+	parts = append(parts, test)
+	return strings.Join(nonEmptyStrings(parts), " ")
+}
+
+// nonEmptyStrings drops empty strings while preserving order.
+func nonEmptyStrings(ss []string) []string {
+	out := make([]string, 0, len(ss))
+	for _, s := range ss {
+		if s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 // playwrightStatus maps a Playwright status to a unified status; timedOut is

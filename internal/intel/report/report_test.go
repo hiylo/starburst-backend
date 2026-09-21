@@ -247,14 +247,94 @@ func TestParsePlaywrightJSON(t *testing.T) {
 	if r := byName["should render"]; r.Status != "passed" || r.DurationMs != 100 || r.Suite != "chromium" || r.Class != "example.spec.ts" {
 		t.Errorf("should render = %+v, want passed/100ms/chromium/example.spec.ts", r)
 	}
+	if r := byName["should render"]; r.FullTitle != "chromium example.spec.ts should render" {
+		t.Errorf("should render FullTitle = %q, want %q", r.FullTitle, "chromium example.spec.ts should render")
+	}
 	if r := byName["should submit"]; r.Status != "failed" || r.DurationMs != 456 || !strings.Contains(r.ErrorXML, "expect(true).toBe(false)") {
 		t.Errorf("should submit = %+v, want failed/456ms with error", r)
+	}
+	if r := byName["should submit"]; r.FullTitle != "chromium example.spec.ts should submit" {
+		t.Errorf("should submit FullTitle = %q, want %q", r.FullTitle, "chromium example.spec.ts should submit")
 	}
 	if r := byName["should skip"]; r.Status != "skipped" {
 		t.Errorf("should skip = %+v, want skipped", r)
 	}
 	if r := byName["should timeout"]; r.Status != "error" || r.DurationMs != 30000 {
 		t.Errorf("should timeout = %+v, want error/30000ms", r)
+	}
+	if r := byName["should timeout"]; r.FullTitle != "webkit example.spec.ts should timeout" {
+		t.Errorf("should timeout FullTitle = %q, want %q", r.FullTitle, "webkit example.spec.ts should timeout")
+	}
+}
+
+// TestParsePlaywrightJSONFullTitle verifies the describe-chain contribution to
+// the Playwright grep title: nested suites become space-joined describe parts
+// between the spec name and the test title, and the top-level file suite (whose
+// title mirrors the spec file name) is not duplicated.
+func TestParsePlaywrightJSONFullTitle(t *testing.T) {
+	const pwJSON = `{
+  "suites": [
+    {
+      "title": "example.spec.ts",
+      "specs": [
+        {
+          "title": "example.spec.ts",
+          "tests": [
+            {"projectName": "chromium", "title": "should render", "status": "passed", "duration": 1, "results": []}
+          ]
+        }
+      ],
+      "suites": [
+        {
+          "title": "Auth",
+          "specs": [
+            {
+              "title": "example.spec.ts",
+              "tests": [
+                {"projectName": "chromium", "title": "should login", "status": "passed", "duration": 1, "results": []},
+                {"projectName": "firefox", "title": "should logout", "status": "passed", "duration": 1, "results": []}
+              ]
+            }
+          ],
+          "suites": [
+            {
+              "title": "MFA",
+              "specs": [
+                {
+                  "title": "example.spec.ts",
+                  "tests": [
+                    {"projectName": "chromium", "title": "should verify", "status": "passed", "duration": 1, "results": []}
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}`
+	got, err := ParsePlaywrightJSON([]byte(pwJSON))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 4 {
+		t.Fatalf("got %d results, want 4", len(got))
+	}
+	byName := map[string]CaseResult{}
+	for _, r := range got {
+		byName[r.Name] = r
+	}
+	want := map[string]string{
+		"should render": "chromium example.spec.ts should render",
+		"should login":  "chromium example.spec.ts Auth should login",
+		"should logout": "firefox example.spec.ts Auth should logout",
+		"should verify": "chromium example.spec.ts Auth MFA should verify",
+	}
+	for name, full := range want {
+		if r := byName[name]; r.Class != "example.spec.ts" || r.FullTitle != full {
+			t.Errorf("%s = Class %q FullTitle %q, want class example.spec.ts and FullTitle %q", name, r.Class, r.FullTitle, full)
+		}
 	}
 }
 
