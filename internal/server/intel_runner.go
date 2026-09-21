@@ -160,7 +160,7 @@ func (s *Server) intelExecMutex(projectID int64) *sync.Mutex {
 // rejection surfaces to the caller before anything is enqueued. An optional
 // IntelRunOptions.Priority (default 0) stamps the run row for scheduling.
 func (s *Server) enqueueIntelRun(ctx context.Context, projectID, moduleID, nodeID int64, force bool, opts ...IntelRunOptions) (*store.TestRun, error) {
-	if nodeID == 0 && !force {
+	if nodeID == 0 && !force && !s.hasRemoteNodeFor(ctx, moduleID) {
 		if err := s.envGate(ctx, projectID); err != nil {
 			return nil, err
 		}
@@ -265,16 +265,20 @@ func (s *Server) failIntelRun(projectID int64, run *store.TestRun, reason string
 		log.Printf("intel run %d fail update: %v", run.ID, err)
 	}
 	s.pushIntelRunEvent(run)
-	s.syncIntelRunTask(ctx, run, "failed")
 }
 
-// enqueueIntelRunAll creates a scope=all run and executes every module's test
-// command, parallelizing across modules up to the global concurrency cap.
-// Each module gets its own run row so per-module status/progress is visible.
-// An optional IntelRunOptions.Priority (default 0) is stamped on the aggregate
-// run and inherited by each module run, ordering module execution accordingly.
+// enqueueIntelRunAll creates a scope=all run and hands the actual execution to
+// the shared task executor: a kind=test-run tracking task is enqueued and the
+// executor's dedicated test-run worker claims it and drives runIntelAll through
+// the injected RunIntelAllTask callback. This buys run-all the executor's
+// worker pool, priority ordering, dependency gating, crash recovery, bounded
+// retry and janitor cleanup without keeping a second, hand-rolled dispatcher.
+// Each module still gets its own run row so per-module status/progress is
+// visible. An optional IntelRunOptions.Priority (default 0) is stamped on the
+// aggregate run and inherited by each module run, ordering module execution
+// accordingly.
 func (s *Server) enqueueIntelRunAll(ctx context.Context, projectID int64, force bool, opts ...IntelRunOptions) (*store.TestRun, error) {
-	if !force {
+	if !force && !s.hasAnyRemoteNode(ctx) {
 		if err := s.envGate(ctx, projectID); err != nil {
 			return nil, err
 		}
@@ -290,43 +294,105 @@ func (s *Server) enqueueIntelRunAll(ctx context.Context, projectID int64, force 
 		return nil, err
 	}
 	s.pushIntelRunEvent(run)
-	// 追踪任务：在任务列表统一展示这次 run-all 的生命周期（kind=test-run 不进
-	// prompt executor，由 intel runner 自行驱动并在终态同步 status）。
-	s.trackIntelRun(ctx, run)
-	go s.runIntelAll(projectID, force, run)
+	// 追踪任务：注册为 kind=test-run 任务交给共享 executor 的 test-run worker
+	// claim 执行，在任务列表统一展示这次 run-all 的生命周期。
+	s.trackIntelRun(ctx, run, force)
 	return run, nil
 }
 
-// trackIntelRun mirrors a scope=all intel run as a kind=test-run task row so the
-// task list shows the run without the prompt executor claiming it.
-func (s *Server) trackIntelRun(ctx context.Context, run *store.TestRun) {
+// hasRemoteNodeFor reports whether a reachable remote node can run this
+// module's tests (its build tool maps to a capability a node declares). It
+// lets the enqueue-time envGate step aside so an auto-selected node drives the
+// run instead of the local toolchain; runIntelTests re-selects the node
+// deterministically when it actually executes.
+func (s *Server) hasRemoteNodeFor(ctx context.Context, moduleID int64) bool {
+	mod, err := s.store.GetIntelModule(ctx, moduleID)
+	if err != nil {
+		return false
+	}
+	need := remoteCapabilityFor(mod.BuildTool, mod.KindType)
+	if need == "" {
+		return false
+	}
+	picked, err := s.pickRemoteNode(ctx, need)
+	return err == nil && picked != nil
+}
+
+// hasAnyRemoteNode reports whether any reachable node exists. Used by run-all
+// enqueue so a local toolchain gap does not reject the whole regression when a
+// remote node could carry some modules; each module still auto-selects (or
+// falls back to the local gate) when it actually executes.
+func (s *Server) hasAnyRemoteNode(ctx context.Context) bool {
+	nodes, err := s.store.ListRemoteNodes(ctx)
+	if err != nil {
+		return false
+	}
+	for _, n := range nodes {
+		if n != nil && n.Reachable {
+			return true
+		}
+	}
+	return false
+}
+
+// intelRunTaskInstr is the internal instruction JSON stored in the tracking
+// task's Prompt field. RunIntelAllTask parses it back to find the run and the
+// project that owns it, so the executor worker needs no intel-specific state.
+type intelRunTaskInstr struct {
+	ProjectID int64 `json:"projectId"`
+	RunID     int64 `json:"runId"`
+	Force     bool  `json:"force"`
+}
+
+// trackIntelRun mirrors a scope=all intel run as a kind=test-run task row the
+// executor claims and drives to completion, so the task list shows the run's
+// lifecycle (queued → running → succeeded/failed).
+func (s *Server) trackIntelRun(ctx context.Context, run *store.TestRun, force bool) {
 	if run.Scope != "all" {
 		return
 	}
-	t := &store.Task{
-		ID:     newTaskID(),
-		Kind:   "test-run",
-		Name:   "智能测试 · 一键回归",
-		Result: strconv.FormatInt(run.ID, 10),
+	instr, err := json.Marshal(intelRunTaskInstr{ProjectID: run.ProjectID, RunID: run.ID, Force: force})
+	if err != nil {
+		log.Printf("intel track run %d marshal: %v", run.ID, err)
+		return
 	}
-	if err := s.store.CreateTaskWithStatus(ctx, t, store.TaskRunning); err != nil {
+	t := &store.Task{
+		ID:       newTaskID(),
+		Kind:     "test-run",
+		Name:     "智能测试 · 一键回归",
+		Prompt:   string(instr),
+		Priority: run.Priority,
+		Result:   strconv.FormatInt(run.ID, 10),
+	}
+	if err := s.store.CreateTask(ctx, t); err != nil {
 		log.Printf("intel track run %d task: %v", run.ID, err)
 	}
 }
 
-// syncIntelRunTask transitions the tracking task for a finished intel run to its
-// terminal state (passed→succeeded, failed/error→failed).
-func (s *Server) syncIntelRunTask(ctx context.Context, run *store.TestRun, status string) {
-	if run.Scope != "all" {
-		return
+// RunIntelAllTask is the executor callback for kind=test-run tasks: it decodes
+// the internal instruction, loads the aggregate run and drives the existing
+// runIntelAll pipeline (module listing, per-module concurrency, aggregation
+// and summary). It returns the aggregate summary, or an error when the run did
+// not pass so the executor marks the tracking task failed (and retries a
+// transient execution failure via the shared retry skeleton).
+func (s *Server) RunIntelAllTask(ctx context.Context, t *store.Task) (string, error) {
+	var instr intelRunTaskInstr
+	if err := json.Unmarshal([]byte(t.Prompt), &instr); err != nil {
+		return "", fmt.Errorf("parse intel run instruction: %w", err)
 	}
-	taskStatus := store.TaskSucceeded
-	if status != "passed" {
-		taskStatus = store.TaskFailed
+	run, err := s.store.GetIntelTestRun(ctx, instr.RunID)
+	if err != nil {
+		return "", fmt.Errorf("load intel run %d: %w", instr.RunID, err)
 	}
-	if err := s.store.UpdateTaskStatusByResult(ctx, strconv.FormatInt(run.ID, 10), taskStatus); err != nil {
-		log.Printf("intel sync run %d task: %v", run.ID, err)
+	s.runIntelAll(instr.ProjectID, instr.Force, run)
+	summary := run.Progress
+	if summary == "" {
+		summary = "intel run-all " + run.Status
 	}
+	if run.Status != "passed" {
+		return summary, fmt.Errorf("intel run-all %d ended with status %s: %s", run.ID, run.Status, summary)
+	}
+	return summary, nil
 }
 
 // runIntelAll is the background driver for a scope=all run: it serializes on
@@ -440,7 +506,6 @@ func (s *Server) finishIntelRunAll(ctx context.Context, run *store.TestRun, stat
 		log.Printf("intel run-all %d finish: %v", run.ID, err)
 	}
 	s.pushIntelRunEvent(run)
-	s.syncIntelRunTask(ctx, run, status)
 }
 
 // execIntelModule runs a single module's test as part of a run-all, returning

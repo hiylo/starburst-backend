@@ -76,8 +76,14 @@ type Store interface {
 	PurgeFinishedTasks(ctx context.Context, olderThan time.Duration, limit int) (int, int, error)
 	// GetTask loads a single task.
 	GetTask(ctx context.Context, id string) (*Task, error)
-	// ClaimNextTask picks the oldest queued task and marks it running.
+	// ClaimNextTask picks the oldest queued prompt task (kind='') and marks it
+	// running.
 	ClaimNextTask(ctx context.Context) (*Task, error)
+	// ClaimNextTaskOfKind picks the oldest queued and available task of the given
+	// kind and marks it running. kind='' selects prompt tasks (same as
+	// ClaimNextTask); a non-empty kind selects that kind's tracking tasks so a
+	// dedicated executor worker can drive them without contending for prompt slots.
+	ClaimNextTaskOfKind(ctx context.Context, kind string) (*Task, error)
 	// PromotePendingDependents re-queues every pending or blocked task waiting
 	// on upstreamID, e.g. when the upstream later succeeds after a retry.
 	// Returns the ids of the re-queued tasks.
@@ -113,7 +119,9 @@ type Store interface {
 	// UpdateTaskProgress records a progress note for a running task.
 	UpdateTaskProgress(ctx context.Context, id, progress string) error
 	// UpdateTaskStatusByResult transitions a kind=test-run tracking task by its
-	// result column (which stores the associated intel run id).
+	// result column (which stores an associated intel run id). Deprecated for
+	// executor-driven tracking tasks (CompleteTask/FailTask are now the single
+	// writers of the task status); kept for earlier callers.
 	UpdateTaskStatusByResult(ctx context.Context, result, status string) error
 	// SetTaskSession records the resolved session id for a task.
 	SetTaskSession(ctx context.Context, id, sessionID string) error

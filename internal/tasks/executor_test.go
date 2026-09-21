@@ -679,3 +679,98 @@ func TestExecutorPurgeOnceKeepsFreshTasks(t *testing.T) {
 		}
 	}
 }
+
+// TestExecutorIntelRunnerExecutesKindTask verifies a kind=test-run tracking task
+// is executed by the injected intel runner (never the prompt-session/upstream
+// path) and completed with the callback's result.
+func TestExecutorIntelRunnerExecutesKindTask(t *testing.T) {
+	exec, st, _ := newTestEnv(t, func(w http.ResponseWriter, r *http.Request) {
+		http.NotFound(w, r) // kind tasks must not touch the OpenCode upstream
+	})
+	runs := 0
+	exec.WithIntelRunner(func(ctx context.Context, tk *store.Task) (string, error) {
+		runs++
+		if tk.Kind != "test-run" {
+			t.Errorf("runner got kind %q, want test-run", tk.Kind)
+		}
+		if tk.Prompt != `{"runId":7}` {
+			t.Errorf("runner prompt = %q", tk.Prompt)
+		}
+		return "intel summary", nil
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	if err := st.CreateTask(ctx, &store.Task{ID: "kind1", Kind: "test-run", Prompt: `{"runId":7}`}); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		exec.Run(ctx)
+	}()
+
+	var got *store.Task
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		got, _ = st.GetTask(ctx, "kind1")
+		if got != nil && got.Status == store.TaskSucceeded {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	cancel()
+	<-done
+
+	if got == nil || got.Status != store.TaskSucceeded {
+		t.Fatalf("kind task did not succeed: %+v", got)
+	}
+	if got.Result != "intel summary" {
+		t.Fatalf("result = %q, want intel summary", got.Result)
+	}
+	if runs != 1 {
+		t.Fatalf("intel runner called %d times, want 1", runs)
+	}
+}
+
+// TestExecutorKindTaskNoRunnerFails verifies the defensive path: a kind=test-run
+// task without a wired intel runner is marked failed instead of stuck in limbo.
+func TestExecutorKindTaskNoRunnerFails(t *testing.T) {
+	exec, st, _ := newTestEnv(t, http.NotFound)
+	exec.WithMaxRetries(0)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	if err := st.CreateTask(ctx, &store.Task{ID: "kind_fail", Kind: "test-run", Prompt: `{"runId":8}`}); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		exec.Run(ctx)
+	}()
+
+	var got *store.Task
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		got, _ = st.GetTask(ctx, "kind_fail")
+		if got != nil && got.Status != store.TaskQueued && got.Status != store.TaskRunning {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	cancel()
+	<-done
+
+	if got == nil || got.Status != store.TaskFailed {
+		t.Fatalf("status = %q, want failed", func() any {
+			if got == nil {
+				return "nil"
+			}
+			return got.Status
+		}())
+	}
+	if !strings.Contains(got.Error, "intel runner") {
+		t.Fatalf("error = %q, want it to mention the intel runner", got.Error)
+	}
+}

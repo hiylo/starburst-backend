@@ -477,6 +477,63 @@ func TestRerunWorkflowFromFailed(t *testing.T) {
 	}
 }
 
+// TestClaimNextTaskOfKind verifies the kind-scoped claim only ever picks tasks
+// of the requested kind: a kind=test-run worker never steals a prompt task and
+// ClaimNextTask (the empty-kind claim) never steals a built-in tracking task.
+// The claim still bumps attempts and flips the row to running like the prompt
+// variant.
+func TestClaimNextTaskOfKind(t *testing.T) {
+	ctx := context.Background()
+	st := newTestStore(t)
+
+	if err := st.CreateTask(ctx, &Task{ID: "prompt1", Prompt: "p"}); err != nil {
+		t.Fatalf("create prompt: %v", err)
+	}
+	if err := st.CreateTask(ctx, &Task{ID: "tr1", Kind: "test-run", Prompt: `{"runId":1}`}); err != nil {
+		t.Fatalf("create test-run: %v", err)
+	}
+
+	got, err := st.ClaimNextTaskOfKind(ctx, "test-run")
+	if err != nil {
+		t.Fatalf("claim test-run: %v", err)
+	}
+	if got.ID != "tr1" || got.Kind != "test-run" {
+		t.Fatalf("claimed %+v, want tr1", got)
+	}
+	if got.Attempts != 1 {
+		t.Fatalf("attempts = %d, want 1", got.Attempts)
+	}
+	if got.Status != TaskRunning {
+		t.Fatalf("status = %q, want running", got.Status)
+	}
+
+	// No more test-run tasks left for this kind.
+	if _, err := st.ClaimNextTaskOfKind(ctx, "test-run"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("second kind claim err = %v, want ErrNotFound", err)
+	}
+
+	// The prompt task is still claimable through ClaimNextTask (kind='').
+	p, err := st.ClaimNextTask(ctx)
+	if err != nil {
+		t.Fatalf("claim prompt: %v", err)
+	}
+	if p.ID != "prompt1" || p.Kind != "" {
+		t.Fatalf("prompt claim = %+v, want prompt1", p)
+	}
+
+	// A fresh test-run task must stay invisible to the prompt claim path.
+	if err := st.CreateTask(ctx, &Task{ID: "tr2", Kind: "test-run", Prompt: `{"runId":2}`}); err != nil {
+		t.Fatalf("create test-run2: %v", err)
+	}
+	if _, err := st.ClaimNextTask(ctx); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("prompt claim picked up a test-run task: err=%v", err)
+	}
+	one, err := st.ClaimNextTaskOfKind(ctx, "test-run")
+	if err != nil || one.ID != "tr2" {
+		t.Fatalf("kind claim after prompt claim = %+v err=%v, want tr2", one, err)
+	}
+}
+
 func TestPurgeKeepsRecentWorkflowSteps(t *testing.T) {
 	ctx := context.Background()
 	st := newTestStore(t)

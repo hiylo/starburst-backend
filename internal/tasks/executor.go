@@ -30,12 +30,13 @@ type Executor struct {
 	hub          *push.Hub
 	openCodeBase string // base URL of the OpenCode HTTP server
 	httpClient   *http.Client
-	llm          *llm.Client   // optional orchestration LLM for summaries/self-healing
-	maxRetries   int           // additional attempts after the first failure
-	workers      int           // concurrent task executions
-	retention    time.Duration // finished-task retention; 0 keeps them forever
-	sem          chan struct{} // global concurrency cap; nil = no extra cap beyond workers
-	gateMu       sync.Mutex    // guards gates
+	llm          *llm.Client                                              // optional orchestration LLM for summaries/self-healing
+	intelRunner  func(ctx context.Context, t *store.Task) (string, error) // runs built-in tracking tasks (kind != "")
+	maxRetries   int                                                      // additional attempts after the first failure
+	workers      int                                                      // concurrent task executions
+	retention    time.Duration                                            // finished-task retention; 0 keeps them forever
+	sem          chan struct{}                                            // global concurrency cap; nil = no extra cap beyond workers
+	gateMu       sync.Mutex                                               // guards gates
 	gates        map[string]*sessionGate
 	dirGates     map[string]*sessionGate // per-directory gates for new-session tasks
 	busyMu       sync.Mutex              // guards busyCache
@@ -123,6 +124,15 @@ func (e *Executor) WithLLM(c *llm.Client) *Executor {
 	return e
 }
 
+// WithIntelRunner wires the callback that executes built-in tracking tasks
+// (kind != ""), currently the intel run-all mirror (kind=test-run). When unset,
+// such tasks are failed defensively instead of executed. Returns the receiver
+// for chaining.
+func (e *Executor) WithIntelRunner(fn func(ctx context.Context, t *store.Task) (string, error)) *Executor {
+	e.intelRunner = fn
+	return e
+}
+
 // Run is the worker pool: each worker claims one queued task and executes it,
 // repeating until ctx is canceled. It returns once every worker has drained.
 func (e *Executor) Run(ctx context.Context) {
@@ -151,11 +161,40 @@ func (e *Executor) Run(ctx context.Context) {
 			e.worker(ctx)
 		}(i)
 	}
+	// One dedicated worker claims built-in tracking tasks (kind=test-run) on
+	// its own kind-scoped loop, so intel runs never compete with prompt tasks
+	// for prompt claim slots while still sharing the executor's scheduling,
+	// retry and crash-recovery skeleton.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		e.testRunWorker(ctx)
+	}()
 	wg.Wait()
 }
 
-// worker is the claim-execute loop of a single worker goroutine.
+// worker is the claim-execute loop of a single prompt worker goroutine.
 func (e *Executor) worker(ctx context.Context) {
+	e.workerLoop(ctx, func(ctx context.Context) (*store.Task, error) {
+		return e.store.ClaimNextTask(ctx)
+	})
+}
+
+// testRunWorker is the dedicated claim-execute loop for built-in tracking
+// tasks (kind=test-run). It shares the same backoff/polling skeleton as the
+// prompt workers, but claims only its own kind so a backlog of intel runs
+// cannot preempt prompt tasks and vice versa.
+func (e *Executor) testRunWorker(ctx context.Context) {
+	e.workerLoop(ctx, func(ctx context.Context) (*store.Task, error) {
+		return e.store.ClaimNextTaskOfKind(ctx, "test-run")
+	})
+}
+
+// workerLoop is the shared claim-execute loop: claim one task of the selected
+// pool, execute it, and repeat until ctx is canceled. claim returns ErrNotFound
+// when the pool is empty, which drives exponential backoff so idle workers do
+// not hammer the claim query.
+func (e *Executor) workerLoop(ctx context.Context, claim func(context.Context) (*store.Task, error)) {
 	backoff := 2 * time.Second
 	for {
 		select {
@@ -164,7 +203,7 @@ func (e *Executor) worker(ctx context.Context) {
 		default:
 		}
 
-		t, err := e.store.ClaimNextTask(ctx)
+		t, err := claim(ctx)
 		if err != nil {
 			if errors.Is(err, store.ErrNotFound) {
 				// No work: exponential backoff (max 10s) with jitter, so idle
@@ -337,6 +376,14 @@ func (e *Executor) execute(ctx context.Context, t *store.Task) {
 
 	pushTask("running", t)
 
+	// Built-in tracking tasks (kind != "", e.g. the intel run-all mirror) are
+	// not prompt sessions: hand them to the injected intel runner instead of
+	// the OpenCode upstream. Everything else falls through to the prompt path.
+	if t.Kind != "" {
+		e.executeTracked(ctx, t, pushTask, failWithRetry)
+		return
+	}
+
 	// 单任务超时：timeout_seconds > 0 时限制本次执行总时长（超时按失败重试处理）。
 	runCtx := ctx
 	var cancelRun context.CancelFunc
@@ -400,6 +447,37 @@ func (e *Executor) execute(ctx context.Context, t *store.Task) {
 	e.resolveDependents(ctx, t.ID, true, "")
 	pushTask("succeeded", t)
 	e.pushSummary(ctx, t, result)
+}
+
+// executeTracked drives a built-in tracking task (kind != "") through the
+// injected intel runner instead of the prompt-session path. The callback is
+// responsible for actually running the tracked workload and returning a
+// human-readable result; an error falls through the same retry branch as a
+// prompt failure so transient execution errors are re-queued up to maxRetries.
+// Without a wired callback the task is failed defensively.
+func (e *Executor) executeTracked(ctx context.Context, t *store.Task, pushTask func(status string, _ *store.Task), failWithRetry func(errMsg string)) {
+	if e.intelRunner == nil {
+		failWithRetry("no intel runner wired for kind " + t.Kind)
+		return
+	}
+	runCtx := ctx
+	var cancelRun context.CancelFunc
+	if t.TimeoutSec > 0 {
+		runCtx, cancelRun = context.WithTimeout(ctx, time.Duration(t.TimeoutSec)*time.Second)
+		defer cancelRun()
+	}
+	result, err := e.intelRunner(runCtx, t)
+	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			failWithRetry(fmt.Sprintf("任务超时（%d 秒）", t.TimeoutSec))
+			return
+		}
+		failWithRetry(err.Error())
+		return
+	}
+	_ = e.store.CompleteTask(ctx, t.ID, result)
+	e.resolveDependents(ctx, t.ID, true, "")
+	pushTask("succeeded", t)
 }
 
 // resolveDependents releases or blocks the tasks that wait on id, pushing one

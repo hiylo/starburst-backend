@@ -253,3 +253,35 @@ func TestPostgresIntervalBinding(t *testing.T) {
 func TestPostgresPurgeFinishedTasks(t *testing.T) {
 	assertRetentionPurge(t, openScratchStore(t))
 }
+
+// TestPostgresClaimNextTaskOfKind guards the PostgreSQL kind-scoped claim
+// statement (FOR UPDATE SKIP LOCKED on the kind= filter): a kind=test-run claim
+// must only see its own kind and leave prompt tasks alone.
+func TestPostgresClaimNextTaskOfKind(t *testing.T) {
+	st := openScratchStore(t)
+	ctx := context.Background()
+
+	if err := st.CreateTask(ctx, &Task{ID: "pg_kind_tr", Kind: "test-run", Prompt: `{"runId":1}`}); err != nil {
+		t.Fatalf("create test-run: %v", err)
+	}
+	if err := st.CreateTask(ctx, &Task{ID: "pg_kind_prompt", Prompt: "p"}); err != nil {
+		t.Fatalf("create prompt: %v", err)
+	}
+	got, err := st.ClaimNextTaskOfKind(ctx, "test-run")
+	if err != nil {
+		t.Fatalf("kind claim: %v", err)
+	}
+	if got.ID != "pg_kind_tr" || got.Kind != "test-run" {
+		t.Fatalf("kind claim = %+v, want pg_kind_tr", got)
+	}
+	if _, err := st.ClaimNextTaskOfKind(ctx, "test-run"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("second kind claim err = %v, want ErrNotFound", err)
+	}
+	p, err := st.ClaimNextTask(ctx)
+	if err != nil {
+		t.Fatalf("prompt claim: %v", err)
+	}
+	if p.ID != "pg_kind_prompt" {
+		t.Fatalf("prompt claim = %+v, want pg_kind_prompt", p)
+	}
+}

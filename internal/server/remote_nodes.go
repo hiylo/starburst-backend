@@ -26,6 +26,34 @@ func checkNodeReachable(ctx context.Context, host string, port int) bool {
 	return true
 }
 
+// pickRemoteNode returns the first node, in node-list order, that is stored
+// reachable and whose capability labels satisfy the required label. A nil
+// result means no such node exists and is not an error — the caller falls back
+// to local execution. Only nodes that declare matching capability labels are
+// eligible: a legacy node with no labels cannot be verified to own the
+// toolchain, so auto-routing never picks it (explicit nodeID selection keeps
+// accepting legacy nodes). Selection is first-match on the stored Reachable
+// field, consistent with the explicit-node path; load-balancing across several
+// matching nodes is a future refinement.
+func (s *Server) pickRemoteNode(ctx context.Context, need string) (*store.RemoteNode, error) {
+	if need == "" {
+		return nil, nil
+	}
+	nodes, err := s.store.ListRemoteNodes(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for _, n := range nodes {
+		if n == nil || !n.Reachable {
+			continue
+		}
+		if nodeHasCapability(n.Capabilities, need) {
+			return n, nil
+		}
+	}
+	return nil, nil
+}
+
 // handleIntelNodes lists (GET) or creates (POST) remote execution nodes.
 func (s *Server) handleIntelNodes(w http.ResponseWriter, r *http.Request) {
 	if !s.requireWeb(r) {

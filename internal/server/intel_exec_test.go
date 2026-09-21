@@ -16,7 +16,25 @@ import (
 
 	"github.com/hiylo/starburst-backend/internal/intel/envagent"
 	"github.com/hiylo/starburst-backend/internal/store"
+	"github.com/hiylo/starburst-backend/internal/tasks"
 )
+
+// startTestIntelRunner wires a shared-executor worker pool that claims
+// kind=test-run tasks (the intel run-all mirror) and drives them through the
+// server's RunIntelAllTask callback. Run-all is executor-driven, so these
+// tests must run the executor for the aggregate run to actually execute. The
+// pool's prompt workers find no prompt tasks here and only idle, and retries
+// are disabled so a failing run fails the mirror deterministically without
+// re-running the suite.
+func startTestIntelRunner(t *testing.T, s *Server) {
+	t.Helper()
+	exec := tasks.NewExecutor(s.store, s.hub, "http://127.0.0.1:1")
+	exec.WithIntelRunner(s.RunIntelAllTask)
+	exec.WithMaxRetries(0)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go exec.Run(ctx)
+}
 
 // TestIntelFeatureSingleTest verifies the feature single-test: it calls a
 // feature's endpoints against a live base URL and validates the response body
@@ -443,6 +461,7 @@ func TestIntelResultRootcause(t *testing.T) {
 func TestIntelRunAll(t *testing.T) {
 	s := newTestServer(t)
 	wh := loginWeb(t, s)
+	startTestIntelRunner(t, s)
 
 	root := t.TempDir()
 	writeTestFile(t, filepath.Join(root, "go.mod"), "module demo\n\ngo 1.22\n")
@@ -511,6 +530,7 @@ func TestIntelRunAll(t *testing.T) {
 func TestIntelRunAllFailingTests(t *testing.T) {
 	s := newTestServer(t)
 	wh := loginWeb(t, s)
+	startTestIntelRunner(t, s)
 
 	root := t.TempDir()
 	writeTestFile(t, filepath.Join(root, "go.mod"), "module demo\n\ngo 1.22\n")

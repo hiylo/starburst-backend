@@ -125,9 +125,22 @@ func (s *sqlStore) GetTask(ctx context.Context, id string) (*Task, error) {
 	return t, err
 }
 
-// ClaimNextTask atomically picks the oldest queued and available task.
-// Each claim increments attempts, so retried tasks report their true run count.
+// ClaimNextTask atomically picks the oldest queued and available prompt task
+// (an empty kind) and marks it running. Each claim increments attempts, so
+// retried tasks report their true run count. It is the prompt-worker variant of
+// ClaimNextTaskOfKind and keeps the historical call contract for the executor's
+// prompt workers.
 func (s *sqlStore) ClaimNextTask(ctx context.Context) (*Task, error) {
+	return s.ClaimNextTaskOfKind(ctx, "")
+}
+
+// ClaimNextTaskOfKind atomically picks the oldest queued and available task of
+// the given kind and marks it running. Each claim increments attempts, so a
+// retried task reports its true run count. An empty kind selects ordinary
+// prompt tasks; non-empty kinds (e.g. "test-run") select built-in tracking
+// tasks so a dedicated worker can drive them without stealing slots from
+// prompt workers.
+func (s *sqlStore) ClaimNextTaskOfKind(ctx context.Context, kind string) (*Task, error) {
 	// Single statement keeps the claim atomic. The inner select differs by
 	// dialect: SQLite serializes writers so a plain select is enough, while
 	// PostgreSQL would let two concurrent claims read the same row before either
@@ -138,18 +151,18 @@ func (s *sqlStore) ClaimNextTask(ctx context.Context) (*Task, error) {
 		query = `
 		UPDATE tasks SET status = ?, attempts = attempts + 1, started_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
 		WHERE id = (
-			SELECT id FROM tasks WHERE status = ? AND kind = '' AND available_at <= CURRENT_TIMESTAMP ORDER BY priority DESC, created_at ASC LIMIT 1 FOR UPDATE SKIP LOCKED
+			SELECT id FROM tasks WHERE status = ? AND kind = ? AND available_at <= CURRENT_TIMESTAMP ORDER BY priority DESC, created_at ASC LIMIT 1 FOR UPDATE SKIP LOCKED
 		)
 		RETURNING ` + taskColumns
 	} else {
 		query = `
 		UPDATE tasks SET status = ?, attempts = attempts + 1, started_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
 		WHERE id = (
-			SELECT id FROM tasks WHERE status = ? AND kind = '' AND available_at <= CURRENT_TIMESTAMP ORDER BY priority DESC, created_at ASC LIMIT 1
+			SELECT id FROM tasks WHERE status = ? AND kind = ? AND available_at <= CURRENT_TIMESTAMP ORDER BY priority DESC, created_at ASC LIMIT 1
 		)
 		RETURNING ` + taskColumns
 	}
-	row := s.db.QueryRowContext(ctx, s.q(query), TaskRunning, TaskQueued)
+	row := s.db.QueryRowContext(ctx, s.q(query), TaskRunning, TaskQueued, kind)
 	t, err := scanTask(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
@@ -179,9 +192,12 @@ func (s *sqlStore) CompleteTask(ctx context.Context, id, result string) error {
 	return err
 }
 
-// UpdateTaskStatusByResult transitions a non-executor tracking task (kind =
-// 'test-run') whose result column stores an intel run id, so the task list
-// reflects that run's lifecycle without the executor claiming it.
+// UpdateTaskStatusByResult transitions a kind=test-run tracking task by its
+// result column (which stores an associated intel run id). Deprecated for
+// executor-driven tracking tasks: since run-all was wired into the shared task
+// executor, the executor's CompleteTask/FailTask are the single writers of the
+// task status, so this should no longer be called from the intel runner. Kept
+// for callers that predate that migration.
 func (s *sqlStore) UpdateTaskStatusByResult(ctx context.Context, result, status string) error {
 	_, err := s.db.ExecContext(ctx, s.q(`
 		UPDATE tasks SET status = ?, finished_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
