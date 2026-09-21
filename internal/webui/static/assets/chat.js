@@ -622,6 +622,11 @@ ChatView.prototype.open = async function (sessionId) {
   // 切走前把当前会话未发送的附件固化进内存草稿（文本草稿已随输入实时落库）。
   if (this.sessionId && this.sessionId !== sessionId) this.saveAtts();
   this.sessionId = sessionId;
+  // 切会话时丢弃上一会话可能在途的 fetch 的 loading 状态：否则 fetchPage 的
+  // `if (this.loading) return` 会直接跳过新会话的加载，聊天区永远停在「加载对话…」；
+  // 且旧 fetch 的 finally 因 `this.sessionId !== sid` 不会重置 loading，导致它被
+  // 永久卡死、后续所有会话都加载不出（「打开会话一直在下载会话状态」的根因）。
+  this.loading = false;
   this.turns = []; this.byMsg.clear(); this.partIx.clear();
   this.cursor = null; this.liveId = null; this.working = ""; this.unread = 0;
   this.revertTo = null;
