@@ -131,6 +131,8 @@ var migrations = []migration{
 	{name: "intel_run_attempts", apply: migrationIntelRunAttempts},
 	{name: "task_kind", apply: migrationTaskKind},
 	{name: "test_runs_priority", apply: migrationTestRunsPriority},
+	{name: "knowledge_base", apply: migrationKnowledgeBase},
+	{name: "doc_documents", apply: migrationDocDocuments},
 }
 
 // migrationIntel creates the Test Intelligence subsystem tables: flat project
@@ -1337,3 +1339,98 @@ func migrationTestRunsPriority(ctx context.Context, driver string, db *sql.DB) e
 	}
 	return nil
 }
+
+// migrationKnowledgeBase creates the generic knowledge-base tables:
+// kb_collections, kb_documents and kb_chunks. Unlike the intel project-scoped
+// index (intel_chunks), the KB is client-managed: clients upload text/markdown,
+// the backend chunks and embeds it for pgvector retrieval. On PostgreSQL the
+// embedding column is a pgvector vector with an HNSW index; on SQLite it
+// degrades to a JSON-text blob and retrieval reports ErrRagUnsupported (503),
+// matching the intel_chunks convention.
+func migrationKnowledgeBase(ctx context.Context, driver string, db *sql.DB) error {
+	embedCol := `embedding TEXT NOT NULL DEFAULT ''`
+	if isPostgres(driver) {
+		if _, err := db.ExecContext(ctx, `CREATE EXTENSION IF NOT EXISTS vector`); err != nil {
+			return err
+		}
+		embedCol = `embedding vector(` + strconv.Itoa(EmbedDim) + `) NOT NULL`
+	}
+	stmts := []string{
+		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS kb_collections (
+			%s,
+			name TEXT NOT NULL UNIQUE,
+			description TEXT NOT NULL DEFAULT '',
+			document_count INTEGER NOT NULL DEFAULT 0,
+			chunk_count INTEGER NOT NULL DEFAULT 0,
+			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+		)`, idColumn(driver)),
+		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS kb_documents (
+			%s,
+			collection_id INTEGER NOT NULL DEFAULT 0,
+			name TEXT NOT NULL DEFAULT '',
+			mime TEXT NOT NULL DEFAULT '',
+			size_bytes INTEGER NOT NULL DEFAULT 0,
+			status TEXT NOT NULL DEFAULT 'pending',
+			chunk_count INTEGER NOT NULL DEFAULT 0,
+			error TEXT NOT NULL DEFAULT '',
+			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+		)`, idColumn(driver)),
+		`CREATE INDEX IF NOT EXISTS idx_kb_documents_collection ON kb_documents(collection_id)`,
+		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS kb_chunks (
+			%s,
+			collection_id INTEGER NOT NULL DEFAULT 0,
+			document_id INTEGER NOT NULL DEFAULT 0,
+			seq INTEGER NOT NULL DEFAULT 0,
+			title TEXT NOT NULL DEFAULT '',
+			content TEXT NOT NULL DEFAULT '',
+			%s,
+			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+		)`, idColumn(driver), embedCol),
+		`CREATE INDEX IF NOT EXISTS idx_kb_chunks_doc ON kb_chunks(document_id, seq)`,
+	}
+	for _, s := range stmts {
+		if _, err := db.ExecContext(ctx, s); err != nil {
+			return err
+		}
+	}
+	if isPostgres(driver) {
+		if _, err := db.ExecContext(ctx, fmt.Sprintf(
+			`CREATE INDEX IF NOT EXISTS idx_kb_chunks_embedding
+			 ON kb_chunks USING hnsw (embedding vector_cosine_ops)`)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// migrationDocDocuments creates the generated-document registry: every docId
+// persists the originating prompt and the LLM skeleton (JSON) so the
+// chat-context-driven regenerate endpoint (docs/DOCUMENTS.md §6) can re-run
+// against the original draft. Product files live on disk under the configured
+// docs-dir, keyed by id + type extension, so the table carries no path.
+func migrationDocDocuments(ctx context.Context, driver string, db *sql.DB) error {
+	stmts := []string{
+		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS doc_documents (
+			%s,
+			name TEXT NOT NULL DEFAULT '',
+			doc_type TEXT NOT NULL DEFAULT '',
+			prompt TEXT NOT NULL DEFAULT '',
+			skeleton TEXT NOT NULL DEFAULT '',
+			size_bytes INTEGER NOT NULL DEFAULT 0,
+			status TEXT NOT NULL DEFAULT 'created',
+			error TEXT NOT NULL DEFAULT '',
+			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+		)`, idColumn(driver)),
+		`CREATE INDEX IF NOT EXISTS idx_doc_documents_created ON doc_documents(id)`,
+	}
+	for _, s := range stmts {
+		if _, err := db.ExecContext(ctx, s); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+

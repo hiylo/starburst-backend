@@ -446,8 +446,14 @@ function renderFilePart(p) {
     return `<div class="ct-imgs"><button class="ct-img" type="button" data-lightbox="${esc(p.url)}" aria-label="${esc(name)}">
       <img src="${esc(p.url)}" alt="${esc(name)}" loading="lazy"><span class="cap">${esc(name)}</span></button></div>`;
   }
+  const previewable = p.url && isPreviewableDoc(name);
   return `<div class="ct-file"><span class="ct-ico">${icon("file", 13)}</span><code>${esc(name)}</code>${
-    mime ? `<span class="chip">${esc(mime.replace("application/", "").replace("text/", ""))}</span>` : ""}</div>`;
+    mime ? `<span class="chip">${esc(mime.replace("application/", "").replace("text/", ""))}</span>` : ""}${
+    previewable ? `<button class="ghost xs" type="button" data-doc-preview="${esc(p.url)}">预览</button>` : ""}</div>`;
+}
+function isPreviewableDoc(name) {
+  const ext = String(name || "").split(".").pop().toLowerCase();
+  return ["pdf", "docx", "xlsx", "xls", "csv", "pptx"].indexOf(ext) >= 0;
 }
 
 /* ---------------- 轮次渲染 ---------------- */
@@ -1062,6 +1068,13 @@ ChatView.prototype.onClick = function (e) {
   if (cp) { if (c.copyText) c.copyText(cp.dataset.copyRaw); return; }
   const lb = t.closest("[data-lightbox]");
   if (lb) { Lightbox.show(lb.dataset.lightbox); return; }
+  const dp = t.closest("[data-doc-preview]");
+  if (dp && dp.dataset.docPreview) {
+    // 预览页是整页打开（webui 带 X-Frame-Options: DENY，不能 iframe）。
+    const base = window.location.origin + "/doc/preview.html?src=" + encodeURIComponent(dp.dataset.docPreview);
+    if (window.open) window.open(base, "_blank", "noopener"); else window.location.href = base;
+    return;
+  }
   const child = t.closest("[data-open-child]");
   if (child && child.dataset.openChild && c.openSession) c.openSession(child.dataset.openChild);
 };

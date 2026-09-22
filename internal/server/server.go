@@ -198,6 +198,9 @@ func (s *Server) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/archives/", s.handleArchiveByID)
 	// OpenCode 镜像代理：/api/opencode/<path> ↔ opencode /<path>（App 后端可用时走此通道）。
 	mux.HandleFunc(OpenCodeProxyPrefix+"/", s.handleOpenCodeProxy)
+	// 上传落盘：把附件写入会话工作区 uploads/，使其成为可被 OpenCode 编辑的工作区文件。
+	// 精确模式优先于上面的前缀模式。
+	mux.HandleFunc(OpenCodeProxyPrefix+"/upload", s.handleUploadFile)
 	// 全局事件查询：App 看板拉取最近会话动态。
 	mux.HandleFunc("/api/events", s.handleEvents)
 	mux.HandleFunc("/api/unread", s.handleUnreadList)
@@ -273,6 +276,16 @@ func (s *Server) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/intel/overrides/enqueue", s.handleIntelOverrideEnqueue)
 	mux.HandleFunc("/api/intel/pending", s.handleIntelPending)
 	mux.HandleFunc("/api/intel/pending/", s.handleIntelPendingConfirm)
+	mux.HandleFunc("/api/kb/collections", s.handleKbCollections)
+	mux.HandleFunc("/api/kb/collections/", s.handleKbCollectionByID)
+	mux.HandleFunc("/api/kb/documents", s.handleKbDocuments)
+	mux.HandleFunc("/api/kb/documents/", s.handleKbDocumentByID)
+	mux.HandleFunc("/api/kb/ingest", s.handleKbIngest)
+	mux.HandleFunc("/api/kb/search", s.handleKbSearch)
+	mux.HandleFunc("/api/documents/generate", s.handleDocGenerate)
+	mux.HandleFunc("/api/documents/regenerate", s.handleDocRegenerate)
+	mux.HandleFunc("/api/documents", s.handleDocDocuments)
+	mux.HandleFunc("/api/documents/", s.handleDocDocumentByID)
 	mux.HandleFunc("/", s.handleIndex)
 }
 

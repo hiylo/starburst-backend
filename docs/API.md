@@ -1,7 +1,7 @@
 # StarBurst Backend API 契约
 
 > 供客户端（Android / Web）与后端并行开发的接口规范。Base URL 形如 `http://<host>:18880`。
-> 路由全部由标准库 `net/http.ServeMux` 注册（`internal/server/server.go` 的 `Routes`，共 98 条注册项），没有路由框架也没有中间件链，鉴权在每个 handler 内部完成。
+> 路由全部由标准库 `net/http.ServeMux` 注册（`internal/server/server.go` 的 `Routes`，共 116 条注册项），没有路由框架也没有中间件链，鉴权在每个 handler 内部完成。
 
 ## 鉴权模型
 
@@ -27,7 +27,7 @@
 | **共享密钥** | `X-Webhook-Secret` 与 `--webhook-secret` 定时比对 | 未配置密钥 → 403；缺失/不匹配 → 401 | `POST /api/webhook` |
 | **仅 APP Token** | `requireToken`：只认 `Authorization: Bearer` | 401 | `POST /api/batch`、`POST /api/llm/generate`、`POST /api/llm/complete`、`POST /api/tasks/generate`、整棵 `/api/stt/**` |
 | **仅 Web Session** | `requireWeb`：`X-Web-Session` 查库 | 401 | `DELETE /api/web/session`、`POST /api/web/password`、`GET/POST /api/llm`、`GET/POST /api/embed` |
-| **双通道** | `if !requireWeb(r) { requireToken(r) 不通过才 401 }` | 401 | 其余全部，含整棵 `/api/intel/**`、`/api/tasks/**`、`/api/projects/**`、`/api/archives/**`、`/api/rules*`、`/api/audit`、`/api/stats`、`/api/tokens*`、`/api/opencode/**` |
+| **双通道** | `if !requireWeb(r) { requireToken(r) 不通过才 401 }` | 401 | 其余全部，含整棵 `/api/intel/**`、`/api/tasks/**`、`/api/projects/**`、`/api/archives/**`、`/api/rules*`、`/api/audit`、`/api/stats`、`/api/tokens*`、`/api/opencode/**`、`/api/kb/**`、`/api/documents/**`、`/api/opencode/upload` |
 
 两处需要特别注意的例外：
 
@@ -56,6 +56,9 @@
 | 推送 | `/api/ws`、`/api/stream` | Token / WS·SSE 专用凭据 | [推送通道](#推送通道websocket)、[流式对话](#流式对话sse-中继) |
 | 镜像代理 | `/api/opencode/**` | 双通道（高危仅 Web Session） | [OpenCode 镜像代理](#opencode-镜像代理apiopencode) |
 | 测试智能 | `/api/intel/**`（56 条注册项） | 双通道 | [测试智能 API](#测试智能-apiapiintel) |
+| 知识库 | `/api/kb/**`（6 条注册项） | 双通道 | [知识库与文档](#知识库与文档v210) |
+| 文档生成 | `/api/documents/**`（4 条注册项）、`POST /api/opencode/upload` | 双通道 | [知识库与文档](#知识库与文档v210) |
+| 文档预览 | `/doc/preview.html`（webui 静态页） | 免鉴权 | [知识库与文档](#知识库与文档v210) |
 
 ## 公共端点
 
@@ -459,7 +462,7 @@ data: {"payload":{"type":"message.part.updated","properties":{...}}}
 
 ## OpenCode 镜像代理（/api/opencode/**）
 
-整棵 `/api/opencode/` 子树注册到同一个 handler（`handleOpenCodeProxy`）：**任意方法、任意上游路径**都剥掉前缀后转发给本机 OpenCode，上游的状态码/响应头原样回传（只滤掉逐跳头），响应体除下文「凭据剥离」一族外也是逐字节透传。它不是 REST 接口，没有逐端点清单，下文只写代理层自身的语义。
+整棵 `/api/opencode/` 子树注册到同一个 handler（`handleOpenCodeProxy`）：**任意方法、任意上游路径**都剥掉前缀后转发给本机 OpenCode，上游的状态码/响应头原样回传（只滤掉逐跳头），响应体除下文「凭据剥离」一族外也是逐字节透传。它不是 REST 接口，没有逐端点清单，下文只写代理层自身的语义。唯一例外是 `POST /api/opencode/upload`：它以**精确模式**注册，优先于前缀模式，是本后端自己的增强通道（见「知识库与文档」章的「上传落盘」），到不了上游。
 
 - **入口鉴权**：`requireToken` **先判**，再 `requireWeb`（与本章其它端点「Web Session 优先」的顺序相反，效果同为双通道）→ 都不通过 401 `web session or APP token required`。
 - **高危上游操作仅管理员**：非 Web Session（即只用 APP Token）调用下列上游路径 → **403 `operation requires admin web session`**：`/auth`、`/auth/**`、`/pty`、`/pty/**`、`/global/dispose`、`/global/dispose/**`、`/global/config`、`/global/config/**`、`/config`、`/config/**`。理由是设备 token 一旦泄露不等于 OpenCode 全权——写 provider key、开 PTY、全局 dispose 都必须由登录后的配置页触发。读取与 permission reply（APP 远程批准）保留可用。
@@ -467,7 +470,9 @@ data: {"payload":{"type":"message.part.updated","properties":{...}}}
 - **凭据剥离**：`/config*` 与 `/provider*` 的响应（上游会在每个 provider 的 `key` 字段里原样回传明文 API Key）会在回程被整体解析并把凭据形态的字段置空——判定是**字段名后缀**匹配（去 `_`/`-`/空格 + 小写后以 `key`、`token`、`secret`、`password`、`credential`、`authorization` 等结尾），所以 `ANTHROPIC_API_KEY`、`aws_secret_access_key` 这类写法同样被抹掉；只置空非空**字符串**，`models`、`limit.context`、`capabilities`、`options.baseURL` 等结构与非字符串字段保持原样。**不看响应的 `Content-Type`**：按类型放行等于上游漏带类型就能把密钥透出去。因此这两族的响应**不再是逐字节透传**：重编码后长度变化，`Content-Length` / `Content-Encoding` 一并丢弃。空响应（204/304）只回状态码；无法解析为 JSON、或超过 16 MiB 时**宁可不转发**，直接 502 `upstream response could not be sanitized`——失败兜底走透传等于没做剥离。
 - **请求体上限**：代理转发的请求体最大 64 MiB（附件以 base64 内嵌，10 MiB 文件约 13.4 MiB JSON，留足余量）。`Content-Length` 超限直接 413 `request body too large`，分块传输由 `http.MaxBytesReader` 兜底。
 - **凭据替换**：客户端的 `Authorization` 头**不转发**（它属于本后端），上游收到的是 `opencode.Client` 自身配置的凭据。目录作用域头（`x-starburst-directory` / `x-opencode-directory`）与查询参数原样透传。
-- **一处本地增强**：`GET /session/status` 不再纯代理，而是合并上游快照与采集器的事件聚合结果（上游快照偶发漏掉 busy 会话），其余路径仍是纯转发。
+- **本地增强**：`GET /session/status` 不再纯代理，而是合并上游快照与采集器的事件聚合结果（上游快照偶发漏掉 busy 会话），其余路径仍是纯转发。
+- **RAG-in-Prompt（v2.1.0，仅 `POST /session/{id}/prompt_async`）**：转发前取请求体里最后一条用户文本去检索知识库，命中且过阈值就把 `[RAG_CONTEXT_START/END]` 上下文块作为**独立 text part** 拼到 parts 最前再转发，未命中 / 检索失败 / 超时 / 能力缺失（未配嵌入或 SQLite 无 pgvector）一律**原样转发**——RAG 是锦上添花，绝不让消息发送失败或变慢。拼装参数：`ragQueryTimeout=800ms`、`ragMinScore=0.5`、`ragTopK=5`、`ragBudgetTokens=1500`。每个 `prompt_async` 响应都带 **`X-Rag-Spliced: 0|1`**（0=未拼装/降级，1=已拼装），供客户端识别「本次消息是否带入了知识库资料」。详见 [`docs/RAG_PROMPT.md`](RAG_PROMPT.md)。
+- **`POST /api/opencode/upload` 是本后端自己的增强通道**（精确模式注册，优先于前缀模式），不转发上游，语义见「知识库与文档」章的「上传落盘」。
 - **SSE 透传**：`GET /global/event` 这类流式响应逐块读、每读一次 flush 一次，事件实时到达 APP。
 - 上游请求失败 → **502 `upstream opencode request failed`**；客户端断开时上游连接随之取消。
 
@@ -658,6 +663,125 @@ data: {"payload":{"type":"message.part.updated","properties":{...}}}
 - `PUT /api/intel/nodes/{id}/check` → 重新探测并回写 → `{"node":…}`；`DELETE /api/intel/nodes/{id}` → `{"ok":true}`；其余方法 405（不支持 `GET /api/intel/nodes/{id}`）。
 - 节点由 `POST /api/intel/run` 的 `node` 字段引用：SSH 执行目前只支持 go 报告（stdout 自包含），命令与工作目录含 shell 元字符一律拒绝（远端经 login shell 解释）。
 
+## 知识库与文档（v2.1.0）
+
+> 范围与版本化见 [`docs/ROADMAP.md`](ROADMAP.md) v2.1.0；检索注入与生成/解析/预览/迭代设计见
+> [`docs/RAG_PROMPT.md`](RAG_PROMPT.md) 与 [`docs/DOCUMENTS.md`](DOCUMENTS.md)。
+
+### 通用约定
+
+- **鉴权**：`/api/kb/**`、`/api/documents/**`、`POST /api/opencode/upload` 全部是
+  `requireDualAuth` 的双通道形态（Web Session 或 APP Token 任一，两者都不通过 → 401
+  `web session or APP token required`）。本章下文不再逐个标注。
+- **请求体**：JSON 上限 4 MiB，解析失败 → 400 `invalid request body`。
+- **配置门禁的判定时机不同**：文档生成的 503 检查在**解析 body 之前**（未配编排 LLM 或
+  `--docs-dir` 时任何请求都先吃 503）；KB 的 503 在解析 body 与必填校验**之后**。
+- **向量能力**：向量检索仅 PostgreSQL + **pgvector**（`kb_chunks`）提供，SQLite 部署一律 503。
+
+### 知识库集合与文档（`/api/kb/*`）
+
+- `GET /api/kb/collections` → `{"collections":[KBCollection]}`（`id` 倒序）。KBCollection：
+  `{id,name,description,documentCount,chunkCount,createdAt,updatedAt}`。
+- `POST /api/kb/collections` `{"name":"团队库","description":"需求文档"}` → **200**（不是 201）+
+  KBCollection。`name` 去空必填（400）；重名 → **409** `collection name already exists`。
+- `DELETE /api/kb/collections/{id}` → `{"ok":true}`（级联删除集合下所有文档与 chunk）。id 非
+  正整数 → 400 `invalid collection id`；集合不存在同样返回 `{"ok":true}`（删除幂等、无 404）。
+  本路径只注册 DELETE，其余方法 → 405。
+- `GET /api/kb/documents?collectionId=&limit=` → `{"documents":[KBDocument]}`（`id` 倒序）。
+  `collectionId` 必须是正整数（缺失/非法 → 400 `collectionId is required`）；`limit` 默认 50、
+  最大 200（越界回退）。
+- `GET /api/kb/documents/{id}` → KBDocument：`{id,collectionId,name,mime,sizeBytes,status,
+  chunkCount,error?,createdAt,updatedAt}`，`status` ∈ `pending|indexed|failed`；404 → 不存在。
+- `DELETE /api/kb/documents/{id}` → `{"ok":true}`（级联删除其 chunk）；id 非正整数 → 400
+  `invalid document id`。
+
+### 采集（`POST /api/kb/ingest`）
+
+请求（二选一）：
+```json
+{ "collectionId": 1, "name": "仓储制度", "content": "纯文本 / Markdown 内容" }
+{ "collectionId": 1, "name": "报价单.pdf", "contentBase64": "<base64>" }
+```
+- `contentBase64` 非空时走 `internal/doc.Parse` 解析成 Markdown 再进入分块链路；支持的二进制
+  类型（按扩展名/MIME）：`pdf`、`xlsx`、`xls`、`csv`、`docx`、`pptx`。
+- 200 → `{"document":{...KBDocument},"chunks":<n>}`。同步执行（5min 上限）：按 Markdown 标题
+  切块（无标题则以文档名为标题，单块正文目标 ~800 rune）、批量向量化、一次性落库
+  （成功 `status=indexed`；中途失败回写 `status=failed` + `error`）。
+- 400 → `collectionId`/`name` 缺失、`content` 与 `contentBase64` 同时为空、
+  `contentBase64` 非法 base64、类型不支持（`unsupported document type: <name>`）或解析失败。
+- 503 → 未配置嵌入模型（`embeddings not configured`）或 SQLite 无 pgvector。
+
+### 检索（`POST /api/kb/search`）
+
+请求：`{"query":"安全库存","collectionIds":[1,2],"topK":5,"minScore":0.5}`
+- `query` 必填（400）；`collectionIds` 省略/空 = 全库检索；`topK` 默认 5、**上限 20**（超出截断）；
+  `minScore` 默认 0.5（低于即弃）。30s 上限。
+- 200 →
+
+```json
+{ "results": [ { "source": "仓储制度.docx", "section": "第 4 章 库存",
+                 "content": "安全库存 = 日均出库量 × 备货周期 × 1.2", "score": 0.93 } ] }
+```
+
+  按相关度降序；`source` 取文档名，文档已删时回落 `文档#<id>`。
+- 503 → SQLite 无 pgvector 或未配置嵌入模型。本端点即是 RAG-in-Prompt 代理层的检索入口。
+
+### 上传落盘（`POST /api/opencode/upload`）
+
+把附件写入 OpenCode 会话工作区 `uploads/` 子目录，使其成为「工作区里的真实文件」——文本文件可
+被 OpenCode 的 edit 工具直接修改，二进制文档可被 `internal/doc` 解析。`multipart/form-data`：
+
+| 字段 | 说明 |
+|------|------|
+| `file` | 上传字节（必填），**≤10 MiB**；请求体总上限 16 MiB |
+| `directory` | 目标会话工作目录（必填、**必须是绝对路径**，走 `validateWorkDirectory`：拒绝 `/`、`/boot` `/dev` `/etc` `/proc` `/root` `/sys` 及其子树与 `..` 越界）→ 命中系统目录 **403** `directory out of scope`，相对路径 **400** `directory must be an absolute path` |
+| `name` | 文件名覆盖（可选，缺省取上传文件名）；净化成单路径段、≤200 字符 |
+
+- 200 → `{"ok":true,"name":"时序表.csv","path":"uploads/时序表.csv","absolutePath":"/w/uploads/时序表.csv","size":1234}`
+  （`path` 相对工作目录，可放进消息里引用，OpenCode 即可打开/编辑该文件）。
+- 重名自动追加 `-1`/`-2` 后缀（扩展名前），绝不覆盖旧文件。
+- 413 → 请求体超 16 MiB / 文件超 10 MiB（`file exceeds 10 MiB`）；400 → 缺 `directory`/`file`/
+  `name`、multipart 非法。仅 POST，其余方法 405。
+
+### 文档生成（`/api/documents/*`）
+
+> 流程：先落库拿 `id` → 编排 LLM 产出 JSON 骨架（`docGenerateSystem`）→ 确定性渲染到磁盘
+> `<docs-dir>/<id><ext>`。`--docs-dir` / `STARBURST_DOCS_DIR` 配置（默认 `./data/docs`，按需
+> 创建）。文档类型由请求方决定，LLM 只产对应 body（`sheets`/`paragraphs`/`slides`）。
+
+- `POST /api/documents/generate` `{"type":"xlsx|docx|pptx","prompt":"做一份排期表"}` → **200**
+  `{"id":12,"name":"排期表","docType":"xlsx","downloadUrl":"/api/documents/12/download"}`。
+  `prompt` 必填、`type` 必须是 `xlsx|docx|pptx`（否则 400）；未配编排 LLM、或未配 `--docs-dir` →
+  **503**；骨架失败/渲染失败/落盘失败 → 500。**同步**，2min 上限（不会 204 立即返回）。
+- `POST /api/documents/regenerate` `{"docId":12,"instruction":"把第3页改成对比图","sessionId":"ses_..."}`
+  → 200 + 同样的 `{id,name,docType,downloadUrl}`。基于原骨架 + 修改意见 + 最近会话上下文
+  （best-effort：最近 20 条 turn、单条截 500 字、共 ≤4000 字、5s 拉取上限，失败只缺上下文不报错）
+  重新出骨架 → 重渲染 → 覆盖落盘并回写新骨架。`docId` 必填（400）；404 → 文档不存在；
+  已存类型不可再生成 → 400。其余方法 405。
+- `GET /api/documents?limit=` → `{"documents":[DocDocument]}`（`id` 倒序，`limit` 默认 50、最大
+  200）。DocDocument：`{id,name,docType,prompt,skeleton,sizeBytes,status,error?,createdAt,updatedAt}`，
+  `status` ∈ `created|ready|failed`。
+- `GET /api/documents/{id}` → 单个 DocDocument；404 → 不存在。
+- `DELETE /api/documents/{id}` → `{"ok":true}`（连同磁盘文件一起删）；404 → 不存在。
+- `GET /api/documents/{id}/download` → 文件字节流，`Content-Disposition: attachment`
+  （文件名净化，保留原始名字），按类型回 OOXML `Content-Type`。404 → 记录不存在或磁盘文件缺失。
+
+### 会话内文档预览（`/doc/preview.html`，免鉴权 webui 静态页）
+
+`GET /doc/preview.html?src=<urlencoded 文件 URL>`：纯前端渲染页（go:embed 进 webui 静态资产，
+全同源、受 webui CSP 约束，且 `X-Frame-Options: DENY` —— **不能 iframe**，Web 工作台用
+`window.open` 整页打开）：
+
+| 格式 | 渲染器 | 能力 |
+|------|--------|------|
+| `.pdf` | pdf.js（`pdf.worker.min.js`） | Canvas 渲染 + 上一页/下一页翻页 |
+| `.docx` | mammoth.js | 转 HTML |
+| `.xlsx` / `.xls` / `.csv` | SheetJS | 每工作表一张 HTML 表格 |
+| `.pptx` | JSZip 自渲染（解析 `ppt/slides/slide<N>.xml`） | 逐页标题 + 要点 |
+
+- 顶部提供「下载」（同源 `a[download]`）；`fetch(src, {credentials:"include"})`，文件 URL 需与本页
+  同源。不支持的扩展名 → 「暂不支持预览 .<ext>」。
+
 ## 错误码汇总
 
 | 状态码 | 含义 |
@@ -670,7 +794,7 @@ data: {"payload":{"type":"message.part.updated","properties":{...}}}
 | 429 | 登录尝试过多（同 IP 5 分钟内失败 5 次） |
 | 500 | 服务内部错误 |
 | 502 | 镜像代理的上游 OpenCode 请求失败；`POST /api/tasks/generate` 模型生成失败 |
-| 503 | 需要 PostgreSQL + pgvector 的 RAG 端点（`POST /api/intel/ask`、`POST /api/intel/index`）跑在 SQLite 部署上 |
+| 503 | 需要 PostgreSQL + pgvector 的 RAG 端点（`POST /api/intel/ask`、`POST /api/intel/index`、`POST /api/kb/ingest`、`POST /api/kb/search`）跑在 SQLite 部署上；或未配置依赖能力：编排 LLM（`POST /api/documents/generate`、`regenerate`）、嵌入模型（`POST /api/kb/search`）、`--docs-dir`（文档生成） |
 
 ## 状态码表（任务）
 

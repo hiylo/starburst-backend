@@ -63,6 +63,9 @@ type Config struct {
 	STTTimeout time.Duration
 	// STTMaxChunkBytes caps one audio chunk accepted from a client.
 	STTMaxChunkBytes int
+	// DocsDir is where generated documents are persisted (per docId). Created
+	// on demand; empty disables the document-generation endpoint.
+	DocsDir string
 	// ShowVersion prints the version and exits when true.
 	ShowVersion bool
 	// HealthCheck runs connectivity checks and exits when true.
@@ -98,6 +101,7 @@ func Parse(args []string) (*Config, error) {
 	sttURL := fs.String("stt-url", envOr("STARBURST_STT_URL", ""), "streaming recognition engine base URL (empty = disabled)")
 	sttTimeout := fs.Duration("stt-timeout", envDuration("STARBURST_STT_TIMEOUT", DefaultSTTTimeout), "timeout for one engine round trip")
 	sttMaxChunk := fs.Int("stt-max-chunk-bytes", envInt("STARBURST_STT_MAX_CHUNK_BYTES", 2*1024*1024), "max bytes accepted per audio chunk")
+	docsDir := fs.String("docs-dir", envOr("STARBURST_DOCS_DIR", "./data/docs"), "directory to persist generated documents (created on demand)")
 	showVersion := fs.Bool("version", false, "print version and exit")
 	healthCheck := fs.Bool("health-check", false, "run connectivity checks and exit")
 
@@ -134,6 +138,7 @@ func Parse(args []string) (*Config, error) {
 		STTURL:               strings.TrimRight(*sttURL, "/"),
 		STTTimeout:           sttTimeoutOrDefault(*sttTimeout, DefaultSTTTimeout),
 		STTMaxChunkBytes:     clampInt(*sttMaxChunk, 1024, 8*1024*1024),
+		DocsDir:              *docsDir,
 		ShowVersion:          *showVersion,
 		HealthCheck:          *healthCheck,
 	}, nil

@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>文档预览</title>
+<style>
+  :root { --bg:#f5f6f8; --card:#ffffff; --fg:#1f2328; --muted:#6b7280;
+          --line:#e5e7eb; --accent:#2563eb; --err:#dc2626; }
+  * { box-sizing:border-box; }
+  body { margin:0; font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;
+         background:var(--bg); color:var(--fg); }
+  header { position:sticky; top:0; display:flex; align-items:center; gap:10px;
+           padding:10px 16px; background:var(--card); border-bottom:1px solid var(--line); }
+  header .name { font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  header .spacer { flex:1; }
+  button, a.btn { cursor:pointer; font-size:13px; padding:5px 12px; border-radius:6px;
+                  border:1px solid var(--line); background:#fff; color:var(--fg);
+                  text-decoration:none; display:inline-block; }
+  button:disabled { opacity:.5; cursor:not-allowed; }
+  .main { max-width:920px; margin:0 auto; padding:16px; }
+  #tip { color:var(--muted); text-align:center; padding:60px 0; }
+  #error { color:var(--err); text-align:center; padding:40px 0; font-size:14px; }
+  #pdf-pager { display:none; align-items:center; gap:8px; font-size:13px; color:var(--muted); }
+  canvas { display:block; margin:12px auto; max-width:100%; box-shadow:0 1px 6px rgba(0,0,0,.12); }
+  .doc-out { background:var(--card); border:1px solid var(--line); border-radius:8px; padding:20px 24px; }
+  .doc-out h1, .doc-out h2, .doc-out h3 { line-height:1.4; }
+  .doc-out table { border-collapse:collapse; width:100%; margin:8px 0; font-size:13px; }
+  .doc-out th, .doc-out td { border:1px solid var(--line); padding:6px 9px; text-align:left; }
+  .doc-out img { max-width:100%; }
+  .slide { background:var(--card); border:1px solid var(--line); border-radius:8px;
+           padding:20px 24px; margin:12px 0; }
+  .slide h3 { margin:0 0 10px; }
+  .slide ul { margin:0; padding-left:20px; }
+</style>
+</head>
+<body>
+<header>
+  <button id="btn-back" type="button" title="关闭">← 关闭</button>
+  <span class="name" id="fname">文档预览</span>
+  <span id="pdf-pager"><button id="pg-prev" type="button">上一页</button>
+    <span id="pg-info"></span><button id="pg-next" type="button">下一页</button></span>
+  <span class="spacer"></span>
+  <a class="btn" id="btn-dl" href="#" download style="display:none">下载</a>
+</header>
+<main class="main">
+  <div id="tip">正在加载文档…</div>
+  <div id="stage"></div>
+</main>
+<script src="/doc/vendor/pdf.min.js"></script>
+<script src="/doc/vendor/mammoth.browser.min.js"></script>
+<script src="/doc/vendor/xlsx.full.min.js"></script>
+<script src="/doc/vendor/jszip.min.js"></script>
+<script src="/doc/preview.js"></script>
+</body>
+</html>

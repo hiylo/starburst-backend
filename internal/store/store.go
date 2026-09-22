@@ -502,6 +502,46 @@ type Store interface {
 	CreateIntelFeatureChat(ctx context.Context, c *IntelFeatureChat) error
 	// ListIntelFeatureChats returns a feature's Q&A history, newest first.
 	ListIntelFeatureChats(ctx context.Context, projectID, featureID int64) ([]*IntelFeatureChat, error)
+
+	// ---- Knowledge base (generic /api/kb/*) ----
+
+	// CreateKBCollection persists a collection; duplicate names return ErrConflict.
+	CreateKBCollection(ctx context.Context, name, description string) (*KBCollection, error)
+	// GetKBCollection loads a collection by id; returns ErrNotFound when missing.
+	GetKBCollection(ctx context.Context, id int64) (*KBCollection, error)
+	// ListKBCollections returns all collections, newest first.
+	ListKBCollections(ctx context.Context) ([]*KBCollection, error)
+	// DeleteKBCollection removes a collection and all its documents/chunks.
+	DeleteKBCollection(ctx context.Context, id int64) error
+	// CreateKBDocument persists a pending ingestion record.
+	CreateKBDocument(ctx context.Context, doc *KBDocument) error
+	// GetKBDocument loads a document by id; returns ErrNotFound when missing.
+	GetKBDocument(ctx context.Context, id int64) (*KBDocument, error)
+	// ListKBDocuments returns a collection's documents, newest first.
+	ListKBDocuments(ctx context.Context, collectionID int64, limit int) ([]*KBDocument, error)
+	// UpdateKBDocumentResult persists an ingestion's terminal state.
+	UpdateKBDocumentResult(ctx context.Context, id int64, status string, chunkCount int64, errMsg string) error
+	// DeleteKBDocument removes a document and all its chunks.
+	DeleteKBDocument(ctx context.Context, id int64) error
+	// ReplaceKBDocumentChunks rebuilds a document's embedded chunk set.
+	ReplaceKBDocumentChunks(ctx context.Context, doc *KBDocument, chunks []*KBChunk) error
+	// SearchKBChunks returns chunks most similar to a query embedding across the
+	// given collections (empty = all). PostgreSQL/pgvector only: returns
+	// ErrRagUnsupported on SQLite.
+	SearchKBChunks(ctx context.Context, collectionIDs []int64, embedding []float32, limit int) ([]*KBChunk, error)
+
+	// ---- Generated documents (/api/documents/*) ----
+
+	// CreateDocDocument persists a generated-document record.
+	CreateDocDocument(ctx context.Context, d *DocDocument) error
+	// GetDocDocument loads a generated document by id; ErrNotFound when missing.
+	GetDocDocument(ctx context.Context, id int64) (*DocDocument, error)
+	// ListDocDocuments returns generated documents, newest first.
+	ListDocDocuments(ctx context.Context, limit int) ([]*DocDocument, error)
+	// UpdateDocDocumentResult persists the rendered outcome of a generation.
+	UpdateDocDocumentResult(ctx context.Context, d *DocDocument) error
+	// DeleteDocDocument removes a generated-document record.
+	DeleteDocDocument(ctx context.Context, id int64) error
 }
 
 // Open opens a store for the given driver/dsn. It applies all migrations

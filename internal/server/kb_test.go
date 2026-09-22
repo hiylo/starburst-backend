@@ -1,0 +1,84 @@
+package server
+
+import (
+	"encoding/json"
+	"net/http"
+	"testing"
+)
+
+// TestKbCollectionsEndpoints covers the /api/kb/collections handler on the
+// dual-channel auth: unauthenticated → 401, create → 200, duplicate → 409,
+// list → 200.
+func TestKbCollectionsEndpoints(t *testing.T) {
+	s := newTestServer(t)
+	wh := loginWeb(t, s)
+
+	rec := s.do(t, http.MethodGet, "/api/kb/collections", "", nil)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated list status = %d, want 401", rec.Code)
+	}
+
+	rec = s.do(t, http.MethodPost, "/api/kb/collections", `{"name":"团队库","description":"需求文档"}`, wh)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("create status = %d: %s", rec.Code, rec.Body.String())
+	}
+	var col struct {
+		ID   int64  `json:"id"`
+		Name string `json:"name"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &col); err != nil || col.ID == 0 {
+		t.Fatalf("create resp = %s", rec.Body.String())
+	}
+
+	rec = s.do(t, http.MethodPost, "/api/kb/collections", `{"name":"团队库"}`, wh)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("duplicate create status = %d, want 409", rec.Code)
+	}
+
+	rec = s.do(t, http.MethodGet, "/api/kb/collections", "", wh)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list status = %d", rec.Code)
+	}
+	var list struct {
+		Collections []map[string]any `json:"collections"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &list); err != nil || len(list.Collections) != 1 {
+		t.Fatalf("list resp = %s", rec.Body.String())
+	}
+
+	rec = s.do(t, http.MethodDelete, "/api/kb/collections/"+jsonInt(col.ID), "", wh)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("delete status = %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestKbIngestUnsupportedOnSQLite pins the 503 contract: ingest needs a
+// pgvector backing store, so the lightweight SQLite test deployment must reject
+// it explicitly rather than silently accepting a document that can never be
+// searched.
+func TestKbIngestUnsupportedOnSQLite(t *testing.T) {
+	s := newTestServer(t)
+	wh := loginWeb(t, s)
+
+	rec := s.do(t, http.MethodPost, "/api/kb/collections", `{"name":"库"}`, wh)
+	var col struct {
+		ID int64 `json:"id"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &col)
+
+	rec = s.do(t, http.MethodPost, "/api/kb/ingest",
+		`{"collectionId":`+jsonInt(col.ID)+`,"name":"doc.md","content":"# 标题\n正文内容"}`, wh)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("ingest on SQLite status = %d, want 503: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestKbSearchRequiresAuth ensures search is not anonymously reachable.
+func TestKbSearchRequiresAuth(t *testing.T) {
+	s := newTestServer(t)
+
+	rec := s.do(t, http.MethodPost, "/api/kb/search", `{"query":"测试"}`, nil)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("search unauthenticated status = %d, want 401", rec.Code)
+	}
+}
