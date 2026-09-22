@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/hiylo/starburst-backend/internal/embed"
 	"github.com/hiylo/starburst-backend/internal/store"
@@ -143,5 +144,23 @@ func TestProxyPromptAsyncRagHeader(t *testing.T) {
 		`{"messageID":"m1","parts":[{"type":"text","text":"你好"}]}`, wh)
 	if rec.Header().Get("X-Rag-Spliced") != "0" {
 		t.Fatalf("X-Rag-Spliced = %q, want 0 (KB not configured)", rec.Header().Get("X-Rag-Spliced"))
+	}
+}
+
+// TestRagTimeoutConfig pins the configurable retrieval timeout: default 8s
+// (embedding round trips are ~8s, 800ms dropped most splices), overridable via
+// cfg.RagTimeout.
+func TestRagTimeoutConfig(t *testing.T) {
+	s := newTestServer(t)
+	if got := s.ragTimeout(); got != 8*time.Second {
+		t.Fatalf("default ragTimeout = %v, want 8s", got)
+	}
+	s.cfg.RagTimeout = 1500 * time.Millisecond
+	if got := s.ragTimeout(); got != 1500*time.Millisecond {
+		t.Fatalf("overridden ragTimeout = %v, want 1.5s", got)
+	}
+	s.cfg.RagTimeout = 0
+	if got := s.ragTimeout(); got != 8*time.Second {
+		t.Fatalf("zero-override ragTimeout = %v, want default 8s", got)
 	}
 }

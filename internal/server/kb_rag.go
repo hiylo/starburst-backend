@@ -20,8 +20,19 @@ import (
 // /prompt_async，检索知识库 Top-K，命中则在 parts 最前追加上下文 text part 再转发，
 // 未命中 / 能力缺失 / 超时一律原样转发。RAG 是锦上添花，绝不让消息发送失败或变慢。
 
-// ragQueryTimeout 是代理内知识库检索的上限：超时即按「没找到」原样转发，杜绝拖慢 prompt。
-const ragQueryTimeout = 800 * time.Millisecond
+// ragQueryTimeoutDefault 是代知识库检索的默认上限（可被 --rag-timeout 覆盖）：
+// 实测 embedding 往返可达 ~8s，原 800ms 会让绝大多数命中被超时丢弃；命中时
+// 消息多等几秒换取可靠上下文（prompt_async 是 fire-and-forget，客户端无感）。
+const ragQueryTimeoutDefault = 8 * time.Second
+
+// ragTimeout returns the configured retrieval timeout, defaulting to
+// ragQueryTimeoutDefault when unset.
+func (s *Server) ragTimeout() time.Duration {
+	if s.cfg != nil && s.cfg.RagTimeout > 0 {
+		return s.cfg.RagTimeout
+	}
+	return ragQueryTimeoutDefault
+}
 
 // ragStats 统计 RAG-in-Prompt 的结局分布（docs/RAG_PROMPT.md §9）：spliced 之外
 // 的 skip* 归因让「知识库有没有被用上」可观测。
@@ -114,7 +125,7 @@ func (s *Server) ragSpliceJSON(ctx context.Context, body []byte) (out []byte, sp
 		return body, false
 	}
 
-	searchCtx, cancel := context.WithTimeout(ctx, ragQueryTimeout)
+	searchCtx, cancel := context.WithTimeout(ctx, s.ragTimeout())
 	defer cancel()
 	hits, err := s.searchKB(searchCtx, query, nil, ragTopK, ragMinScore)
 	if err != nil {

@@ -66,6 +66,10 @@ type Config struct {
 	// DocsDir is where generated documents are persisted (per docId). Created
 	// on demand; empty disables the document-generation endpoint.
 	DocsDir string
+	// RagTimeout caps the KB retrieval inside the prompt_async proxy splice.
+	// Embedding round trips can be slow (cold model / remote gateway), so the
+	// default is 8s rather than the original 800ms which dropped most splices.
+	RagTimeout time.Duration
 	// ShowVersion prints the version and exits when true.
 	ShowVersion bool
 	// HealthCheck runs connectivity checks and exits when true.
@@ -102,6 +106,7 @@ func Parse(args []string) (*Config, error) {
 	sttTimeout := fs.Duration("stt-timeout", envDuration("STARBURST_STT_TIMEOUT", DefaultSTTTimeout), "timeout for one engine round trip")
 	sttMaxChunk := fs.Int("stt-max-chunk-bytes", envInt("STARBURST_STT_MAX_CHUNK_BYTES", 2*1024*1024), "max bytes accepted per audio chunk")
 	docsDir := fs.String("docs-dir", envOr("STARBURST_DOCS_DIR", "./data/docs"), "directory to persist generated documents (created on demand)")
+	ragTimeout := fs.Duration("rag-timeout", envDuration("STARBURST_RAG_TIMEOUT", 8*time.Second), "KB retrieval timeout inside the prompt_async RAG splice")
 	showVersion := fs.Bool("version", false, "print version and exit")
 	healthCheck := fs.Bool("health-check", false, "run connectivity checks and exit")
 
@@ -139,6 +144,7 @@ func Parse(args []string) (*Config, error) {
 		STTTimeout:           sttTimeoutOrDefault(*sttTimeout, DefaultSTTTimeout),
 		STTMaxChunkBytes:     clampInt(*sttMaxChunk, 1024, 8*1024*1024),
 		DocsDir:              *docsDir,
+		RagTimeout:           *ragTimeout,
 		ShowVersion:          *showVersion,
 		HealthCheck:          *healthCheck,
 	}, nil
