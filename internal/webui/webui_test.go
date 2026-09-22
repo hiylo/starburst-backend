@@ -71,3 +71,29 @@ func TestDocVendorLibrariesEmbedded(t *testing.T) {
 		t.Fatalf("traversal should 404, got %d", rec.Code)
 	}
 }
+// TestKbManagementPageServed verifies the standalone KB management page and its
+// script are embedded, served with the right content type and free of inline
+// scripts (CSP `script-src 'self'`).
+func TestKbManagementPageServed(t *testing.T) {
+	f := New()
+
+	page := servePath(f, "/kb.html")
+	if page.Code != http.StatusOK || !strings.Contains(page.Header().Get("Content-Type"), "text/html") {
+		t.Fatalf("kb.html status=%d ct=%s", page.Code, page.Header().Get("Content-Type"))
+	}
+	body := page.Body.String()
+	if !strings.Contains(body, `src="/assets/kb.js"`) {
+		t.Fatal("kb.html missing kb.js script tag")
+	}
+	if strings.Contains(body, "<script>") || strings.Contains(body, "onclick=") {
+		t.Fatal("kb.html must have no inline script or inline handlers (CSP)")
+	}
+
+	js := servePath(f, "/assets/kb.js")
+	if js.Code != http.StatusOK || !strings.Contains(js.Header().Get("Content-Type"), "javascript") {
+		t.Fatalf("kb.js status=%d ct=%s", js.Code, js.Header().Get("Content-Type"))
+	}
+	if len(js.Body.Bytes()) < 1024 {
+		t.Fatalf("kb.js suspiciously small (%d bytes)", len(js.Body.Bytes()))
+	}
+}
