@@ -60,26 +60,19 @@
     <div id="searchSec" style="margin-top:22px">
       <h2 style="font-size:14px;margin:0 0 8px">检索测试</h2>
       <div style="display:flex;gap:8px">
+        <select id="searchCollection" class="mono" style="padding:5px 8px;background:var(--bg);border:1px solid var(--line);border-radius:var(--r-md);color:var(--fg)" title="限定检索范围（默认全库）">
+          <option value="">全部集合</option>
+        </select>
         <input type="text" id="searchQ" class="mono" style="flex:1" placeholder="输入问题，验证知识库命中（如：安全库存规则是什么？）">
         <button class="primary sm" id="btnSearch" type="button">检索</button>
       </div>
       <div id="searchResults"></div>
+      <div id="ragStats" style="margin-top:16px">
+        <h3 style="font-size:13px;margin:0 0 6px">RAG-in-Prompt 命中统计（会话自动带入知识库的结局分布）</h3>
+        <div id="ragStatsBody" class="hint" style="line-height:1.8">加载中…</div>
+      </div>
     </div>
 
-    <div id="docgenSec" style="margin-top:22px;display:none">
-      <h2 style="font-size:14px;margin:0 0 8px">文档生成（LLM 出骨架 → 渲染 → 可下载/预览）</h2>
-      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
-        <select id="docType" class="mono" style="padding:5px 8px;background:var(--bg);border:1px solid var(--line);border-radius:var(--r-md);color:var(--fg)">
-          <option value="pptx">PPT (.pptx)</option>
-          <option value="docx">Word (.docx)</option>
-          <option value="xlsx">Excel (.xlsx)</option>
-        </select>
-        <input type="text" id="docPrompt" class="mono" style="flex:1;min-width:260px" placeholder="描述文档，如：做一份 5 页产品发布会 PPT，含参数对比表和一张柱状图">
-        <button class="primary sm" id="btnGenerate" type="button">生成</button>
-      </div>
-      <div id="docResults"></div>
-      <div id="docHistory" style="margin-top:14px"></div>
-    </div>
   </div>
 
   <script src="/assets/kb.js"></script>

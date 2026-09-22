@@ -61,6 +61,13 @@
     try {
       var data = await kb("/collections");
       var cols = data.collections || [];
+      var searchSel = document.getElementById("searchCollection");
+      if (searchSel) {
+        searchSel.innerHTML = '<option value="">全部集合</option>' +
+          cols.map(function (c) {
+            return '<option value="' + c.id + '">' + esc(c.name) + "</option>";
+          }).join("");
+      }
       if (!cols.length) {
         collectionsBox.innerHTML = '<p class="hint">还没有知识库集合。点击右上角「新建集合」，然后上传文档即可在会话中自动检索。</p>';
         return;
@@ -71,6 +78,7 @@
             '<p class="desc">' + esc(c.description || "—") + "</p>" +
             '<span class="stat">文档 ' + (c.documentCount || 0) + " · 片段 " + (c.chunkCount || 0) + "</span>" +
             '<div class="ops"><button class="ghost xs" type="button" data-view="' + c.id + '">管理</button>' +
+            '<button class="ghost xs" type="button" data-edit-col="' + c.id + '" data-name="' + esc(c.name) + '" data-desc="' + esc(c.description || "") + '">编辑</button>' +
             '<button class="ghost xs danger" type="button" data-del-col="' + c.id + '" data-name="' + esc(c.name) + '">删除</button></div></div>';
         }).join("") + "</div>";
       bindCollections(cols);
@@ -82,6 +90,20 @@
   function bindCollections(cols) {
     collectionsBox.querySelectorAll("[data-view]").forEach(function (b) {
       b.addEventListener("click", function () { openCollection(Number(b.dataset.view)); });
+    });
+    collectionsBox.querySelectorAll("[data-edit-col]").forEach(function (b) {
+      b.addEventListener("click", function () {
+        var name = prompt("集合名称（必填）：", b.dataset.name);
+        if (name == null) return;
+        name = name.trim();
+        if (!name) { alert("名称不能为空"); return; }
+        var desc = prompt("描述（可选）：", b.dataset.desc) || "";
+        kb("/collections/" + b.dataset.editCol, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ name: name, description: desc.trim() })
+        }).then(loadCollections).catch(function (e) { alert(e.message); });
+      });
     });
     collectionsBox.querySelectorAll("[data-del-col]").forEach(function (b) {
       b.addEventListener("click", async function () {
@@ -111,9 +133,11 @@
   var detailBox = document.getElementById("detail");
   var documentsBox = document.getElementById("documents");
   var currentCollection = null;
+  var docOffset = 0;
 
   function openCollection(id) {
     currentCollection = id;
+    docOffset = 0;
     detailBox.style.display = "block";
     document.getElementById("detailTitle").textContent = "文档列表";
     loadDocuments();
@@ -127,8 +151,9 @@
 
   function loadDocuments() {
     documentsBox.innerHTML = '<p class="hint">加载中…</p>';
-    kb("/documents?collectionId=" + currentCollection).then(function (data) {
+    kb("/documents?collectionId=" + currentCollection + "&limit=50&offset=" + docOffset).then(function (data) {
       var docs = data.documents || [];
+      var total = data.total || 0;
       if (!docs.length) {
         documentsBox.innerHTML = '<p class="hint">该集合暂无文档。点「上传文档」入库，成功后即可在会话中检索。</p>';
         return;
@@ -142,6 +167,14 @@
           stc +
           '<button class="ghost xs danger" type="button" data-del-doc="' + d.id + '" data-name="' + esc(d.name) + '">删除</button></div>';
       }).join("");
+      if (total > 50) {
+        documentsBox.insertAdjacentHTML("beforeend",
+          '<div class="kb-row" style="justify-content:center"><span class="hint">共 ' + total + " 篇，显示 " +
+          (docOffset + 1) + "-" + (docOffset + docs.length) + '</span>' +
+          '<button class="ghost xs" type="button" id="btnDocMore">加载更多</button></div>');
+        var more = document.getElementById("btnDocMore");
+        if (more) more.addEventListener("click", function () { docOffset += 50; loadDocuments(); });
+      }
       documentsBox.querySelectorAll("[data-del-doc]").forEach(function (b) {
         b.addEventListener("click", function () {
           if (!confirm("删除文档「" + b.dataset.name + "」？")) return;
@@ -162,11 +195,12 @@
     var fd = new FormData();
     fd.append("collectionId", String(currentCollection));
     fd.append("file", f, f.name);
+    fd.append("replace", "true");
     var btn = document.getElementById("btnUpload");
     btn.disabled = true;
     btn.textContent = "上传中…";
     kb("/ingest", { method: "POST", body: fd })
-      .then(function (r) { alert("已入库：" + r.name + "，共 " + r.chunks + " 个片段"); loadDocuments(); })
+      .then(function (r) { alert("已入库：" + r.name + "，共 " + r.chunks + " 个片段" + (r.replaced ? "（已替换同名的旧版本）" : "")); loadDocuments(); })
       .catch(function (x) { alert("上传失败：" + x.message); })
       .finally(function () { btn.disabled = false; btn.textContent = "上传文档"; });
   });
@@ -181,10 +215,14 @@
     var box = document.getElementById("searchResults");
     if (!q) return;
     box.innerHTML = '<p class="hint">检索中…</p>';
+    var sel = document.getElementById("searchCollection");
+    var cid = Number((sel && sel.value) || 0);
+    var body = { query: q, topK: 5, minScore: 0.5 };
+    if (cid > 0) body.collectionIds = [cid];
     kb("/search", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ query: q, topK: 5, minScore: 0.5 })
+      body: JSON.stringify(body)
     }).then(function (data) {
       var r = data.results || [];
       if (!r.length) { box.innerHTML = '<p class="hint">未命中相关片段（或知识库为空）。</p>'; return; }
@@ -200,70 +238,31 @@
   document.getElementById("btnHome").addEventListener("click", function () { location.href = "/"; });
   setAuthed(authed);
   if (authed) loadCollections();
-})();
-/* ---------- 文档生成（/api/documents/*） ---------- */
-async function docReq(path, opts) {
-  var o = opts || {};
-  o.headers = authHeaders(o.headers);
+  if (authed) { loadRagStats(); }
+
+/* ---------- RAG 命中统计（/api/kb/stats） ---------- */
+async function loadRagStats() {
+  var body = document.getElementById("ragStatsBody");
+  if (!body) return;
   try {
-    var res = await fetch("/api/documents" + path, o);
-    if (res.status === 401) { setAuthed(false); throw new Error("unauthorized"); }
-    if (!res.ok) {
-      var detail = "";
-      try { detail = (await res.json()).error || ""; } catch (e) {}
-      throw new Error("HTTP " + res.status + (detail ? ": " + detail : ""));
-    }
-    return res.json();
-  } catch (e) { if (e.message === "unauthorized") throw e; throw new Error(e.message); }
+    var res = await fetch("/api/kb/stats", { headers: authHeaders() });
+    if (res.status === 401) { setAuthed(false); return; }
+    if (!res.ok) { body.textContent = "统计不可用（" + res.status + "）"; return; }
+    var data = await res.json();
+    var r = data.rag || {};
+    var total = ["spliced", "skipNoEmbedding", "skipNoVector", "skipTimeout", "skipNoResult", "skipBelowThreshold"]
+      .reduce(function (acc, k) { return acc + (r[k] || 0); }, 0);
+    if (!total) { body.textContent = "尚无 RAG-in-Prompt 调用记录。发一条会触发检索的消息后这里会出现命中/跳过分布。"; return; }
+    var pct = function (v) { return total ? (100 * v / total).toFixed(1) + "%" : "0%"; };
+    var rows = [
+      ["已拼接上下文", r.spliced || 0], ["未配置嵌入模型", r.skipNoEmbedding || 0],
+      ["无 pgvector(SQLite)", r.skipNoVector || 0], ["检索超时", r.skipTimeout || 0],
+      ["未命中/检索失败", r.skipNoResult || 0], ["低于阈值/预算不足", r.skipBelowThreshold || 0]
+    ];
+    body.innerHTML = rows.map(function (row) {
+      return '<span class="stat" style="margin-right:14px">' + esc(row[0]) + "：<b>" + row[1] + "</b>（" + pct(row[1]) + "）</span>";
+    }).join("");
+  } catch (e) { body.textContent = "统计加载失败"; }
 }
 
-var docResultsBox = document.getElementById("docResults");
-var docHistoryBox = document.getElementById("docHistory");
-
-document.getElementById("btnGenerate").addEventListener("click", generateDoc);
-document.getElementById("docPrompt").addEventListener("keydown", function (e) {
-  if (e.key === "Enter") generateDoc();
-});
-function generateDoc() {
-  var type = document.getElementById("docType").value;
-  var prompt = document.getElementById("docPrompt").value.trim();
-  if (!prompt) { alert("请描述要生成的文档"); return; }
-  var btn = document.getElementById("btnGenerate");
-  btn.disabled = true; btn.textContent = "生成中（LLM 出骨架 + 渲染，约 10-60s）…";
-  docReq("/generate", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ type: type, prompt: prompt })
-  }).then(function (g) {
-    docResultsBox.innerHTML = renderDocCard(g);
-    loadDocHistory();
-  }).catch(function (e) {
-    docResultsBox.innerHTML = '<p class="hint" style="color:var(--err)">生成失败：' + esc(e.message) + "</p>";
-  }).finally(function () { btn.disabled = false; btn.textContent = "生成"; });
-}
-
-function renderDocCard(g) {
-  var origin = window.location.origin;
-  var src = encodeURIComponent(origin + g.downloadUrl);
-  return '<div class="kb-card" style="margin-top:10px"><h3>' + esc(g.name) + "</h3>" +
-    '<span class="stat">' + esc(g.docType) + (g.kbIngested ? " · 已同步进知识库" : "") + "</span>" +
-    '<div class="ops"><a class="btn xs" href="' + origin + g.downloadUrl + '" download>下载</a>' +
-    '<a class="btn xs" href="/doc/preview.html?src=' + src + '" target="_blank" rel="noopener">预览</a></div></div>';
-}
-
-function loadDocHistory() {
-  if (!authed) return;
-  docReq("/?limit=8").then(function (data) {
-    var docs = data.documents || [];
-    if (!docs.length) { docHistoryBox.innerHTML = ""; return; }
-    docHistoryBox.innerHTML = '<h3 style="font-size:13px;margin:0 0 6px">最近生成</h3>' +
-      docs.map(function (d) {
-        var origin = window.location.origin;
-        var src = encodeURIComponent(origin + "/api/documents/" + d.id + "/download");
-        return '<div class="kb-row"><span class="name">' + esc(d.name) + "</span>" +
-          '<span class="meta">' + esc(d.docType) + " · " + fmtBytes(d.sizeBytes) + "</span>" +
-          '<a class="ghost xs" href="/doc/preview.html?src=' + src + '" target="_blank" rel="noopener">预览</a>' +
-          '<a class="ghost xs" href="' + origin + "/api/documents/" + d.id + '/download" download>下载</a></div>';
-      }).join("");
-  }).catch(function () {});
-}
+})();

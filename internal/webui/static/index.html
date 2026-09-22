@@ -13,17 +13,7 @@
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" media="print" onload="this.media='all'">
 <noscript><link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet"></noscript>
 <link rel="stylesheet" href="/assets/style.css?v=__BUILD__">
-<script>
-/* 主题必须在首次绘制前落到 <html>：等 app.js 执行会先闪一帧深色。
-   解析规则与 app.js 的 applyTheme 共用同一份语义（模式存在 sb.theme）。 */
-(function () {
-  try {
-    var mode = localStorage.getItem("sb.theme") || "system";
-    var light = window.matchMedia("(prefers-color-scheme: light)").matches;
-    document.documentElement.dataset.theme = mode === "system" ? (light ? "light" : "dark") : mode;
-  } catch (e) { /* 保留 HTML 上的 dark 兜底 */ }
-})();
-</script>
+<script src="/assets/theme.js?v=__BUILD__"></script>
 </head>
 <body>
 <div class="toast-wrap" id="toastWrap"></div>
@@ -46,6 +36,7 @@
       <div class="nav-label">系统</div>
       <button data-page="intel"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg><span class="txt">智能测试</span></button>
       <a href="/kb.html" style="display:flex;align-items:center;gap:10px;padding:6px 10px;border-radius:var(--r-md);color:var(--ink-subtle);font-size:13px;text-decoration:none" title="团队知识库：上传文档 → 向量检索 → 会话自动带入"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg><span class="txt">知识库</span></a>
+      <a href="/docgen.html" style="display:flex;align-items:center;gap:10px;padding:6px 10px;border-radius:var(--r-md);color:var(--ink-subtle);font-size:13px;text-decoration:none" title="文档生成：LLM 出骨架 → PPT/Word/Excel → 下载/预览/重新生成"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M12 18v-6M9 15l3 3 3-3"/></svg><span class="txt">文档</span></a>
       <button data-page="audit"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M9 13h6M9 17h6"/></svg><span class="txt">审计日志</span></button>
       <button data-page="tokens"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg><span class="txt">Token 管理</span></button>
       <button data-page="settings"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg><span class="txt">设置</span></button>
@@ -240,7 +231,7 @@
       </div>
 
       <!-- 实时流 -->
-      <div id="page-stream" class="page hidden">
+      <div id="page-stream" class="page stream-page hidden">
         <div class="card">
           <h2><span class="dot"></span>上游事件流（SSE）</h2>
           <p class="muted" style="font-size:12px;margin-top:0">
@@ -716,8 +707,8 @@
           <div id="aiRuleMsg" class="msg"></div>
         </div>
         <div class="card">
-          <h2><span class="dot"></span>浏览器系统通知</h2>
-          <p class="muted" style="font-size:12px;margin-top:0">页面最小化或在后台时，关键事件（任务失败/阻塞、硬件告警、环境门禁、审计发现等）会通过浏览器系统通知提醒。</p>
+          <h2><span class="dot"></span>系统通知</h2>
+          <p class="muted" style="font-size:12px;margin-top:0">关键事件（新消息 / 会话完成 / 待回应、任务失败与阻塞、硬件告警、环境门禁、审计发现等）系统提醒。桌面客户端走原生系统通知（前台也弹）；浏览器端页面在后台时弹。</p>
           <div class="row" style="margin-top:12px">
             <button onclick="sysNotifOn() ? disableSysNotif() : enableSysNotif()" id="sysNotifBtn">开启系统通知</button>
             <span id="sysNotifStatus" class="muted" style="font-size:12px"></span>
