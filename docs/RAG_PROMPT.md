@@ -187,12 +187,15 @@ Go 端拼装层对外只呈现三种结果：
 - 命中场景计入审计链路，来源带 provenance（文档名 + 章节 + 相关度）。
 
 > **⚠️ 实现现状**：`X-Rag-Spliced: 0|1` 已在 v2.1.0 落地（仅 `prompt_async` 响应携带）；
-> 降级原因目前只落服务端日志（`rag splice: search skip: …`），尚无独立的命中/未命中计数指标；
-> 命中场景的审计 provenance 未接入。
+> 降级原因只落服务端日志并计入 `/api/kb/stats` 计数器（spliced / skipNoEmbedding /
+> skipNoVector / skipTimeout / skipNoResult / skipBelowThreshold），Web 知识库页
+> `kb.html` 有可视化面板；检索结果在进程内缓存（`kbSearchCache`，按查询+集合范围+topK+
+> 阈值，KB 写操作全量失效）。命中场景的审计 provenance 未接入。
 
 ## 10. 未决问题
 
-- [ ] 检索与拼装是否按 collection 隔离（按会话目录所属项目自动选择知识库集合，还是全局一个库）。
+- [x] 检索与拼装是否按 collection 隔离：`--rag-collection-ids <逗号分隔>` 已落地
+  （空 = 全库，见 `docs/ROADMAP.md`）；按会话目录自动绑定集合仍开放。
 - [ ] `X-Rag-Spliced` 是否值得透传到 App UI 展示「已带入 N 条资料」。
 - [ ] 知识库文档管理与图库 upload 走 Web 配置页还是仅 API。
 - [ ] 多端知识库一致性：Web 已 ingest、App 路由本机时索引是否需先构建。

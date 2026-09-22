@@ -145,6 +145,10 @@ docker compose --profile postgres up -d   # 附带 PG，可用 STARBURST_PG_DSN 
 - **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** — 架构设计、数据模型、关键流程
 - **[docs/TEST_INTELLIGENCE.md](docs/TEST_INTELLIGENCE.md)** — 测试智能子系统的设计文档（子包划分、扫描与归因规则、门禁与人工覆写模型）
 
+### 客户端
+
+- **桌面客户端**（`starburst-desktop`，独立仓库）：Electron 薄壳，填后端 IP:端口直连远端控制台；新消息 / 会话完成 / 待回应等走原生系统通知（Web UI 检测 `window.desktopApi` 路由，浏览器回退 HTML5）。连接流程与通知链路见该仓库 `README.md`。
+
 ## 目录结构
 
 ```

@@ -201,6 +201,13 @@ LLM 输出示例（生成 PPT）：
   把 docId 传给 regenerate。
 - 备选：客户端本地映射表（跨端丢失）；**选文件名约定**：随会话走、不落客户端状态。
 
+> **⚠️ 实现现状**：v2.1.0 已落地 `-@doc{id}` 约定（无横线）：`GET
+> /api/documents/{id}/download` 的 `Content-Disposition` 文件名携带 `-@doc{id}`；
+> `POST /api/documents/{id}/attach` 把产物复制进会话工作目录
+> `uploads/<name>-@doc<id><ext>` 并返回 workdir 相对路径，客户端据此发
+> `{type:"file",path}` part 即可把生成文档带入会话。Web 聊天文件卡片对含 `-@doc<id>`
+> 的文件显示「重新生成 / 按意见修改」，结果卡可一键「发送到本会话」。
+
 ### 6.2 重新生成 / 迭代
 
 ```
@@ -254,7 +261,18 @@ LLM 输出示例（生成 PPT）：
 - [ ] 产物存储介质：本地目录 or 接入 MinIO（`SCRM_STORAGE_PROVIDER` 已有双后端抽象可参考）。
 - [ ] docId 文件名约定是否会与鉴权 / 下载路径冲突（`validateIntelLocalPath` 同款路径清洗）。
 - [ ] 预览页是否支持「编辑骨架 → 重渲染」（Web 端进阶，可能滑出 v2.1.0）。
-- [ ] 生成产物反向 ingest KB 的触发点（默认生成即入库？还是一次性任务？）。
+- [ ] 生成产物反向 ingest KB 的触发点（默认生成即入库？还是一次性任务？）。**⚠️ 实现现状**：
+      Web 生成区提供「反向入库集合」下拉，选中后生成/重新生成产物自动 ingest；同一 docId 的
+      旧 KB 副本（`-@doc<id>` 后缀）先删除再写入，保证每份文档只有最新一版入库。
+- [x] **生成模板库**：KB 页「内置模板」下拉（纯前端 `kb.js` `DOC_TEMPLATES`），选中即填充
+      `docType` + `prompt`，覆盖 pptx（发布会/周报/立项汇报）、xlsx（报价单/漏斗/排期）、
+      docx（纪要/周报/业务汇报）。模板仅作 prompt 预设，不绕过骨架校验与渲染。
+- [x] **生成参考知识库**：generate/regenerate 支持 `kbCollectionIds`/`kbCollectionId`，生成前
+      先把需求丢进 KB 检索，命中片段以「参考资料」（`[来源N]`，单条 ≤900 字）注入骨架 prompt，
+      产物数字/表述贴合知识库；未指定集合回退 `--rag-collection-ids`，检索失败不阻断生成。
+- [ ] **生成任务异步化**：当前 `/api/documents/generate` 同步 2min 内联；复用
+      `internal/tasks` + `internal/push` 异步化 + `doc.event` 推送进度。`executor.go`/`task.go`
+      在并发 agent 未提交改动集内，等收口后做。
 
 ## 参考
 

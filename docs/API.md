@@ -684,12 +684,16 @@ data: {"payload":{"type":"message.part.updated","properties":{...}}}
   `{id,name,description,documentCount,chunkCount,createdAt,updatedAt}`。
 - `POST /api/kb/collections` `{"name":"团队库","description":"需求文档"}` → **200**（不是 201）+
   KBCollection。`name` 去空必填（400）；重名 → **409** `collection name already exists`。
+- `PATCH /api/kb/collections/{id}` `{"name":"新名","description":"新描述"}` → 200 + 更新后的
+  KBCollection。`name`/`description` 至少一个非空（否则 400）；`name` 为空保留原名；
+  重名 → **409**；id 不存在 → **404**。改名会失效 KB 检索缓存（source 展示用集合名）。
 - `DELETE /api/kb/collections/{id}` → `{"ok":true}`（级联删除集合下所有文档与 chunk）。id 非
   正整数 → 400 `invalid collection id`；集合不存在同样返回 `{"ok":true}`（删除幂等、无 404）。
   本路径只注册 DELETE，其余方法 → 405。
-- `GET /api/kb/documents?collectionId=&limit=` → `{"documents":[KBDocument]}`（`id` 倒序）。
-  `collectionId` 必须是正整数（缺失/非法 → 400 `collectionId is required`）；`limit` 默认 50、
-  最大 200（越界回退）。
+- `GET /api/kb/documents?collectionId=&limit=&offset=` → `{"documents":[KBDocument],"total":<n>}`
+  （`id` 倒序）。`collectionId` 必须是正整数（缺失/非法 → 400 `collectionId is required`）；
+  `limit` 默认 50、最大 200（越界回退）；`offset` 默认 0（负数回退）。`total` 是该集合真实文档
+  总数，供前端分页。
 - `GET /api/kb/documents/{id}` → KBDocument：`{id,collectionId,name,mime,sizeBytes,status,
   chunkCount,error?,createdAt,updatedAt}`，`status` ∈ `pending|indexed|failed`；404 → 不存在。
 - `DELETE /api/kb/documents/{id}` → `{"ok":true}`（级联删除其 chunk）；id 非正整数 → 400
@@ -700,17 +704,19 @@ data: {"payload":{"type":"message.part.updated","properties":{...}}}
 请求三选一：
 ```json
 { "collectionId": 1, "name": "仓储制度", "content": "纯文本 / Markdown 内容" }
-{ "collectionId": 1, "name": "报价单.pdf", "contentBase64": "<base64>" }
-multipart/form-data: file + collectionId + name? + mime? + fileName?
+{ "collectionId": 1, "name": "报价单.pdf", "contentBase64": "<base64>", "replace": true }
+multipart/form-data: file + collectionId + name? + mime? + fileName? + replace?
 ```
 - `contentBase64` 非空时走 `internal/doc.Parse` 解析成 Markdown 再进入分块链路；支持的二进制
   类型（按扩展名/MIME）：`pdf`、`xlsx`、`xls`、`csv`、`docx`、`pptx`。
+- `replace`（JSON 布尔 / multipart `1|true|on|yes`）为 true 时，先按 `(collectionId, name)`
+  删除同名旧文档（级联清 chunk）再入库——重传修订版自动替换而不是堆积重复文档。
 - **multipart**：大文件绕过 4MiB JSON 上限（≤10MiB），`file` 字段必填；纯文本类
   （`text/*` mime 或 `.md/.txt/.json/.yaml/.log/.xml/.toml/.ini/.conf` 扩展名）按原文入库，
   其余二进制走 `doc.Parse`。
-- 200 → `{"document":{...KBDocument},"chunks":<n>}`。同步执行（5min 上限）：按 Markdown 标题
-  切块（无标题则以文档名为标题，单块正文目标 ~800 rune）、批量向量化、一次性落库
-  （成功 `status=indexed`；中途失败回写 `status=failed` + `error`）。
+- 200 → `{"document":{...KBDocument},"chunks":<n>,"replaced":<bool>}`。同步执行（5min 上限）：
+  按 Markdown 标题切块（无标题则以文档名为标题，单块正文目标 ~800 rune）、批量向量化、一次性
+  落库（成功 `status=indexed`；中途失败回写 `status=failed` + `error`）。
 - 400 → `collectionId`/`name` 缺失、`content` 与 `contentBase64` 同时为空、
   `contentBase64` 非法 base64、类型不支持（`unsupported document type: <name>`）或解析失败。
 - 413 → multipart 文件超 10MiB；503 → 未配置嵌入模型（`embeddings not configured`）或
@@ -740,8 +746,9 @@ RAG-in-Prompt 结局计数器（进程内累计，重启归零）：
 { "rag": { "spliced": 3, "skipNoEmbedding": 1, "skipNoVector": 0,
            "skipTimeout": 0, "skipNoResult": 2, "skipBelowThreshold": 0 } }
 ```
-- `spliced`=命中并拼装；`skipNoEmbedding`/`skipNoVector`=能力缺失；`skipTimeout`=800ms 检索超时；
-  `skipNoResult`=无命中/检索失败；`skipBelowThreshold`=命中但低于阈值/预算放不下。双通道鉴权。
+- `spliced`=命中并拼装；`skipNoEmbedding`/`skipNoVector`=能力缺失；`skipTimeout`=检索超时
+  （默认 8s，`--rag-timeout` 可配）；`skipNoResult`=无命中/检索失败；`skipBelowThreshold`=命中但
+  低于阈值/预算放不下。双通道鉴权。Web 知识库页 `kb.html` 有可视化面板。
 
   按相关度降序；`source` 取文档名，文档已删时回落 `文档#<id>`。
 - 503 → SQLite 无 pgvector 或未配置嵌入模型。本端点即是 RAG-in-Prompt 代理层的检索入口。
@@ -769,24 +776,36 @@ RAG-in-Prompt 结局计数器（进程内累计，重启归零）：
 > `<docs-dir>/<id><ext>`。`--docs-dir` / `STARBURST_DOCS_DIR` 配置（默认 `./data/docs`，按需
 > 创建）。文档类型由请求方决定，LLM 只产对应 body（`sheets`/`paragraphs`/`slides`）。
 
-- `POST /api/documents/generate` `{"type":"xlsx|docx|pptx","prompt":"做一份排期表","kbCollectionId":3?}`
-  → **200** `{"id":12,"name":"排期表","docType":"xlsx","kbIngested":false,"downloadUrl":"/api/documents/12/download"}`.
+- `POST /api/documents/generate` `{"type":"xlsx|docx|pptx","prompt":"做一份排期表","kbCollectionId":3?,"kbCollectionIds":[3,4]?}`
+  → **200** `{"id":12,"name":"排期表","docType":"xlsx","sizeBytes":2048,"kbIngested":false,"downloadUrl":"/api/documents/12/download"}`.
   `prompt` 必填、`type` 必须是 `xlsx|docx|pptx`（否则 400）；未配编排 LLM、或未配 `--docs-dir` →
   **503**；骨架失败/渲染失败/落盘失败 → 500。**同步**，2min 上限（不会 204 立即返回）。
   `kbCollectionId` 可选：>0 时把渲染产物 `doc.Parse` 成 Markdown 反向入库（best-effort，
-  失败只置 `kbIngested:false` 并记日志，不阻断生成）。
-- `POST /api/documents/regenerate` `{"docId":12,"instruction":"把第3页改成对比图","sessionId":"ses_...","kbCollectionId":3?}`
-  → 200 + 同样的 `{id,name,docType,kbIngested,downloadUrl}`。基于原骨架 + 修改意见 + 最近会话上下文
-  （best-effort：最近 20 条 turn、单条截 500 字、共 ≤4000 字、5s 拉取上限，失败只缺上下文不报错）
-  重新出骨架 → 重渲染 → 覆盖落盘并回写新骨架。`docId` 必填（400）；404 → 文档不存在；
-  已存类型不可再生成 → 400。其余方法 405。
+  失败只置 `kbIngested:false` 并记日志，不阻断生成）；同 `docId` 的旧 KB 副本（`-@doc<id>` 后缀）
+  先删除再写入，保证只有最新一版。
+  `kbCollectionIds`（或兼容的 `kbCollectionId`）同时作为**生成参考源**：生成前先把 prompt 丢进
+  KB 检索，命中片段以「参考资料」注入骨架 prompt（`[来源N]` 头，单条 ≤900 字），让产物数字/
+  表述贴合知识库；未指定集合时回退 `--rag-collection-ids` 全局范围，检索失败不影响生成。
+- `POST /api/documents/regenerate` `{"docId":12,"instruction":"把第3页改成对比图","sessionId":"ses_...","kbCollectionId":3?,"kbCollectionIds":[3]?}`
+  → 200 + 同样的 `{id,name,docType,sizeBytes,kbIngested,downloadUrl}`。基于原骨架 + 修改意见 +
+  最近会话上下文（best-effort：最近 20 条 turn、单条截 500 字、共 ≤4000 字、5s 拉取上限，失败只缺
+  上下文不报错）重新出骨架 → 重渲染 → 覆盖落盘并回写新骨架。重新生成的参考源取修改意见
+  （无则原需求），`kbCollectionIds`/`kbCollectionId` 同 generate。`docId` 必填（400）；404 →
+  文档不存在；已存类型不可再生成 → 400。其余方法 405。
 - `GET /api/documents?limit=` → `{"documents":[DocDocument]}`（`id` 倒序，`limit` 默认 50、最大
   200）。DocDocument：`{id,name,docType,prompt,skeleton,sizeBytes,status,error?,createdAt,updatedAt}`，
   `status` ∈ `created|ready|failed`。
 - `GET /api/documents/{id}` → 单个 DocDocument；404 → 不存在。
 - `DELETE /api/documents/{id}` → `{"ok":true}`（连同磁盘文件一起删）；404 → 不存在。
 - `GET /api/documents/{id}/download` → 文件字节流，`Content-Disposition: attachment`
-  （文件名净化，保留原始名字），按类型回 OOXML `Content-Type`。404 → 记录不存在或磁盘文件缺失。
+  （文件名 = `<name>-@doc<id><ext>`，携带 docId 标记供跨端找回映射），按类型回 OOXML
+  `Content-Type`。404 → 记录不存在或磁盘文件缺失。
+- `POST /api/documents/{id}/attach` `{"sessionId":"ses_..."}` → **200**
+  `{"ok":true,"name":"排期-@doc12.xlsx","path":"uploads/排期-@doc12.xlsx","absolutePath":"/w/uploads/排期-@doc12.xlsx","size":2048,"docId":12}`。
+  把生成产物复制进会话工作目录 `uploads/`（文件名带 `-@doc<id>`），客户端据此发
+  `{type:"file",path}` part 即可把生成文档带入会话（docs/DOCUMENTS.md §6.1）。
+  会话不存在 / 上游不可达 → **502** `resolve session directory`；会话目录越界（
+  `validateWorkDirectory`）→ **403**。文档不存在 → 404；`sessionId` 必填 → 400。
 
 ### 会话内文档预览（`/doc/preview.html`，免鉴权 webui 静态页）
 
