@@ -73,12 +73,20 @@ func TestKnowledgeBaseCRUD(t *testing.T) {
 	if _, err := st.GetKBDocument(ctx, doc.ID); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("deleted doc should 404, got %v", err)
 	}
+	// 文档删除必须级联清掉其 chunk。
+	if n, err := st.CountKBChunks(ctx, col.ID); err != nil || n != 0 {
+		t.Fatalf("chunks after doc delete = %d, %v (want 0)", n, err)
+	}
 
 	if err := st.DeleteKBCollection(ctx, col.ID); err != nil {
 		t.Fatalf("delete collection: %v", err)
 	}
 	if _, err := st.GetKBCollection(ctx, col.ID); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("deleted collection should 404, got %v", err)
+	}
+	// 集合删除必须级联清掉其文档与 chunk。
+	if n, err := st.CountKBChunks(ctx, col.ID); err != nil || n != 0 {
+		t.Fatalf("chunks after collection delete = %d, %v (want 0)", n, err)
 	}
 }
 

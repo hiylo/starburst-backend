@@ -27,7 +27,8 @@ type Setting struct {
 type Token struct {
 	ID        string     `json:"id"`
 	Name      string     `json:"name"`
-	TokenHash string     `json:"-"` // sha256 hex; never serialized to clients
+	Scope     string     `json:"scope"` // "admin" | "device"（空值按 admin 处理）
+	TokenHash string     `json:"-"`     // sha256 hex; never serialized to clients
 	CreatedAt time.Time  `json:"createdAt"`
 	RevokedAt *time.Time `json:"revokedAt"`
 	LastUsed  *time.Time `json:"lastUsed"`
@@ -529,6 +530,8 @@ type Store interface {
 	// given collections (empty = all). PostgreSQL/pgvector only: returns
 	// ErrRagUnsupported on SQLite.
 	SearchKBChunks(ctx context.Context, collectionIDs []int64, embedding []float32, limit int) ([]*KBChunk, error)
+	// CountKBChunks returns the number of chunks in a collection.
+	CountKBChunks(ctx context.Context, collectionID int64) (int64, error)
 
 	// ---- Generated documents (/api/documents/*) ----
 
@@ -602,10 +605,14 @@ func (s *sqlStore) SetSetting(ctx context.Context, key, value string) error {
 }
 
 func (s *sqlStore) CreateToken(ctx context.Context, t *Token) error {
+	scope := t.Scope
+	if scope == "" {
+		scope = "admin" // 默认 admin，兼容旧调用方
+	}
 	_, err := s.db.ExecContext(ctx, s.q(`
-		INSERT INTO tokens (id, name, token_hash, created_at, revoked_at, last_used)
-		VALUES (?, ?, ?, CURRENT_TIMESTAMP, NULL, NULL)`),
-		t.ID, t.Name, t.TokenHash,
+		INSERT INTO tokens (id, name, scope, token_hash, created_at, revoked_at, last_used)
+		VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP, NULL, NULL)`),
+		t.ID, t.Name, scope, t.TokenHash,
 	)
 	return err
 }
@@ -615,10 +622,10 @@ func (s *sqlStore) GetTokenByHash(ctx context.Context, hash string) (*Token, err
 	var revoked *time.Time
 	var lastUsed *time.Time
 	err := s.db.QueryRowContext(ctx, s.q(`
-		SELECT id, name, token_hash, created_at, revoked_at, last_used
+		SELECT id, name, scope, token_hash, created_at, revoked_at, last_used
 		FROM tokens WHERE token_hash = ? AND revoked_at IS NULL LIMIT 1`),
 		hash,
-	).Scan(&t.ID, &t.Name, &t.TokenHash, &t.CreatedAt, &revoked, &lastUsed)
+	).Scan(&t.ID, &t.Name, &t.Scope, &t.TokenHash, &t.CreatedAt, &revoked, &lastUsed)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -629,7 +636,7 @@ func (s *sqlStore) GetTokenByHash(ctx context.Context, hash string) (*Token, err
 
 func (s *sqlStore) ListTokens(ctx context.Context) ([]*Token, error) {
 	rows, err := s.db.QueryContext(ctx, s.q(`
-		SELECT id, name, token_hash, created_at, revoked_at, last_used
+		SELECT id, name, scope, token_hash, created_at, revoked_at, last_used
 		FROM tokens ORDER BY created_at DESC`))
 	if err != nil {
 		return nil, err
@@ -641,7 +648,7 @@ func (s *sqlStore) ListTokens(ctx context.Context) ([]*Token, error) {
 		t := &Token{}
 		var revoked *time.Time
 		var lastUsed *time.Time
-		if err := rows.Scan(&t.ID, &t.Name, &t.TokenHash, &t.CreatedAt, &revoked, &lastUsed); err != nil {
+		if err := rows.Scan(&t.ID, &t.Name, &t.Scope, &t.TokenHash, &t.CreatedAt, &revoked, &lastUsed); err != nil {
 			return nil, err
 		}
 		t.RevokedAt = revoked

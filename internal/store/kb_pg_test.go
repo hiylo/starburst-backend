@@ -56,3 +56,55 @@ func TestPostgresKBSearch(t *testing.T) {
 		t.Fatalf("global top = %q", all[0].Title)
 	}
 }
+
+// TestPostgresKBCascadeDeletes pins that deleting a document/collection also
+// removes its chunks, so global search never surfaces orphaned fragments.
+func TestPostgresKBCascadeDeletes(t *testing.T) {
+	st := openScratchStore(t)
+	ctx := context.Background()
+
+	col, err := st.CreateKBCollection(ctx, "级联库", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc := &KBDocument{CollectionID: col.ID, Name: "c.md", Status: "indexed"}
+	if err := st.CreateKBDocument(ctx, doc); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.ReplaceKBDocumentChunks(ctx, doc, []*KBChunk{
+		{Seq: 1, Title: "a", Content: "甲", Embedding: oneHot(EmbedDim, 3)},
+		{Seq: 2, Title: "b", Content: "乙", Embedding: oneHot(EmbedDim, 4)},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// 删除文档 → 其 chunk 必须消失。
+	if err := st.DeleteKBDocument(ctx, doc.ID); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := st.CountKBChunks(ctx, col.ID); err != nil || n != 0 {
+		t.Fatalf("chunks after doc delete = %d, %v", n, err)
+	}
+	// 集合文档计数被刷新。
+	got, err := st.GetKBCollection(ctx, col.ID)
+	if err != nil || got.DocumentCount != 0 {
+		t.Fatalf("collection counters after doc delete = %+v, %v", got, err)
+	}
+
+	// 重建后再删集合 → 文档与 chunk 一起消失，全局检索无孤儿。
+	doc2 := &KBDocument{CollectionID: col.ID, Name: "d.md", Status: "indexed"}
+	if err := st.CreateKBDocument(ctx, doc2); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.ReplaceKBDocumentChunks(ctx, doc2, []*KBChunk{
+		{Seq: 1, Title: "x", Content: "丙", Embedding: oneHot(EmbedDim, 5)},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.DeleteKBCollection(ctx, col.ID); err != nil {
+		t.Fatal(err)
+	}
+	if all, err := st.SearchKBChunks(ctx, nil, oneHot(EmbedDim, 5), 5); err != nil || len(all) != 0 {
+		t.Fatalf("global search after collection delete = %d, %v (want 0 orphan)", len(all), err)
+	}
+}

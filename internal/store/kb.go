@@ -121,6 +121,14 @@ func (s *sqlStore) ListKBCollections(ctx context.Context) ([]*KBCollection, erro
 
 // DeleteKBCollection removes a collection and all of its documents and chunks.
 func (s *sqlStore) DeleteKBCollection(ctx context.Context, id int64) error {
+	if _, err := s.db.ExecContext(ctx, s.q(
+		`DELETE FROM kb_chunks WHERE collection_id = ?`), id); err != nil {
+		return err
+	}
+	if _, err := s.db.ExecContext(ctx, s.q(
+		`DELETE FROM kb_documents WHERE collection_id = ?`), id); err != nil {
+		return err
+	}
 	if _, err := s.db.ExecContext(ctx, s.q(`DELETE FROM kb_collections WHERE id = ?`), id); err != nil {
 		return err
 	}
@@ -198,12 +206,39 @@ func (s *sqlStore) UpdateKBDocumentResult(ctx context.Context, id int64, status 
 	return err
 }
 
-// DeleteKBDocument removes a document and all of its chunks.
+// DeleteKBDocument removes a document and all of its chunks, then refreshes
+// the parent collection's counters.
 func (s *sqlStore) DeleteKBDocument(ctx context.Context, id int64) error {
+	collectionID, err := s.kbDocumentCollectionID(ctx, id)
+	if err != nil {
+		return err
+	}
+	if _, err := s.db.ExecContext(ctx, s.q(
+		`DELETE FROM kb_chunks WHERE document_id = ?`), id); err != nil {
+		return err
+	}
 	if _, err := s.db.ExecContext(ctx, s.q(`DELETE FROM kb_documents WHERE id = ?`), id); err != nil {
 		return err
 	}
+	if collectionID > 0 {
+		return s.refreshKBCounters(ctx, collectionID)
+	}
 	return nil
+}
+
+// kbDocumentCollectionID resolves a document's collection (0 when the document
+// is already gone — treat as a no-op delete).
+func (s *sqlStore) kbDocumentCollectionID(ctx context.Context, id int64) (int64, error) {
+	var collectionID int64
+	err := s.db.QueryRowContext(ctx, s.q(
+		`SELECT collection_id FROM kb_documents WHERE id = ?`), id).Scan(&collectionID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return 0, nil
+		}
+		return 0, err
+	}
+	return collectionID, nil
 }
 
 // ReplaceKBDocumentChunks rebuilds a document's chunks: delete the old set and
@@ -300,6 +335,15 @@ func (s *sqlStore) SearchKBChunks(ctx context.Context, collectionIDs []int64, em
 		out = append(out, c)
 	}
 	return out, rows.Err()
+}
+
+// CountKBChunks returns how many chunks exist for a collection (detail view /
+// cascade-delete verification).
+func (s *sqlStore) CountKBChunks(ctx context.Context, collectionID int64) (int64, error) {
+	var n int64
+	err := s.db.QueryRowContext(ctx, s.q(
+		`SELECT COUNT(*) FROM kb_chunks WHERE collection_id = ?`), collectionID).Scan(&n)
+	return n, err
 }
 
 // refreshKBCounters recomputes a collection's document/chunk counts after a
