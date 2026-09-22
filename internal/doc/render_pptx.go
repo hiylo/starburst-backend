@@ -63,9 +63,84 @@ func pptxPresentationRels(n int) string {
 	return rels.String()
 }
 
-func pptxSlide(title string, bullets []string) string {
+// pptxSlide renders one slide. Layouts: ""/bullets (title+bullets), "cover"
+// (title only), "table" (title+table), "two-col" (title+left/right bullets).
+func pptxSlide(s SkeletonSlide) string {
+	title := `<p:sp><p:nvSpPr><p:cNvPr id="2" name="Title"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr/><p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:pPr algn="ctr"/><a:r><a:rPr lang="zh-CN" sz="3600"/><a:t>` +
+		xmlEscape(s.Title) + `</a:t></a:r></a:p></p:txBody></p:sp>`
+	switch s.Layout {
+	case "cover":
+		return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+<p:cSld><p:spTree>
+<p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr>
+<p:grpSpPr/>` + title + `
+</p:spTree></p:cSld>
+</p:sld>`
+	case "table":
+		tbody := ""
+		if s.Table != nil {
+			rows := [][]string{s.Table.Headers}
+			rows = append(rows, s.Table.Rows...)
+			cols := len(s.Table.Headers)
+			for _, r := range s.Table.Rows {
+				if len(r) > cols {
+					cols = len(r)
+				}
+			}
+			if cols == 0 {
+				cols = 1
+			}
+			tbody += fmt.Sprintf(`<a:tbl><a:tblPr firstRow="1" bandRow="1"><a:tableStyleId>{5C22544A-7EE6-4342-B048-85BDC9FD1C3A}</a:tableStyleId></a:tblPr><a:tblGrid><a:gridCol w="%d"/></a:tblGrid>`, 900000/cols)
+			for i, row := range rows {
+				tbody += `<a:tr h="370520">`
+				for j := 0; j < cols; j++ {
+					cell := ""
+					if j < len(row) {
+						cell = row[j]
+					}
+					tbody += `<a:tc><a:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:rPr lang="zh-CN" b="` +
+						stringBool(i == 0) + `"/><a:t>` + xmlEscape(cell) + `</a:t></a:r></a:p></a:txBody><a:tcPr/></a:tc>`
+				}
+				tbody += `</a:tr>`
+			}
+			tbody += `</a:tbl>`
+		}
+		body := `<p:sp><p:nvSpPr><p:cNvPr id="3" name="Body"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr/><p:txBody><a:bodyPr/><a:lstStyle/>` + tbody + `</p:txBody></p:sp>`
+		return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+<p:cSld><p:spTree>
+<p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr>
+<p:grpSpPr/>` + title + body + `
+</p:spTree></p:cSld>
+</p:sld>`
+	case "two-col":
+		col := func(bullets []string) string {
+			var b strings.Builder
+			for _, x := range bullets {
+				x = strings.TrimSpace(x)
+				if x == "" {
+					continue
+				}
+				b.WriteString(`<a:p><a:r><a:rPr lang="zh-CN"/><a:t>`)
+				b.WriteString(xmlEscape(x))
+				b.WriteString(`</a:t></a:r></a:p>`)
+			}
+			return b.String()
+		}
+		body := `<p:sp><p:nvSpPr><p:cNvPr id="3" name="Body"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr/><p:txBody><a:bodyPr/><a:lstStyle/>` + col(s.Left) + `</p:txBody></p:sp>` +
+			`<p:sp><p:nvSpPr><p:cNvPr id="4" name="Body2"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr/><p:txBody><a:bodyPr/><a:lstStyle/>` + col(s.Right) + `</p:txBody></p:sp>`
+		return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+<p:cSld><p:spTree>
+<p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr>
+<p:grpSpPr/>` + title + body + `
+</p:spTree></p:cSld>
+</p:sld>`
+	}
+	// default: bullets
 	var body strings.Builder
-	for _, b := range bullets {
+	for _, b := range s.Bullets {
 		b = strings.TrimSpace(b)
 		if b == "" {
 			continue
@@ -78,15 +153,19 @@ func pptxSlide(title string, bullets []string) string {
 <p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
 <p:cSld><p:spTree>
 <p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr>
-<p:grpSpPr/>
-<p:sp><p:nvSpPr><p:cNvPr id="2" name="Title"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr/><p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:pPr algn="ctr"/><a:r><a:rPr lang="zh-CN" sz="3600"/><a:t>` +
-		xmlEscape(title) +
-		`</a:t></a:r></a:p></p:txBody></p:sp>
+<p:grpSpPr/>` + title + `
 <p:sp><p:nvSpPr><p:cNvPr id="3" name="Body"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr/><p:txBody><a:bodyPr/><a:lstStyle/>` +
 		body.String() +
 		`</p:txBody></p:sp>
 </p:spTree></p:cSld>
 </p:sld>`
+}
+
+func stringBool(b bool) string {
+	if b {
+		return "1"
+	}
+	return "0"
 }
 
 // renderPPTX builds a minimal .pptx: one slide master/layout plus a slide per
@@ -96,16 +175,16 @@ func renderPPTX(sk Skeleton) ([]byte, error) {
 		return nil, fmt.Errorf("doc: pptx skeleton has no slides")
 	}
 	entries := map[string]string{
-		"[Content_Types].xml":               pptxContentTypes(len(sk.Slides)),
-		"_rels/.rels":                       pptxRelsRoot,
-		"ppt/presentation.xml":              pptxPresentation(len(sk.Slides)),
-		"ppt/_rels/presentation.xml.rels":   pptxPresentationRels(len(sk.Slides)),
-		"ppt/slideMasters/slideMaster1.xml": pptxMaster,
+		"[Content_Types].xml":                          pptxContentTypes(len(sk.Slides)),
+		"_rels/.rels":                                  pptxRelsRoot,
+		"ppt/presentation.xml":                         pptxPresentation(len(sk.Slides)),
+		"ppt/_rels/presentation.xml.rels":              pptxPresentationRels(len(sk.Slides)),
+		"ppt/slideMasters/slideMaster1.xml":            pptxMaster,
 		"ppt/slideMasters/_rels/slideMaster1.xml.rels": pptxMasterRels,
 		"ppt/slideLayouts/slideLayout1.xml":            pptxLayout,
 	}
 	for i, s := range sk.Slides {
-		entries[fmt.Sprintf("ppt/slides/slide%d.xml", i+1)] = pptxSlide(s.Title, s.Bullets)
+		entries[fmt.Sprintf("ppt/slides/slide%d.xml", i+1)] = pptxSlide(s)
 	}
 	return buildZipDoc(entries), nil
 }

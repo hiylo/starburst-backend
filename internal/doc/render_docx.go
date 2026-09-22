@@ -4,6 +4,8 @@ import (
 	"archive/zip"
 	"bytes"
 	"encoding/xml"
+	"fmt"
+	"strconv"
 	"strings"
 )
 
@@ -42,6 +44,16 @@ func renderDOCX(sk Skeleton) ([]byte, error) {
 		body.WriteString(xmlEscape(text))
 		body.WriteString("</w:t></w:r></w:p>")
 	}
+	for _, t := range sk.Tables {
+		widths := t.Widths
+		if len(widths) == 0 && len(t.Headers) > 0 {
+			widths = make([]int, len(t.Headers))
+			for i := range widths {
+				widths[i] = 4800 / len(t.Headers)
+			}
+		}
+		body.WriteString(renderWordTable(t, widths))
+	}
 	body.WriteString("<w:sectPr/></w:body>")
 
 	documentXML := `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
@@ -57,6 +69,66 @@ func renderDOCX(sk Skeleton) ([]byte, error) {
 
 // buildZipDoc packs raw entries into a zip archive (used by the OOXML
 // renderers, which must produce a streamed package, not a file).
+// renderWordTable emits a WordprocessingML table (header row bold + borders).
+func renderWordTable(t SkeletonTable, widths []int) string {
+	padWidths := func(n int, extra int) []int {
+		out := make([]int, n)
+		w := extra
+		if n > 0 {
+			w = extra / n
+		}
+		for i := range out {
+			if i < len(widths) && widths[i] > 0 {
+				out[i] = widths[i]
+			} else {
+				out[i] = w
+			}
+		}
+		return out
+	}
+	var sb strings.Builder
+	sb.WriteString("<w:tbl><w:tblPr><w:tblW w:w=\"0\" w:type=\"auto\"/><w:tblBorders>")
+	for _, side := range []string{"top", "left", "bottom", "right", "insideH", "insideV"} {
+		fmt.Fprintf(&sb, "<w:%s w:val=\"single\" w:sz=\"4\" w:space=\"0\" w:color=\"auto\"/>", side)
+	}
+	sb.WriteString("</w:tblBorders></w:tblPr>")
+
+	cols := [][]string{t.Headers}
+	cols = append(cols, t.Rows...)
+	cellWidths := padWidths(maxCols(t.Headers, t.Rows), 4800)
+	for i, row := range cols {
+		sb.WriteString("<w:tr>")
+		for j, cell := range row {
+			sb.WriteString("<w:tc><w:tcPr><w:tcW w:w=\"")
+			if j < len(cellWidths) {
+				sb.WriteString(strconv.Itoa(cellWidths[j]))
+			} else {
+				sb.WriteString("2400")
+			}
+			sb.WriteString("\"/></w:tcPr><w:p>")
+			if i == 0 {
+				sb.WriteString(`<w:pPr><w:pStyle w:val="Heading1"/></w:pPr>`)
+			}
+			sb.WriteString("<w:r><w:t xml:space=\"preserve\">")
+			sb.WriteString(xmlEscape(cell))
+			sb.WriteString("</w:t></w:r></w:p></w:tc>")
+		}
+		sb.WriteString("</w:tr>")
+	}
+	sb.WriteString("</w:tbl>")
+	return sb.String()
+}
+
+func maxCols(header []string, rows [][]string) int {
+	n := len(header)
+	for _, r := range rows {
+		if len(r) > n {
+			n = len(r)
+		}
+	}
+	return n
+}
+
 func buildZipDoc(entries map[string]string) []byte {
 	var buf bytes.Buffer
 	w := zip.NewWriter(&buf)

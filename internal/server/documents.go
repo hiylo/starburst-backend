@@ -61,12 +61,24 @@ const docGenerateSystem = `你是文档生成助手。根据用户需求输出�
 {
   "title": "文档标题",
   // 仅当类型为 xlsx 时：
-  "sheets": [{"name": "表名", "rows": [["列1","列2"],["值1","值2"]]}],
+  "sheets": [{
+    "name": "表名",
+    "rows": [["列1","列2"],["值1","值2"]],
+    "charts": [{"type":"bar|line|pie|area|doughnut|radar","title":"图标题","startRow":1,"startCol":1,"endRow":4,"endCol":2}]
+  }],
   // 仅当类型为 docx 时：
   "paragraphs": ["段落1", "标题段落可用 \"# 标题\" 前缀"],
+  "tables": [{"headers":["列1","列2"],"rows":[["值1","值2"]]}],
   // 仅当类型为 pptx 时：
-  "slides": [{"title": "页标题", "bullets": ["要点1","要点2"]}]
-}`
+  "slides": [
+    {"title":"封面","layout":"cover"},
+    {"title":"要点","layout":"bullets","bullets":["要点1","要点2"]},
+    {"title":"对比","layout":"table","table":{"headers":["A","B"],"rows":[["1","2"]]}},
+    {"title":"优劣势","layout":"two-col","left":["优点1"],"right":["缺点1"]}
+  ]
+}
+
+说明：charts 的 startRow/startCol/endRow/endCol 是 1 基单元格范围（首列为分类、末列为数值）；表格数字必须来自用户输入或检索资料，不得编造。`
 
 // docFilePath resolves where a generated product file lives on disk for a row.
 func (s *Server) docFilePath(d *store.DocDocument) string {
