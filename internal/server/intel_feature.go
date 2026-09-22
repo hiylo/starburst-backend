@@ -22,11 +22,12 @@ import (
 // HTTP reachability (status code) and validates the response body against the
 // extracted field contract. Results are returned synchronously.
 func (s *Server) handleIntelFeatureTest(w http.ResponseWriter, r *http.Request) {
-	if !s.requireWeb(r) {
-		if _, ok := s.requireToken(r); !ok {
-			writeErr(w, http.StatusUnauthorized, "web session or APP token required")
-			return
-		}
+	// 该接口对调用方提供的 baseUrl 发起带返回值的 HTTP 探测，netguard 会显式
+	// 放行回环与私网地址，设备 token 可借此做内网 SSRF——必须收紧为管理员
+	// （web session 或 admin-scope token）。
+	if !s.adminAccess(r) {
+		writeErr(w, http.StatusForbidden, "operation requires admin access")
+		return
 	}
 	if r.Method != http.MethodPost {
 		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")

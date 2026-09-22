@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log"
 	"net/http"
-	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -344,8 +343,12 @@ func (s *Server) finishIntelPlan(ctx context.Context, run *store.TestRun, status
 
 // execIntelPlanStep executes one module's build→test pair, returning success.
 func (s *Server) execIntelPlanStep(ctx context.Context, projectID int64, step *IntelPlanStep, mr *store.TestRun, idx, total int) bool {
-	if !s.intelSem.acquire(ctx) {
-		s.failIntelRun(projectID, mr, "已取消")
+	// 全局并发水位：带 semWaitBudget 等待预算，避免在白项目锁下无限空等其他
+	// 项目的执行槽位。
+	semCtx, cancelSem := context.WithTimeout(ctx, semWaitBudget)
+	defer cancelSem()
+	if !s.intelSem.acquire(semCtx) {
+		s.failIntelRun(projectID, mr, "排队超时，未获得执行槽位")
 		return false
 	}
 	defer s.intelSem.release()
@@ -420,15 +423,15 @@ func (s *Server) planModuleDir(ctx context.Context, projectID, moduleID int64) (
 	if !ok {
 		return "", fmt.Errorf("module %d not found", moduleID)
 	}
-	dir := filepath.Join(root, module.RelPath)
-	if module.RelPath == "." {
-		dir = root
+	dir, err := moduleDir(root, module.RelPath)
+	if err != nil {
+		return "", err
 	}
 	sources, _ := s.store.ListIntelProjectSources(ctx, projectID)
 	if srcRoot, srcRel, ok := s.sourceModuleRoot(ctx, p, sources, module.RelPath); ok {
-		dir = filepath.Join(srcRoot, srcRel)
-		if srcRel == "." {
-			dir = srcRoot
+		dir, err = moduleDir(srcRoot, srcRel)
+		if err != nil {
+			return "", err
 		}
 	}
 	return dir, nil

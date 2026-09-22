@@ -665,7 +665,9 @@ func TestSplitEndpointAndFlaky(t *testing.T) {
 	}
 }
 
-// TestHasShellMeta covers the remote-command injection guard.
+// TestHasShellMeta covers the remote-command injection guard: any whitespace /
+// C0 control character (directory names carrying a newline or space shift shell
+// word boundaries) plus the classic metacharacters must be rejected.
 func TestHasShellMeta(t *testing.T) {
 	safe := []string{"go", "test", "./...", "mvn", "test", "npm", "test", "pkg/foo", "-run", "TestX", "a-b_c"}
 	for _, s := range safe {
@@ -673,10 +675,31 @@ func TestHasShellMeta(t *testing.T) {
 			t.Errorf("hasShellMeta(%q) = true, want false", s)
 		}
 	}
-	unsafe := []string{"test; rm -rf /", "a|b", "a>b", "a$(id)", "a`id`", "a&b", "a'", "a\"b", "$PATH", "a\\b"}
+	unsafe := []string{"test; rm -rf /", "a|b", "a>b", "a$(id)", "a`id`", "a&b", "a'", "a\"b", "$PATH", "a\\b",
+		"a b", "dir\nname", "dir\rname", "dir\tname", "a\vname", "dir\x1fname", "a\x7fname"}
 	for _, s := range unsafe {
 		if !hasShellMeta(s) {
 			t.Errorf("hasShellMeta(%q) = false, want true", s)
+		}
+	}
+}
+
+// TestHasShellMetaCommand covers the whole-command backstop: the separator
+// spaces and `&&` we insert are allowed, everything else (control chars,
+// metachars) still rejected.
+func TestHasShellMetaCommand(t *testing.T) {
+	ok := []string{"cd /srv/repos/demo && go test -json -count=1 ./...",
+		"cd /home/runner/app && mvn test", "cd /srv && npm test"}
+	for _, s := range ok {
+		if hasShellMetaCommand(s) {
+			t.Errorf("hasShellMetaCommand(%q) = true, want false", s)
+		}
+	}
+	bad := []string{"cd /srv\n&& rm -rf /", "cd /srv && rm -rf /; echo x",
+		"cd /srv && true && false && a=b && $(id)", "cd x && y <- z"}
+	for _, s := range bad {
+		if !hasShellMetaCommand(s) {
+			t.Errorf("hasShellMetaCommand(%q) = false, want true", s)
 		}
 	}
 }
@@ -730,7 +753,9 @@ func TestRemoteCapabilityRouting(t *testing.T) {
 func TestRemoteReportPullParsesSurefire(t *testing.T) {
 	old := envagent.PullArtifacts
 	defer func() { envagent.PullArtifacts = old }()
-	envagent.PullArtifacts = func(ctx context.Context, host, user string, port int, workDir string, relPaths []string) (map[string][]byte, error) {
+	var gotAuth string
+	envagent.PullArtifacts = func(ctx context.Context, host, user string, port int, authText, workDir string, relPaths []string) (map[string][]byte, error) {
+		gotAuth = authText
 		if len(relPaths) != 1 || relPaths[0] != "target/surefire-reports" {
 			t.Errorf("relPaths = %v, want [target/surefire-reports]", relPaths)
 		}
@@ -742,12 +767,16 @@ func TestRemoteReportPullParsesSurefire(t *testing.T) {
 		}, nil
 	}
 
-	node := &store.RemoteNode{Host: "192.0.2.10", User: "runner", Port: 22}
+	// 拉报告必须透传节点 Auth：仅接受节点凭据的节点不能回退本机默认 key。
+	node := &store.RemoteNode{Host: "192.0.2.10", User: "runner", Port: 22, Auth: "node-secret"}
 	pulled, err := pullRemoteReports(context.Background(), node, "/srv/demo", "surefire")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer os.RemoveAll(pulled)
+	if gotAuth != "node-secret" {
+		t.Errorf("pull auth = %q, want node-secret", gotAuth)
+	}
 	if pulled == "" {
 		t.Fatal("surefire must pull into a temp dir")
 	}
@@ -1097,7 +1126,7 @@ public class UserTest {
 	envagent.RunCommandOn = func(ctx context.Context, host string, port int, user, authText, command string) (string, error) {
 		return "BUILD SUCCESS", nil
 	}
-	envagent.PullArtifacts = func(ctx context.Context, host, user string, port int, workDir string, relPaths []string) (map[string][]byte, error) {
+	envagent.PullArtifacts = func(ctx context.Context, host, user string, port int, authText, workDir string, relPaths []string) (map[string][]byte, error) {
 		if len(relPaths) != 1 || relPaths[0] != "target/surefire-reports" {
 			t.Errorf("relPaths = %v, want [target/surefire-reports]", relPaths)
 		}

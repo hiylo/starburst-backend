@@ -395,18 +395,18 @@ func (s *Server) runIntelTests(ctx context.Context, projectID, moduleID, nodeID 
 	// 否则用项目主源码根目录。sourceModuleRoot 的二次返回值为模块在其归属关联
 	// 仓库内的相对路径 srcRel（"@end/app" → "app"，仓库根模块为 "."），远端执行
 	// 时把它接到节点 WorkDir 之后，使远端 cwd 与本地 dir 语义一致。
-	dir := filepath.Join(root, module.RelPath)
-	if module.RelPath == "." {
-		dir = root
+	dir, err := moduleDir(root, module.RelPath)
+	if err != nil {
+		return err
 	}
 	srcRel := ""
 	sources, _ := s.store.ListIntelProjectSources(ctx, projectID)
 	if srcRoot, rel, ok := s.sourceModuleRoot(ctx, p, sources, module.RelPath); ok {
-		dir = filepath.Join(srcRoot, rel)
-		srcRel = rel
-		if rel == "." {
-			dir = srcRoot
+		dir, err = moduleDir(srcRoot, rel)
+		if err != nil {
+			return err
 		}
+		srcRel = rel
 	}
 	cmdArgs, reportKind := testCommandFor(module.BuildTool, module.KindType)
 	if len(cmdArgs) == 0 && reportKind == "" {
@@ -528,6 +528,11 @@ func (s *Server) runIntelTests(ctx context.Context, projectID, moduleID, nodeID 
 		if !strings.HasPrefix(strings.TrimSpace(command), "cd ") {
 			command = "cd " + wd + " && " + command
 		}
+		// 组装完的整条命令再做一次兜底校验：除我们插入的分隔空格外的任何控制
+		// 字符/元字符一律拒绝（各 token 与 wd 已单独通过 hasShellMeta）。
+		if hasShellMetaCommand(command) {
+			return fmt.Errorf("远程命令含非法字符，已拒绝执行：%q", command)
+		}
 		// 库直连（crypto/ssh）：认证沿用节点 Auth（私钥/口令），不再起系统 ssh。
 		var out string
 		out, execErr = envagent.RunCommandOn(ctx, remoteNode.Host, remoteNode.Port, remoteNode.User, remoteNode.Auth, command)
@@ -580,10 +585,13 @@ func (s *Server) runIntelTests(ctx context.Context, projectID, moduleID, nodeID 
 	// npm/other script runners produce no per-case report on stdout; synthesize a
 	// single whole-run result so the run has a definite pass/fail to display.
 	if len(results) == 0 && reportKind == "npm" {
+		// 整轮合成结果必须同时看本地与远端退出码：此前只判 exitErr，远端
+		// ssh.ExitError（signal/退出状态）非零退出被误记为通过。远端非零退出
+		// → 记为失败，但仍走报告解析（run.Output 已保留输出供排查）。
 		results = append(results, &store.TestResult{
 			Kind:     "npm",
 			Endpoint: "npm test",
-			Passed:   exitErr == nil,
+			Passed:   exitErr == nil && sshExitErr == nil,
 		})
 	}
 	if err := s.store.AddIntelTestResults(ctx, results); err != nil {
@@ -1046,23 +1054,105 @@ func isFlakyResult(failuresJSON string) bool {
 }
 
 // hasShellMeta reports whether a token contains characters that a POSIX shell
-// would interpret (metacharacters, quotes, expansions). Used to keep remote
-// command arguments from being shell-evaluated on the node.
+// would interpret: any whitespace / C0 control character (a token-boundary
+// shift, e.g. a directory name carrying a newline) or the classic
+// metacharacters, quotes and expansions. Used to keep remote command arguments
+// and the remote working directory from being shell-evaluated on the node. An
+// empty token is treated as unsafe (it would collapse word boundaries).
 func hasShellMeta(s string) bool {
-	return strings.ContainsAny(s, ";&|<>`$()*?[]{}\\!\"'#~")
+	if s == "" {
+		return true
+	}
+	for _, r := range s {
+		if r <= ' ' || r == 0x7f {
+			return true
+		}
+		switch r {
+		case ';', '&', '|', '<', '>', '`', '$', '(', ')', '*', '?', '[', ']', '{', '}', '\\', '!', '"', '\'', '#', '~':
+			return true
+		}
+	}
+	return false
 }
 
-// runCommand runs an executable with a bounded timeout and returns stdout.
+// hasShellMetaCommand 兜底校验**整条**远端命令：组成命令的每个 token 已单独
+// 通过 hasShellMeta（不含空白/控制字符/元字符），命令中的空格与 `&&` 是我们
+// 拼接进的分隔符，因此允许 `&`（token 经严格校验后不可能携带 `&`，`&&` 只可能
+// 来自我们插入的 `cd <wd> && <cmd>` 骨架）；其余任何控制字符或元字符一律拒绝。
+// 这是执行前的最后一道防线，防止某个检查环节漏网的控制字符/元字符逃进远端
+// login shell。
+func hasShellMetaCommand(s string) bool {
+	for _, r := range s {
+		if r == ' ' || r == '&' {
+			continue
+		}
+		if r <= ' ' || r == 0x7f {
+			return true
+		}
+		switch r {
+		case ';', '|', '<', '>', '`', '$', '(', ')', '*', '?', '[', ']', '{', '}', '\\', '!', '"', '\'', '#', '~':
+			return true
+		}
+	}
+	return false
+}
+
+// tailBuffer 是有界保留尾部的 writer：写入超过 limit 时丢弃最旧字节，只保留
+// 最后 limit 字节。用于命令输出的内存上限控制（go test -json / playwright 可
+// 输出数百 MB）。
+type tailBuffer struct {
+	buf   bytes.Buffer
+	limit int
+}
+
+func (t *tailBuffer) Write(p []byte) (int, error) {
+	t.buf.Write(p)
+	if n := t.buf.Len() - t.limit; n > 0 {
+		t.buf.Next(n)
+	}
+	return len(p), nil
+}
+
+// runCommand runs an executable with a bounded timeout and returns its stdout
+// (tail-bounded to intelOutputLimit, the same cap applied to the stored run
+// output).
 func runCommand(ctx context.Context, dir, name string, args ...string) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Dir = dir
-	var buf bytes.Buffer
+	var buf tailBuffer
+	buf.limit = intelOutputLimit
 	cmd.Stdout = &buf
 	cmd.Stderr = &buf
 	if err := cmd.Run(); err != nil {
-		return buf.Bytes(), err
+		return buf.buf.Bytes(), err
 	}
-	return buf.Bytes(), nil
+	return buf.buf.Bytes(), nil
+}
+
+// moduleDir 把模块相对路径解析到项目根目录之下：归一化后必须仍位于 root 内，
+// 拒绝 DB 脏数据（含 ..）逃逸项目根目录。relPath 为 "." 时返回 root 本身。
+func moduleDir(root, relPath string) (string, error) {
+	if relPath == "." {
+		return root, nil
+	}
+	dir := filepath.Clean(filepath.Join(root, filepath.FromSlash(relPath)))
+	rel, err := filepath.Rel(root, dir)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("模块相对路径 %q 越出项目根目录 %q", relPath, root)
+	}
+	return dir, nil
+}
+
+// dirWithinRoot 报告 dir 是否位于 root 之内（归一化后），拒绝 `..` 逃逸。
+func dirWithinRoot(root, dir string) bool {
+	rel, err := filepath.Rel(root, dir)
+	if err != nil {
+		return false
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return false
+	}
+	return true
 }
 
 // parseReport converts framework output into unified per-case results.
@@ -1299,16 +1389,18 @@ func remoteReportRelPaths(reportKind string) []string {
 // (surefire/pytest/xctest) into a fresh local temp dir so parseReport can read
 // them — the SSH command's stdout is the test output, not the report. Report
 // kinds that are self-contained on stdout (go/playwright/npm) return "" since
-// parseReport's dir argument is unused for them. The caller must remove the
-// returned dir.
+// parseReport's dir argument is unused for them. Authentication reuses
+// node.Auth so a node that only accepts its configured credential also accepts
+// the report pull (an empty-auth dial would fall back to the host's default
+// keys and fail). The caller must remove the returned dir.
 func pullRemoteReports(ctx context.Context, node *store.RemoteNode, workDir, reportKind string) (string, error) {
 	var files map[string][]byte
 	var err error
 	switch reportKind {
 	case "surefire", "pytest":
-		files, err = envagent.PullArtifacts(ctx, node.Host, node.User, node.Port, workDir, remoteReportRelPaths(reportKind))
+		files, err = envagent.PullArtifacts(ctx, node.Host, node.User, node.Port, node.Auth, workDir, remoteReportRelPaths(reportKind))
 	case "xctest":
-		files, err = envagent.PullJUnitXML(ctx, node.Host, node.User, node.Port, workDir)
+		files, err = envagent.PullJUnitXML(ctx, node.Host, node.User, node.Port, node.Auth, workDir)
 	default:
 		return "", nil
 	}

@@ -103,6 +103,12 @@ func (s *intelSem) acquire(ctx context.Context) bool {
 // a bounded per-module budget keeps a wedged suite from blocking others.
 const intelRunTimeout = 10 * time.Minute
 
+// semWaitBudget 是等待全局执行槽位的时间预算。先取槽位（带该预算）再拿项目锁：
+// 若反过来，全局 intelSem 被其他项目占满时，本项目会在白项目锁下空等最长
+// intelRunTimeout/30min，阻塞同项目后续模块（liveness/DoS）。超时即把本 run
+// 标记为排队超时失败并释放（拿到槽位的模块要么成功要么释放，不引入死锁）。
+const semWaitBudget = 2 * time.Minute
+
 // IntelRunOptions carries optional scheduling knobs for an enqueued test run.
 // Zero values keep the default behavior, so existing callers that pass nothing
 // are unaffected.
@@ -239,23 +245,28 @@ func (s *Server) runIntelJobSync(ctx context.Context, projectID, moduleID, nodeI
 }
 
 // runIntelJobAttempt runs a module's tests once under the per-project lock and
-// the global concurrency cap. It returns nil when the test command completed
+// the global concurrency cap. Lock/slot acquisition order is sem-first: the
+// global execution slot (bounded by semWaitBudget) is taken before the
+// per-project mutex, so a slot-starved project never holds its own lock hostage
+// while waiting (liveness/DoS). It returns nil when the test command completed
 // (run.Status is passed/failed); a non-nil error means the execution itself
 // failed (command error, build failure, timeout, cancelled context) — the
 // caller decides whether to retry with a fresh run row.
 func (s *Server) runIntelJobAttempt(ctx context.Context, projectID, moduleID, nodeID int64, force bool, run *store.TestRun) error {
-	mu := s.intelExecMutex(projectID)
-	mu.Lock()
-	defer mu.Unlock()
-
-	// 全局并发水位：拿不到槽位时保持排队状态等待。
-	semCtx, cancelSem := context.WithTimeout(ctx, intelRunTimeout)
+	// 全局并发水位：先取执行槽位（带 semWaitBudget）再拿项目锁。拿到槽位的
+	// 模块要么成功要么释放；项目锁的持有者（run-all/plan）只做有界等待，不会
+	// 与这里互相无限等待形成死锁。
+	semCtx, cancelSem := context.WithTimeout(ctx, semWaitBudget)
 	defer cancelSem()
 	if !s.intelSem.acquire(semCtx) {
 		s.failIntelRun(projectID, run, "排队超时，未获得执行槽位")
 		return fmt.Errorf("intel run %d: 排队超时，未获得执行槽位", run.ID)
 	}
 	defer s.intelSem.release()
+
+	mu := s.intelExecMutex(projectID)
+	mu.Lock()
+	defer mu.Unlock()
 
 	execCtx, cancel := context.WithTimeout(ctx, intelRunTimeout)
 	s.registerIntelCancel(run.ID, cancel)
@@ -501,7 +512,11 @@ func (s *Server) RunIntelModuleTask(ctx context.Context, t *store.Task) (string,
 
 // runIntelAll is the background driver for a scope=all run: it serializes on
 // the per-project lock, lists modules and parallelizes each module's execution
-// within the global cap.
+// within the global cap. Lock/slot ordering: runIntelAll holds the project lock
+// while its module goroutines wait on the global semaphore (bounded by
+// semWaitBudget per module, see execIntelModule), and a single-module job
+// acquires the semaphore before the same project lock — both sides are bounded
+// so no lock-order deadlock can form.
 func (s *Server) runIntelAll(projectID int64, force bool, run *store.TestRun) {
 	mu := s.intelExecMutex(projectID)
 	mu.Lock()
@@ -615,9 +630,12 @@ func (s *Server) finishIntelRunAll(ctx context.Context, run *store.TestRun, stat
 // execIntelModule runs a single module's test as part of a run-all, returning
 // the effective status ("passed" | "failed" | "error").
 func (s *Server) execIntelModule(ctx context.Context, projectID int64, m *store.IntelModule, mr *store.TestRun, force bool, idx, total int) string {
-	// 全局并发水位：与其他项目/模块的测试进程共享。
-	if !s.intelSem.acquire(ctx) {
-		s.failIntelRun(projectID, mr, "已取消")
+	// 全局并发水位：与其他项目/模块的测试进程共享；带 semWaitBudget 等待预算，
+	// 超时标记排队超时（避免在白项目锁下无限空等其他项目的执行槽位）。
+	semCtx, cancelSem := context.WithTimeout(ctx, semWaitBudget)
+	defer cancelSem()
+	if !s.intelSem.acquire(semCtx) {
+		s.failIntelRun(projectID, mr, "排队超时，未获得执行槽位")
 		return "error"
 	}
 	defer s.intelSem.release()

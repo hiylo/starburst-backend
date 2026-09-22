@@ -196,6 +196,11 @@ func (s *Server) persistAndroidBindings(ctx context.Context, projectID int64, sc
 		if sc.m.KindType != "android" {
 			continue
 		}
+		// 扫描目录必须钳制在归属仓库根目录之内：DB 脏 RelPath 含 .. 会逃逸
+		// project root，这里读文件提取绑定前拒绝。
+		if !dirWithinRoot(sc.root, sc.dir) {
+			continue
+		}
 		resDir := filepath.Join(sc.dir, "src", "main", "res")
 		if fi, err := os.Stat(resDir); err != nil || !fi.IsDir() {
 			continue
@@ -227,6 +232,9 @@ func (s *Server) persistWebBindings(ctx context.Context, projectID int64, scans 
 		if sc.m.KindType != "web" {
 			continue
 		}
+		if !dirWithinRoot(sc.root, sc.dir) {
+			continue
+		}
 		srcDir := filepath.Join(sc.dir, "src")
 		if fi, err := os.Stat(srcDir); err != nil || !fi.IsDir() {
 			continue
@@ -256,6 +264,9 @@ func (s *Server) persistIosBindings(ctx context.Context, projectID int64, scans 
 	bindings := make([]*store.IntelIosBinding, 0)
 	for _, sc := range scans {
 		if sc.m.KindType != "ios" {
+			continue
+		}
+		if !dirWithinRoot(sc.root, sc.dir) {
 			continue
 		}
 		if fi, err := os.Stat(sc.dir); err != nil || !fi.IsDir() {
