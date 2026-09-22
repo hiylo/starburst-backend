@@ -152,3 +152,40 @@ func TestKbIngestMultipartParsed(t *testing.T) {
 		t.Fatalf("multipart ingest on SQLite = %d, want 503 (parsed then pgvector gate): %s", rec.Code, rec.Body.String())
 	}
 }
+
+// TestDiversifyHits pins the per-document chunk cap used by retrieval: a long
+// document must not crowd out other sources in the injected context.
+func TestDiversifyHits(t *testing.T) {
+	hits := []kbHit{
+		{documentID: 1, score: 0.99},
+		{documentID: 1, score: 0.95},
+		{documentID: 1, score: 0.90},
+		{documentID: 1, score: 0.85}, // 第 4 条同文档，应被裁剪
+		{documentID: 2, score: 0.80},
+		{documentID: 2, score: 0.70},
+	}
+	got := diversifyHits(hits, 3)
+	// 期望：doc1 保留 3 条（0.99/0.95/0.90）+ doc2 全 2 条 = 5 条。
+	if len(got) != 5 {
+		t.Fatalf("diversified = %d, want 5", len(got))
+	}
+	doc1 := 0
+	for _, h := range got {
+		if h.documentID == 1 {
+			doc1++
+		}
+	}
+	if doc1 > 3 {
+		t.Fatalf("doc1 contributed %d chunks, cap is 3", doc1)
+	}
+	// 保序：分数仍降序。
+	for i := 1; i < len(got); i++ {
+		if got[i-1].score < got[i].score {
+			t.Fatalf("order broken at %d: %v < %v", i, got[i-1].score, got[i].score)
+		}
+	}
+	// maxPerDoc<=0 或空列表 → 原样返回。
+	if len(diversifyHits(nil, 3)) != 0 || len(diversifyHits(hits, 0)) != len(hits) {
+		t.Fatal("degenerate cases should pass through")
+	}
+}

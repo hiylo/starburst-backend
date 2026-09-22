@@ -725,9 +725,12 @@ multipart/form-data: file + collectionId + name? + mime? + fileName?
 
 ```json
 { "results": [ { "source": "仓储制度.docx", "section": "第 4 章 库存",
-                 "content": "安全库存 = 日均出库量 × 备货周期 × 1.2", "score": 0.93 } ] }
+                 "content": "安全库存 = 日均出库量 × 备货周期 × 1.2", "score": 0.93,
+                 "documentId": 5, "collectionId": 1 } ] }
 ```
 - `source` 通过 `kb_chunks LEFT JOIN kb_documents` 一次取回（无逐 chunk 查库）。
+- **多样性**：同一文档最多贡献 3 个 chunk（`diversifyHits`，分数降序保序），避免长文档
+  挤占其它来源。
 - **503** → SQLite 无 pgvector → `vector retrieval needs PostgreSQL ...`。
 
 ### 统计（`GET /api/kb/stats`）

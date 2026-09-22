@@ -347,12 +347,15 @@ func (s *Server) ingestKBDocument(ctx context.Context, collectionID int64, name,
 }
 
 // kbHit is a single retrieved KB fragment in the shape RAG-in-Prompt expects:
-// source (document name) + section (chunk title) + content + score.
+// source (document name) + section (chunk title) + content + score, plus the
+// ids needed for引用溯源 (tap-through to the source document).
 type kbHit struct {
-	source  string
-	section string
-	content string
-	score   float64
+	source       string
+	section      string
+	content      string
+	score        float64
+	documentID   int64
+	collectionID int64
 }
 
 // searchKB embeds the query and runs the vector search over the KB, optionally
@@ -395,13 +398,38 @@ func (s *Server) searchKB(ctx context.Context, query string, collectionIDs []int
 			source = kbSourceName(ctx, s.store, c.DocumentID)
 		}
 		hits = append(hits, kbHit{
-			source:  source,
-			section: c.Title,
-			content: c.Content,
-			score:   c.Similarity,
+			source:       source,
+			section:      c.Title,
+			content:      c.Content,
+			score:        c.Similarity,
+			documentID:   c.DocumentID,
+			collectionID: c.CollectionID,
 		})
 	}
-	return hits, nil
+	return diversifyHits(hits, kbMaxChunksPerDocument), nil
+}
+
+// kbMaxChunksPerDocument caps how many fragments one document may contribute to
+// a single retrieval, so a long document does not crowd out other sources in
+// the injected context.
+const kbMaxChunksPerDocument = 3
+
+// diversifyHits keeps at most maxPerDoc hits per document, preserving the score
+// order. Pure so it can be unit-tested without a vector backend.
+func diversifyHits(hits []kbHit, maxPerDoc int) []kbHit {
+	if maxPerDoc <= 0 || len(hits) == 0 {
+		return hits
+	}
+	counts := make(map[int64]int, len(hits))
+	out := make([]kbHit, 0, len(hits))
+	for _, h := range hits {
+		if counts[h.documentID] >= maxPerDoc {
+			continue
+		}
+		counts[h.documentID]++
+		out = append(out, h)
+	}
+	return out
 }
 
 // kbSourceName resolves a chunk's source label from its document name. A
@@ -465,10 +493,12 @@ func (s *Server) handleKbSearch(w http.ResponseWriter, r *http.Request) {
 	results := make([]map[string]any, 0, len(hits))
 	for _, h := range hits {
 		results = append(results, map[string]any{
-			"source":  h.source,
-			"section": h.section,
-			"content": h.content,
-			"score":   h.score,
+			"source":       h.source,
+			"section":      h.section,
+			"content":      h.content,
+			"score":        h.score,
+			"documentId":   h.documentID,
+			"collectionId": h.collectionID,
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"results": results})
