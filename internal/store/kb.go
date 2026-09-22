@@ -390,6 +390,31 @@ func (s *sqlStore) SearchKBChunks(ctx context.Context, collectionIDs []int64, em
 	return out, rows.Err()
 }
 
+// ListKBDocumentChunks returns a document's chunks ordered by seq — the ingested
+// body (content is stored chunked). Embeddings are never shipped to clients.
+func (s *sqlStore) ListKBDocumentChunks(ctx context.Context, documentID int64) ([]*KBChunk, error) {
+	query := `SELECT c.id, c.collection_id, c.document_id, c.seq, c.title, c.content,
+		0.0, ''
+		FROM kb_chunks c
+		WHERE c.document_id = ?
+		ORDER BY c.seq ASC`
+	rows, err := s.db.QueryContext(ctx, s.q(query), documentID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]*KBChunk, 0)
+	for rows.Next() {
+		c := &KBChunk{}
+		if err := rows.Scan(&c.ID, &c.CollectionID, &c.DocumentID, &c.Seq,
+			&c.Title, &c.Content, &c.Similarity, &c.Source); err != nil {
+			return nil, err
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
 // DeleteKBDocumentsByNameSuffix removes every document in a collection whose
 // name ends with suffix, cascading their chunks. It backs the generated-document
 // reverse-ingest: a regenerated doc keeps its `-@doc<id>` marker, so re-ingesting

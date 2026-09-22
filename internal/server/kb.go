@@ -172,6 +172,10 @@ func (s *Server) handleKbDocuments(w http.ResponseWriter, r *http.Request) {
 
 // handleKbDocumentByID handles GET/DELETE /api/kb/documents/{id}.
 func (s *Server) handleKbDocumentByID(w http.ResponseWriter, r *http.Request) {
+	if strings.HasSuffix(r.URL.Path, "/chunks") {
+		s.handleKbDocumentChunks(w, r)
+		return
+	}
 	if !s.requireDualAuth(r) {
 		writeErr(w, http.StatusUnauthorized, "web session or APP token required")
 		return
@@ -203,6 +207,40 @@ func (s *Server) handleKbDocumentByID(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
 	}
+}
+
+// handleKbDocumentChunks returns a document's ingested chunks (title + content,
+// ordered by seq) so clients can preview what was actually indexed. The id is
+// parsed from the `/api/kb/documents/{id}/chunks` path because pathID only
+// reads the trailing segment.
+func (s *Server) handleKbDocumentChunks(w http.ResponseWriter, r *http.Request) {
+	if !s.requireDualAuth(r) {
+		writeErr(w, http.StatusUnauthorized, "web session or APP token required")
+		return
+	}
+	if r.Method != http.MethodGet {
+		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	trimmed := strings.TrimSuffix(r.URL.Path, "/chunks")
+	i := strings.LastIndex(trimmed, "/")
+	if i < 0 || i == len(trimmed)-1 {
+		writeErr(w, http.StatusBadRequest, "invalid document id")
+		return
+	}
+	id, err := strconv.ParseInt(trimmed[i+1:], 10, 64)
+	if err != nil || id <= 0 {
+		writeErr(w, http.StatusBadRequest, "invalid document id")
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+	chunks, err := s.store.ListKBDocumentChunks(ctx, id)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "list chunks failed: "+err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"documentId": id, "chunks": chunks})
 }
 
 // ingestInput is the parsed payload of POST /api/kb/ingest, from either a JSON

@@ -536,6 +536,9 @@ type Store interface {
 	// given collections (empty = all). PostgreSQL/pgvector only: returns
 	// ErrRagUnsupported on SQLite.
 	SearchKBChunks(ctx context.Context, collectionIDs []int64, embedding []float32, limit int) ([]*KBChunk, error)
+	// ListKBDocumentChunks returns a document's chunks ordered by seq (its
+	// ingested body). Works on any driver.
+	ListKBDocumentChunks(ctx context.Context, documentID int64) ([]*KBChunk, error)
 	// DeleteKBDocumentsByNameSuffix removes every document in a collection whose
 	// name ends with suffix (cascading chunks), returning the removed count.
 	DeleteKBDocumentsByNameSuffix(ctx context.Context, collectionID int64, suffix string) (int, error)
