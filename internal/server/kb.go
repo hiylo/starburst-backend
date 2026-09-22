@@ -83,7 +83,8 @@ func (s *Server) handleKbCollections(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// handleKbCollectionByID handles DELETE /api/kb/collections/{id}.
+// handleKbCollectionByID handles PATCH (rename/re-describe) and DELETE for
+// /api/kb/collections/{id}.
 func (s *Server) handleKbCollectionByID(w http.ResponseWriter, r *http.Request) {
 	if !s.requireDualAuth(r) {
 		writeErr(w, http.StatusUnauthorized, "web session or APP token required")
@@ -94,18 +95,49 @@ func (s *Server) handleKbCollectionByID(w http.ResponseWriter, r *http.Request) 
 		writeErr(w, http.StatusBadRequest, "invalid collection id")
 		return
 	}
-	if r.Method != http.MethodDelete {
+	switch r.Method {
+	case http.MethodPatch:
+		var req struct {
+			Name        string `json:"name"`
+			Description string `json:"description"`
+		}
+		if err := readJSONLimited(w, r, &req); err != nil {
+			writeErr(w, http.StatusBadRequest, "invalid request body")
+			return
+		}
+		if strings.TrimSpace(req.Name) == "" && strings.TrimSpace(req.Description) == "" {
+			writeErr(w, http.StatusBadRequest, "name or description is required")
+			return
+		}
+		col, err := s.store.UpdateKBCollection(r.Context(), id, req.Name, req.Description)
+		if err != nil {
+			if errors.Is(err, store.ErrConflict) {
+				writeErr(w, http.StatusConflict, "collection name already exists")
+				return
+			}
+			if errors.Is(err, store.ErrNotFound) {
+				writeErr(w, http.StatusNotFound, "collection not found")
+				return
+			}
+			writeErr(w, http.StatusInternalServerError, "update collection failed: "+err.Error())
+			return
+		}
+		// 集合名参与检索来源展示（source），改名后旧缓存里的 source 已过期。
+		kbCache.invalidateAll()
+		writeJSON(w, http.StatusOK, col)
+	case http.MethodDelete:
+		if err := s.store.DeleteKBCollection(r.Context(), id); err != nil {
+			writeErr(w, http.StatusInternalServerError, "delete collection failed: "+err.Error())
+			return
+		}
+		kbCache.invalidateAll()
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	default:
 		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
 	}
-	if err := s.store.DeleteKBCollection(r.Context(), id); err != nil {
-		writeErr(w, http.StatusInternalServerError, "delete collection failed: "+err.Error())
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
-// handleKbDocuments lists a collection's documents (GET ?collectionId=&limit=).
+// handleKbDocuments lists a collection's documents (GET ?collectionId=&limit=&offset=).
 func (s *Server) handleKbDocuments(w http.ResponseWriter, r *http.Request) {
 	if !s.requireDualAuth(r) {
 		writeErr(w, http.StatusUnauthorized, "web session or APP token required")
@@ -121,12 +153,21 @@ func (s *Server) handleKbDocuments(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
-	docs, err := s.store.ListKBDocuments(r.Context(), collectionID, limit)
+	offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
+	if offset < 0 {
+		offset = 0
+	}
+	docs, err := s.store.ListKBDocuments(r.Context(), collectionID, limit, offset)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "list documents failed: "+err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"documents": docs})
+	total, err := s.store.CountKBDocuments(r.Context(), collectionID)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "count documents failed: "+err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"documents": docs, "total": total})
 }
 
 // handleKbDocumentByID handles GET/DELETE /api/kb/documents/{id}.
@@ -157,10 +198,24 @@ func (s *Server) handleKbDocumentByID(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusInternalServerError, "delete document failed: "+err.Error())
 			return
 		}
+		kbCache.invalidateAll()
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 	default:
 		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
 	}
+}
+
+// ingestInput is the parsed payload of POST /api/kb/ingest, from either a JSON
+// body or a multipart form.
+type ingestInput struct {
+	collectionID int64
+	name         string
+	mime         string
+	content      string
+	// replace deletes an existing document with the same name in the collection
+	// before ingesting, so re-uploading a revised file updates in place instead
+	// of leaving a duplicate behind.
+	replace bool
 }
 
 // handleKbIngest accepts raw text/markdown content, chunks it, embeds every
@@ -176,7 +231,7 @@ func (s *Server) handleKbIngest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// 兼容两种载体：JSON（content / contentBase64）或 multipart（大文件）。
-	collectionID, name, mime, content, code, errMsg := s.parseIngestInput(w, r)
+	in, code, errMsg := s.parseIngestInput(w, r)
 	if code != 0 {
 		writeErr(w, code, errMsg)
 		return
@@ -185,7 +240,22 @@ func (s *Server) handleKbIngest(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Minute)
 	defer cancel()
 
-	doc, chunkCount, err := s.ingestKBDocument(ctx, collectionID, name, mime, content)
+	// 同名替换：先删旧文档（级联清 chunk），再入库新版本，避免重复文档。
+	replaced := false
+	if in.replace {
+		if old, err := s.store.FindKBDocumentByName(ctx, in.collectionID, in.name); err == nil && old != nil {
+			if err := s.store.DeleteKBDocument(ctx, old.ID); err != nil {
+				writeErr(w, http.StatusInternalServerError, "replace old document failed: "+err.Error())
+				return
+			}
+			replaced = true
+		} else if err != nil && !errors.Is(err, store.ErrNotFound) {
+			writeErr(w, http.StatusInternalServerError, "lookup existing document failed: "+err.Error())
+			return
+		}
+	}
+
+	doc, chunkCount, err := s.ingestKBDocument(ctx, in.collectionID, in.name, in.mime, in.content)
 	if err != nil {
 		if errors.Is(err, store.ErrRagUnsupported) {
 			writeErr(w, http.StatusServiceUnavailable,
@@ -199,51 +269,53 @@ func (s *Server) handleKbIngest(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "ingest failed: "+err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"document": doc, "chunks": chunkCount})
+	writeJSON(w, http.StatusOK, map[string]any{"document": doc, "chunks": chunkCount, "replaced": replaced})
 }
 
 // parseIngestInput reads collectionId/name/mime/content from either a JSON body
 // or a multipart form (大文件走 multipart，绕开 4MiB JSON 上限). On error it
 // returns a non-zero HTTP status plus message for the caller to write.
-func (s *Server) parseIngestInput(w http.ResponseWriter, r *http.Request) (collectionID int64, name, mime, content string, status int, errMsg string) {
+func (s *Server) parseIngestInput(w http.ResponseWriter, r *http.Request) (in ingestInput, status int, errMsg string) {
 	ct := r.Header.Get("Content-Type")
 	if strings.HasPrefix(ct, "multipart/form-data") {
 		r.Body = http.MaxBytesReader(w, r.Body, maxUploadRequestBytes)
 		if err := r.ParseMultipartForm(maxUploadRequestBytes); err != nil {
-			return 0, "", "", "", http.StatusBadRequest, "invalid multipart form"
+			return ingestInput{}, http.StatusBadRequest, "invalid multipart form"
 		}
-		collectionID, _ = strconv.ParseInt(strings.TrimSpace(r.FormValue("collectionId")), 10, 64)
-		name = strings.TrimSpace(r.FormValue("name"))
-		if name == "" {
-			name = sanitizeUploadName(r.FormValue("fileName"))
+		in.collectionID, _ = strconv.ParseInt(strings.TrimSpace(r.FormValue("collectionId")), 10, 64)
+		in.name = strings.TrimSpace(r.FormValue("name"))
+		if in.name == "" {
+			in.name = sanitizeUploadName(r.FormValue("fileName"))
 		}
-		mime = r.FormValue("mime")
+		in.mime = r.FormValue("mime")
+		in.replace = parseBoolForm(r.FormValue("replace"))
 		file, header, err := r.FormFile("file")
 		if err != nil {
-			return 0, "", "", "", http.StatusBadRequest, "file is required"
+			return ingestInput{}, http.StatusBadRequest, "file is required"
 		}
 		defer file.Close()
 		raw, err := io.ReadAll(io.LimitReader(file, maxUploadFileBytes+1))
 		if err != nil {
-			return 0, "", "", "", http.StatusBadRequest, "read upload failed: " + err.Error()
+			return ingestInput{}, http.StatusBadRequest, "read upload failed: " + err.Error()
 		}
 		if len(raw) > maxUploadFileBytes {
-			return 0, "", "", "", http.StatusRequestEntityTooLarge, "file exceeds 10 MiB"
+			return ingestInput{}, http.StatusRequestEntityTooLarge, "file exceeds 10 MiB"
 		}
-		if name == "" {
-			name = sanitizeUploadName(header.Filename)
+		if in.name == "" {
+			in.name = sanitizeUploadName(header.Filename)
 		}
-		if collectionID <= 0 {
-			return 0, "", "", "", http.StatusBadRequest, "collectionId is required"
+		if in.collectionID <= 0 {
+			return ingestInput{}, http.StatusBadRequest, "collectionId is required"
 		}
-		if name == "" {
-			return 0, "", "", "", http.StatusBadRequest, "name is required"
+		if in.name == "" {
+			return ingestInput{}, http.StatusBadRequest, "name is required"
 		}
-		md, err := s.parseUploadedDocument(name, mime, raw)
+		md, err := s.parseUploadedDocument(in.name, in.mime, raw)
 		if err != nil {
-			return 0, "", "", "", http.StatusBadRequest, err.Error()
+			return ingestInput{}, http.StatusBadRequest, err.Error()
 		}
-		return collectionID, name, mime, md, 0, ""
+		in.content = md
+		return in, 0, ""
 	}
 
 	var req struct {
@@ -252,32 +324,47 @@ func (s *Server) parseIngestInput(w http.ResponseWriter, r *http.Request) (colle
 		MIME          string `json:"mime"`
 		Content       string `json:"content"`
 		ContentBase64 string `json:"contentBase64"`
+		Replace       bool   `json:"replace"`
 	}
 	if err := readJSONLimited(w, r, &req); err != nil {
-		return 0, "", "", "", http.StatusBadRequest, "invalid request body"
+		return ingestInput{}, http.StatusBadRequest, "invalid request body"
 	}
 	if req.CollectionID <= 0 {
-		return 0, "", "", "", http.StatusBadRequest, "collectionId is required"
+		return ingestInput{}, http.StatusBadRequest, "collectionId is required"
 	}
 	if strings.TrimSpace(req.Name) == "" {
-		return 0, "", "", "", http.StatusBadRequest, "name is required"
+		return ingestInput{}, http.StatusBadRequest, "name is required"
 	}
-	content = req.Content
+	in.collectionID = req.CollectionID
+	in.name = strings.TrimSpace(req.Name)
+	in.mime = req.MIME
+	in.replace = req.Replace
+	in.content = req.Content
 	if req.ContentBase64 != "" {
 		raw, err := base64.StdEncoding.DecodeString(req.ContentBase64)
 		if err != nil {
-			return 0, "", "", "", http.StatusBadRequest, "contentBase64 is not valid base64"
+			return ingestInput{}, http.StatusBadRequest, "contentBase64 is not valid base64"
 		}
 		md, err := s.parseUploadedDocument(req.Name, req.MIME, raw)
 		if err != nil {
-			return 0, "", "", "", http.StatusBadRequest, err.Error()
+			return ingestInput{}, http.StatusBadRequest, err.Error()
 		}
-		content = md
+		in.content = md
 	}
-	if strings.TrimSpace(content) == "" {
-		return 0, "", "", "", http.StatusBadRequest, "content or contentBase64 is required"
+	if strings.TrimSpace(in.content) == "" {
+		return ingestInput{}, http.StatusBadRequest, "content or contentBase64 is required"
 	}
-	return req.CollectionID, strings.TrimSpace(req.Name), req.MIME, content, 0, ""
+	return in, 0, ""
+}
+
+// parseBoolForm parses the common truthy form encodings ("1", "true", "on",
+// "yes"); anything else is false.
+func parseBoolForm(v string) bool {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "1", "true", "on", "yes":
+		return true
+	}
+	return false
 }
 
 // parseUploadedDocument renders raw bytes to Markdown via internal/doc, with a
@@ -343,6 +430,8 @@ func (s *Server) ingestKBDocument(ctx context.Context, collectionID int64, name,
 	if err := s.store.UpdateKBDocumentResult(ctx, doc.ID, "indexed", int64(len(chunks)), ""); err != nil {
 		log.Printf("kb ingest: update result: %v", err)
 	}
+	// 检索缓存失效：新文档入库后，旧的检索结果可能引用了被替换的片段。
+	kbCache.invalidateAll()
 	return doc, len(chunks), nil
 }
 
@@ -375,6 +464,9 @@ func (s *Server) searchKB(ctx context.Context, query string, collectionIDs []int
 	if minScore <= 0 {
 		minScore = 0.5
 	}
+	if hits, ok := kbCache.get(kbSearchCacheKey(query, collectionIDs, topK, minScore)); ok {
+		return hits, nil
+	}
 	qvec, err := s.embedding.Embed(ctx, query)
 	if err != nil {
 		return nil, fmt.Errorf("embed query: %w", err)
@@ -406,7 +498,9 @@ func (s *Server) searchKB(ctx context.Context, query string, collectionIDs []int
 			collectionID: c.CollectionID,
 		})
 	}
-	return diversifyHits(hits, kbMaxChunksPerDocument), nil
+	diversified := diversifyHits(hits, kbMaxChunksPerDocument)
+	kbCache.put(kbSearchCacheKey(query, collectionIDs, topK, minScore), diversified)
+	return diversified, nil
 }
 
 // kbMaxChunksPerDocument caps how many fragments one document may contribute to

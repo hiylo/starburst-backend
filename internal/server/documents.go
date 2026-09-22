@@ -80,6 +80,143 @@ const docGenerateSystem = `你是文档生成助手。根据用户需求输出�
 
 说明：charts 的 startRow/startCol/endRow/endCol 是 1 基单元格范围（首列为分类、末列为数值）；表格数字必须来自用户输入或检索资料，不得编造。`
 
+// skeletonFieldFor returns the JSON field an LLM skeleton must populate for a
+// document type (empty for an unknown type).
+func skeletonFieldFor(docType string) string {
+	switch docType {
+	case "pptx":
+		return "slides"
+	case "docx":
+		return "paragraphs"
+	case "xlsx":
+		return "sheets"
+	}
+	return ""
+}
+
+// validSkeletonForType reports whether sk carries the structure its type needs.
+func validSkeletonForType(docType string, sk *doc.Skeleton) bool {
+	switch docType {
+	case "pptx":
+		return len(sk.Slides) > 0
+	case "docx":
+		return len(sk.Paragraphs) > 0 || len(sk.Tables) > 0
+	case "xlsx":
+		return len(sk.Sheets) > 0
+	}
+	return true
+}
+
+// draftSkeleton asks the orchestration LLM for a type-shaped skeleton and, when
+// the model returns the wrong shape (e.g. docx paragraphs for a pptx request),
+// retries once with an explicit correction before giving up. When refs is
+// non-empty it is injected as "参考资料" so generated content sticks to the
+// knowledge base instead of hallucinating figures.
+func (s *Server) draftSkeleton(ctx context.Context, docType, prompt string, refs []kbHit) (doc.Skeleton, int, error) {
+	field := skeletonFieldFor(docType)
+	system := docGenerateSystem
+	if len(refs) > 0 {
+		system += "\n\n参考资料（优先采用其中的数据与表述，不要编造数字）:\n" + buildKBRefBlock(refs)
+	}
+	for attempt := 0; attempt < 2; attempt++ {
+		if attempt > 0 {
+			system += "\n（重要：请求类型为 " + docType + "，骨架必须包含非空的 " + field +
+				" 字段并填充真实内容；上一次返回缺少该字段。）"
+		}
+		var sk doc.Skeleton
+		if err := s.llm.CompleteJSON(ctx, system, prompt, &sk); err != nil {
+			return sk, http.StatusServiceUnavailable, fmt.Errorf("LLM skeleton failed: %w", err)
+		}
+		sk.Type = docType
+		if validSkeletonForType(docType, &sk) {
+			return sk, http.StatusOK, nil
+		}
+		log.Printf("doc generate: type %s skeleton missing %s, retrying", docType, field)
+	}
+	return doc.Skeleton{}, http.StatusUnprocessableEntity,
+		fmt.Errorf("doc: %s skeleton missing %s after retry", docType, field)
+}
+
+// buildKBRefBlock renders KB hits into the reference block the skeleton LLM
+// consumes (mirrors the splice format so provenance is uniform).
+func buildKBRefBlock(refs []kbHit) string {
+	var b strings.Builder
+	for i, r := range refs {
+		fmt.Fprintf(&b, "[来源%d] %s", i+1, r.source)
+		if r.section != "" {
+			fmt.Fprintf(&b, " · %s", r.section)
+		}
+		b.WriteString(":\n")
+		b.WriteString(strings.TrimSpace(clipTextRef(r.content, 900)))
+		b.WriteString("\n")
+	}
+	return b.String()
+}
+
+// clipTextRef truncates reference text to the first n runes, preserving the
+// natural cut so the LLM never sees a half-word-pile.
+func clipTextRef(s string, n int) string {
+	r := []rune(strings.TrimSpace(s))
+	if len(r) <= n {
+		return string(r)
+	}
+	return string(r[:n]) + "…"
+}
+
+// docGenerationRefs retrieves knowledge-base context for a generation request.
+// It honours the explicit kbCollectionIds (or the single kbCollectionId
+// legacy field); when none is given it falls back to the global RAG collection
+// scope so a generation in a scoped deployment automatically stays on-brand.
+// Retrieval is best-effort: a missing embedding/pgvector/timeout yields no refs
+// without failing the request.
+func (s *Server) docGenerationRefs(ctx context.Context, req struct {
+	Type            string  `json:"type"`
+	Prompt          string  `json:"prompt"`
+	KbCollectionID  int64   `json:"kbCollectionId"`
+	KbCollectionIDs []int64 `json:"kbCollectionIds"`
+	Async           bool    `json:"async"`
+}) []kbHit {
+	return s.docRefsForQuery(ctx, appendCompare(req.KbCollectionIDs, req.KbCollectionID), req.Prompt)
+}
+
+// appendCompare merges a []int64 with a single int64 fallback (no duplicates,
+// zero values dropped), for callers that accept both the singular and plural
+// collection fields.
+func appendCompare(ids []int64, single int64) []int64 {
+	if single > 0 {
+		for _, id := range ids {
+			if id == single {
+				return ids
+			}
+		}
+		return append(append([]int64{}, ids...), single)
+	}
+	return ids
+}
+
+// docRefsForQuery retrieves up to 6 KB hits for a query against the given
+// collection scope (empty scope = global ragCollectionScope; still empty = no
+// refs). Best-effort: embedding/pgvector/timeout failures yield nil, never an
+// error, so document generation stays available without a knowledge base.
+func (s *Server) docRefsForQuery(ctx context.Context, collectionIDs []int64, query string) []kbHit {
+	if strings.TrimSpace(query) == "" {
+		return nil
+	}
+	if len(collectionIDs) == 0 {
+		collectionIDs = s.ragCollectionScope()
+	}
+	if len(collectionIDs) == 0 {
+		return nil
+	}
+	searchCtx, cancel := context.WithTimeout(ctx, s.ragTimeout())
+	defer cancel()
+	hits, err := s.searchKB(searchCtx, query, collectionIDs, 6, 0.5)
+	if err != nil || len(hits) == 0 {
+		return nil
+	}
+	return hits
+}
+
 // docFilePath resolves where a generated product file lives on disk for a row.
 func (s *Server) docFilePath(d *store.DocDocument) string {
 	if s.cfg == nil || s.cfg.DocsDir == "" {
@@ -109,9 +246,11 @@ func (s *Server) handleDocGenerate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		Type           string `json:"type"`
-		Prompt         string `json:"prompt"`
-		KbCollectionID int64  `json:"kbCollectionId"`
+		Type            string  `json:"type"`
+		Prompt          string  `json:"prompt"`
+		KbCollectionID  int64   `json:"kbCollectionId"`
+		KbCollectionIDs []int64 `json:"kbCollectionIds"`
+		Async           bool    `json:"async"`
 	}
 	if err := readJSONLimited(w, r, &req); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid request body")
@@ -126,16 +265,34 @@ func (s *Server) handleDocGenerate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 异步模式：入队 kind=doc-generate 任务立即返回 taskId，由 executor 的 doc
+	// worker 后台渲染，进度经任务列表 + doc.event 推送（不阻塞 HTTP）。
+	if req.Async {
+		instr := docGenerateTaskInstr{
+			Type:            req.Type,
+			Prompt:          req.Prompt,
+			KbCollectionID:  req.KbCollectionID,
+			KbCollectionIDs: req.KbCollectionIDs,
+			KbIngest:        req.KbCollectionID > 0,
+		}
+		taskID, err := s.enqueueDocGeneration(r.Context(), instr, "文档生成 · "+docTypeLabel(req.Type), 150)
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, "enqueue document task failed: "+err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"taskId": taskID, "async": true})
+		return
+	}
+
 	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Minute)
 	defer cancel()
 
-	var sk doc.Skeleton
-	if err := s.llm.CompleteJSON(ctx, docGenerateSystem, req.Prompt, &sk); err != nil {
-		writeErr(w, http.StatusServiceUnavailable, "LLM skeleton failed: "+err.Error())
+	refs := s.docGenerationRefs(ctx, req)
+	sk, status, err := s.draftSkeleton(ctx, req.Type, req.Prompt, refs)
+	if err != nil {
+		writeErr(w, status, err.Error())
 		return
 	}
-	// 文档类型由请求方决定，LLM 只负责产出对应 body。
-	sk.Type = req.Type
 
 	if err := os.MkdirAll(s.cfg.DocsDir, 0o755); err != nil {
 		writeErr(w, http.StatusInternalServerError, "create docs dir failed: "+err.Error())
@@ -193,7 +350,7 @@ func (s *Server) handleDocGenerate(w http.ResponseWriter, r *http.Request) {
 		"id":          docRow.ID,
 		"name":        docRow.Name,
 		"docType":     docRow.DocType,
-		"chunkCount":  docRow.SizeBytes,
+		"sizeBytes":   docRow.SizeBytes,
 		"kbIngested":  kbIngested,
 		"downloadUrl": fmt.Sprintf("/api/documents/%d/download", docRow.ID),
 	})
@@ -222,10 +379,12 @@ func (s *Server) handleDocRegenerate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		DocID          int64  `json:"docId"`
-		Instruction    string `json:"instruction"`
-		SessionID      string `json:"sessionId"`
-		KbCollectionID int64  `json:"kbCollectionId"`
+		DocID           int64   `json:"docId"`
+		Instruction     string  `json:"instruction"`
+		SessionID       string  `json:"sessionId"`
+		KbCollectionID  int64   `json:"kbCollectionId"`
+		KbCollectionIDs []int64 `json:"kbCollectionIds"`
+		Async           bool    `json:"async"`
 	}
 	if err := readJSONLimited(w, r, &req); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid request body")
@@ -233,6 +392,23 @@ func (s *Server) handleDocRegenerate(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.DocID <= 0 {
 		writeErr(w, http.StatusBadRequest, "docId is required")
+		return
+	}
+	if req.Async {
+		instr := docGenerateTaskInstr{
+			DocID:           req.DocID,
+			Instruction:     req.Instruction,
+			SessionID:       req.SessionID,
+			KbCollectionID:  req.KbCollectionID,
+			KbCollectionIDs: req.KbCollectionIDs,
+			KbIngest:        req.KbCollectionID > 0,
+		}
+		taskID, err := s.enqueueDocGeneration(r.Context(), instr, "文档重新生成", 150)
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, "enqueue document task failed: "+err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"taskId": taskID, "async": true})
 		return
 	}
 	docRow, err := s.store.GetDocDocument(r.Context(), req.DocID)
@@ -269,12 +445,17 @@ func (s *Server) handleDocRegenerate(w http.ResponseWriter, r *http.Request) {
 		user.WriteString("\n\n")
 	}
 
-	var sk doc.Skeleton
-	if err := s.llm.CompleteJSON(ctx, docGenerateSystem, user.String(), &sk); err != nil {
-		writeErr(w, http.StatusServiceUnavailable, "LLM skeleton failed: "+err.Error())
+	// 重新生成时按修改意见（无则按原需求）检索知识库，引用统一走 draftSkeleton 的 refs。
+	refQuery := strings.TrimSpace(req.Instruction)
+	if refQuery == "" {
+		refQuery = docRow.Prompt
+	}
+	refs := s.docRefsForQuery(ctx, appendCompare(req.KbCollectionIDs, req.KbCollectionID), refQuery)
+	sk, status, err := s.draftSkeleton(ctx, docRow.DocType, user.String(), refs)
+	if err != nil {
+		writeErr(w, status, err.Error())
 		return
 	}
-	sk.Type = docRow.DocType
 	skeletonJSON, _ := json.Marshal(&sk)
 
 	renderedType, data, err := doc.RenderFromSkeletonJSON(skeletonJSON)
@@ -317,6 +498,7 @@ func (s *Server) handleDocRegenerate(w http.ResponseWriter, r *http.Request) {
 		"id":          docRow.ID,
 		"name":        docRow.Name,
 		"docType":     docRow.DocType,
+		"sizeBytes":   docRow.SizeBytes,
 		"kbIngested":  kbIngested,
 		"downloadUrl": fmt.Sprintf("/api/documents/%d/download", docRow.ID),
 	})
@@ -374,6 +556,9 @@ func (s *Server) sessionContextExcerpt(ctx context.Context, sessionID string) st
 // into the knowledge base (docs/DOCUMENTS.md §2.1): the rendered file is
 // parsed to Markdown and run through the same chunk/embed pipeline. Best-effort:
 // a failure only drops the KB copy and is surfaced via the kbIngested flag.
+// The KB document name carries a `-@doc<id>` marker; a previous copy of the same
+// generated document (e.g. from an earlier regenerate) is deleted first so the
+// knowledge base keeps exactly one version per docId.
 func (s *Server) reverseIngestGenerated(ctx context.Context, collectionID int64, rec *store.DocDocument, data []byte) bool {
 	if collectionID <= 0 || len(data) == 0 {
 		return false
@@ -384,6 +569,9 @@ func (s *Server) reverseIngestGenerated(ctx context.Context, collectionID int64,
 		return false
 	}
 	kbName := fmt.Sprintf("%s-@doc%d", rec.Name, rec.ID)
+	if _, err := s.store.DeleteKBDocumentsByNameSuffix(ctx, collectionID, fmt.Sprintf("-@doc%d", rec.ID)); err != nil {
+		log.Printf("doc reverse-ingest: drop old copy: %v", err)
+	}
 	if _, _, err := s.ingestKBDocument(ctx, collectionID, kbName, "text/markdown", md); err != nil {
 		log.Printf("doc reverse-ingest: ingest: %v", err)
 		return false
@@ -417,13 +605,17 @@ func (s *Server) handleDocDocumentByID(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusUnauthorized, "web session or APP token required")
 		return
 	}
-	id, isDownload := docIDFromPath(r)
+	id, action := docIDFromPath(r)
 	if id <= 0 {
 		writeErr(w, http.StatusBadRequest, "invalid document id")
 		return
 	}
-	if isDownload {
+	switch action {
+	case "download":
 		s.handleDocDownload(w, r, id)
+		return
+	case "attach":
+		s.handleDocAttach(w, r)
 		return
 	}
 	switch r.Method {
@@ -462,19 +654,23 @@ func (s *Server) handleDocDocumentByID(w http.ResponseWriter, r *http.Request) {
 }
 
 // docIDFromPath extracts the document id from /api/documents/{id} or
-// /api/documents/{id}/download, returning whether the /download suffix is used.
-func docIDFromPath(r *http.Request) (int64, bool) {
-	rest := strings.TrimPrefix(r.URL.Path, "/api/documents/")
-	isDownload := false
-	if strings.HasSuffix(rest, "/download") {
-		isDownload = true
-		rest = strings.TrimSuffix(rest, "/download")
+// /api/documents/{id}/download, and dispatches the sub-action suffix via the
+// caller. It returns the id plus the raw remaining action (""、"download"或
+// "attach") so the caller can route without re-parsing the path.
+func docIDFromPath(r *http.Request) (int64, string) {
+	rest := strings.TrimSuffix(r.URL.Path, "/")
+	rest = strings.TrimPrefix(rest, "/api/documents")
+	rest = strings.TrimPrefix(rest, "/")
+	action := ""
+	if i := strings.LastIndex(rest, "/"); i >= 0 {
+		action = rest[i+1:]
+		rest = rest[:i]
 	}
 	id, err := strconv.ParseInt(strings.Trim(rest, "/"), 10, 64)
 	if err != nil || id <= 0 {
-		return 0, isDownload
+		return 0, action
 	}
-	return id, isDownload
+	return id, action
 }
 
 // handleDocDownload serves the generated product file for a known id.
@@ -503,7 +699,7 @@ func (s *Server) handleDocDownload(w http.ResponseWriter, r *http.Request, id in
 		return
 	}
 	defer f.Close()
-	downloadName := d.Name + doc.Extension(d.DocType)
+	downloadName := fmt.Sprintf("%s-@doc%d%s", d.Name, d.ID, doc.Extension(d.DocType))
 	w.Header().Set("Content-Type", docMime(d.DocType))
 	w.Header().Set("Content-Disposition", `attachment; filename="`+sanitizeFilename(downloadName)+`"`)
 	w.WriteHeader(http.StatusOK)
@@ -536,4 +732,118 @@ func sanitizeFilename(name string) string {
 		return "document"
 	}
 	return name
+}
+
+// handleDocAttach copies a generated document into a session's work directory
+// (uploads/<name>-@doc<id><ext>), so the client can reference it as a file part
+// in the conversation — the "生成文档作为会话附件 part" flow (docs/DOCUMENTS.md
+// §6.1). The filename carries the `-@doc<id>` marker so the UI can resolve the
+// document back to /api/documents/{id} for preview / regenerate / download.
+//
+//	POST /api/documents/{id}/attach   {sessionId}
+//	→ {ok, name, path:"uploads/<...-@doc<id>>", absolutePath, size, docId}
+func (s *Server) handleDocAttach(w http.ResponseWriter, r *http.Request) {
+	if !s.requireDualAuth(r) {
+		writeErr(w, http.StatusUnauthorized, "web session or APP token required")
+		return
+	}
+	if r.Method != http.MethodPost {
+		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	id, action := docIDFromPath(r)
+	if id <= 0 {
+		writeErr(w, http.StatusBadRequest, "invalid document id")
+		return
+	}
+	if action != "attach" {
+		writeErr(w, http.StatusNotFound, "not found")
+		return
+	}
+	var req struct {
+		SessionID string `json:"sessionId"`
+	}
+	if err := readJSONLimited(w, r, &req); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if strings.TrimSpace(req.SessionID) == "" {
+		writeErr(w, http.StatusBadRequest, "sessionId is required")
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+	defer cancel()
+
+	// 取会话工作目录（会话不存在 / 上游不可达 → 明确报错，不静默写错目录）。
+	dir, err := s.sessionWorkDirectory(ctx, req.SessionID)
+	if err != nil {
+		writeErr(w, http.StatusBadGateway, "resolve session directory: "+err.Error())
+		return
+	}
+	if err := validateWorkDirectory(dir); err != nil {
+		writeErr(w, http.StatusForbidden, "session directory out of scope: "+err.Error())
+		return
+	}
+
+	d, err := s.store.GetDocDocument(ctx, id)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			writeErr(w, http.StatusNotFound, "document not found")
+			return
+		}
+		writeErr(w, http.StatusInternalServerError, "get document failed: "+err.Error())
+		return
+	}
+	path := s.docFilePath(d)
+	if path == "" {
+		writeErr(w, http.StatusInternalServerError, "docs-dir not configured")
+		return
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		writeErr(w, http.StatusNotFound, "file missing on disk")
+		return
+	}
+	name := sanitizeUploadName(fmt.Sprintf("%s-@doc%d%s", d.Name, d.ID, doc.Extension(d.DocType)))
+	if name == "" {
+		writeErr(w, http.StatusInternalServerError, "invalid document name")
+		return
+	}
+	absPath, relPath, err := writeWorkspaceUpload(dir, name, data)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "attach failed: "+err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":           true,
+		"name":         filepath.Base(absPath),
+		"path":         relPath,
+		"absolutePath": absPath,
+		"size":         len(data),
+		"docId":        d.ID,
+	})
+}
+
+// sessionWorkDirectory resolves a session's work directory from the upstream
+// OpenCode server (GET /session/{id} → directory). Returns an error when the
+// session is unknown or the upstream is unreachable.
+func (s *Server) sessionWorkDirectory(ctx context.Context, sessionID string) (string, error) {
+	if s.openCode == nil {
+		return "", fmt.Errorf("opencode upstream not configured")
+	}
+	raw, err := s.openCode.GetSession(ctx, sessionID)
+	if err != nil {
+		return "", err
+	}
+	var se struct {
+		Directory string `json:"directory"`
+	}
+	if err := json.Unmarshal(raw, &se); err != nil {
+		return "", fmt.Errorf("parse session: %w", err)
+	}
+	if strings.TrimSpace(se.Directory) == "" {
+		return "", fmt.Errorf("session has no work directory")
+	}
+	return se.Directory, nil
 }

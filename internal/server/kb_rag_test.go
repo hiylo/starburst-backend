@@ -201,3 +201,73 @@ func TestRagQueryWorthy(t *testing.T) {
 		t.Error("question mark should trigger")
 	}
 }
+
+// TestKBSearchCacheKeys pins the cache-key contract: same scope+query share a
+// key, different scope/query/topK/minScore do not, and collection order in the
+// scope does not matter.
+func TestKBSearchCacheKeys(t *testing.T) {
+	k1 := kbSearchCacheKey("安全库存规则", []int64{1, 2}, 5, 0.5)
+	k2 := kbSearchCacheKey("安全库存规则", []int64{2, 1}, 5, 0.5)
+	if k1 != k2 {
+		t.Fatalf("collection order should not matter: %s != %s", k1, k2)
+	}
+	if k1 == kbSearchCacheKey("安全库存规则", []int64{1, 3}, 5, 0.5) {
+		t.Fatal("different scope must not collide")
+	}
+	if k1 == kbSearchCacheKey("别的查询", []int64{1, 2}, 5, 0.5) {
+		t.Fatal("different query must not collide")
+	}
+	if k1 == kbSearchCacheKey("安全库存规则", []int64{1, 2}, 10, 0.5) {
+		t.Fatal("different topK must not collide")
+	}
+	if k1 == kbSearchCacheKey("安全库存规则", []int64{1, 2}, 5, 0.6) {
+		t.Fatal("different minScore must not collide")
+	}
+}
+
+// TestKBSearchCacheLifecycle covers get/put/eviction/invalidateAll on the
+// bounded LRU-ish cache used by searchKB.
+func TestKBSearchCacheLifecycle(t *testing.T) {
+	c := newKBSearchCache(2)
+	c.put("a", []kbHit{{source: "s1", score: 0.9}})
+	if hits, ok := c.get("a"); !ok || len(hits) != 1 || hits[0].source != "s1" {
+		t.Fatalf("get after put = %+v, %v", hits, ok)
+	}
+	c.put("b", []kbHit{{source: "s2"}})
+	c.put("c", []kbHit{{source: "s3"}})
+	if _, ok := c.get("a"); ok {
+		t.Fatal("oldest entry should be evicted at cap")
+	}
+	// get moves entry to MRU, so "b" survives the next put while "c" (now
+	// oldest) is evicted.
+	if _, ok := c.get("b"); !ok {
+		t.Fatal("b should be present")
+	}
+	c.put("d", []kbHit{{source: "s4"}})
+	if _, ok := c.get("b"); !ok {
+		t.Fatal("b was bumped to MRU and should survive")
+	}
+	if _, ok := c.get("c"); ok {
+		t.Fatal("c should be evicted as the oldest after b was bumped")
+	}
+	if _, ok := c.get("d"); !ok {
+		t.Fatal("d should be present")
+	}
+	c.invalidateAll()
+	if _, ok := c.get("b"); ok {
+		t.Fatal("invalidateAll should drop every entry")
+	}
+}
+
+// TestRagCollectionScope pins the collection-scope plumbing: unset cfg → nil
+// (all collections), configured ids → returned verbatim.
+func TestRagCollectionScope(t *testing.T) {
+	s := newTestServer(t)
+	if got := s.ragCollectionScope(); got != nil {
+		t.Fatalf("default scope = %v, want nil (all)", got)
+	}
+	s.cfg.RagCollectionIDs = []int64{3, 7}
+	if got := s.ragCollectionScope(); len(got) != 2 || got[0] != 3 || got[1] != 7 {
+		t.Fatalf("configured scope = %v", got)
+	}
+}

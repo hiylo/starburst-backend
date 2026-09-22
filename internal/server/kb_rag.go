@@ -34,6 +34,15 @@ func (s *Server) ragTimeout() time.Duration {
 	return ragQueryTimeoutDefault
 }
 
+// ragCollectionScope returns the configured KB collection scope for the
+// prompt_async RAG splice (empty = search every collection).
+func (s *Server) ragCollectionScope() []int64 {
+	if s.cfg == nil {
+		return nil
+	}
+	return s.cfg.RagCollectionIDs
+}
+
 // ragStats 统计 RAG-in-Prompt 的结局分布（docs/RAG_PROMPT.md §9）：spliced 之外
 // 的 skip* 归因让「知识库有没有被用上」可观测。
 type ragStats struct {
@@ -127,7 +136,7 @@ func (s *Server) ragSpliceJSON(ctx context.Context, body []byte) (out []byte, sp
 
 	searchCtx, cancel := context.WithTimeout(ctx, s.ragTimeout())
 	defer cancel()
-	hits, err := s.searchKB(searchCtx, query, nil, ragTopK, ragMinScore)
+	hits, err := s.searchKB(searchCtx, query, s.ragCollectionScope(), ragTopK, ragMinScore)
 	if err != nil {
 		// 任何检索失败都不阻塞发送：按「没找到」原样转发。
 		if errors.Is(err, context.DeadlineExceeded) {
