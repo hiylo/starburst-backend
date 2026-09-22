@@ -227,6 +227,30 @@ func TestSTTProxyBadGateway(t *testing.T) {
 	}
 }
 
+// 引擎 4xx 错误 body 可能含引擎路径/版本/堆栈，不回传客户端，只回泛化文案。
+func TestSTTProxyErrorBodyGeneralized(t *testing.T) {
+	engine := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":"internal /opt/engine/v2 crash stacktrace"}`))
+	}))
+	defer engine.Close()
+
+	s := newTestServer(t)
+	s.SetSTT(engine.URL, 5*time.Second)
+	th := sttTestToken(t, s)
+
+	rec := s.do(t, http.MethodPost, "/api/stt/sessions", "", th)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "/opt/engine") || strings.Contains(rec.Body.String(), "stacktrace") {
+		t.Fatalf("engine error body leaked: %s", rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "recognition engine error") {
+		t.Fatalf("generic message missing: %s", rec.Body.String())
+	}
+}
+
 func TestSTTRequiresToken(t *testing.T) {
 	engine := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`{"status":"ok"}`))

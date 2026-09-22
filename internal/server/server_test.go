@@ -36,7 +36,7 @@ func newTestServer(t *testing.T) *Server {
 	t.Cleanup(func() { st.Close() })
 
 	am := auth.NewManager(st)
-	if _, err := am.Initialize(ctx, "S3cureAdmin!"); err != nil {
+	if _, err := am.Initialize(ctx, "S3cureAdmin!", true); err != nil {
 		t.Fatalf("init auth: %v", err)
 	}
 
@@ -76,6 +76,8 @@ func newTestServer(t *testing.T) *Server {
 			_, _ = w.Write([]byte(`{"version":"v9.9.9"}`))
 		case "/session/ses_test123/message":
 			_, _ = w.Write([]byte(`[{"info":{"role":"assistant"},"parts":[{"type":"text","text":"这是结果"}]}]`))
+		case "/session/ses_attach123":
+			_, _ = w.Write([]byte(`{"id":"ses_attach123","directory":"/w","agent":"build"}`))
 		default:
 			http.NotFound(w, r)
 		}

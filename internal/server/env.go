@@ -41,11 +41,11 @@ func (s *Server) persistEnvRequirements(ctx context.Context, projectID int64, ro
 // each one on the local machine and persists per-item status (the environment
 // gate input). Missing and unsupported items are listed for one-click install.
 func (s *Server) handleIntelEnvEnsure(w http.ResponseWriter, r *http.Request) {
+	// 写操作仅管理员（web 会话）可执行：ensure 会探测并覆写环境需求/服务状态。
+	// 与 server.go 的 adminAccess 等价（APP token 无 admin scope 概念，一律拒绝）。
 	if !s.requireWeb(r) {
-		if _, ok := s.requireToken(r); !ok {
-			writeErr(w, http.StatusUnauthorized, "web session or APP token required")
-			return
-		}
+		writeErr(w, http.StatusForbidden, "operation requires admin web session")
+		return
 	}
 	if r.Method != http.MethodPost {
 		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -167,11 +167,11 @@ func (s *Server) handleIntelEnvStatus(w http.ResponseWriter, r *http.Request) {
 // container) and updates its status. Toolchain items are reported as requiring
 // manual install for now.
 func (s *Server) handleIntelEnvInstall(w http.ResponseWriter, r *http.Request) {
+	// 写操作仅管理员（web 会话）可执行：安装工具链/供给容器都会改动宿主。
+	// 与 server.go 的 adminAccess 等价（APP token 无 admin scope 概念，一律拒绝）。
 	if !s.requireWeb(r) {
-		if _, ok := s.requireToken(r); !ok {
-			writeErr(w, http.StatusUnauthorized, "web session or APP token required")
-			return
-		}
+		writeErr(w, http.StatusForbidden, "operation requires admin web session")
+		return
 	}
 	if r.Method != http.MethodPost {
 		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -275,11 +275,11 @@ func truncateStr(s string, n int) string {
 // handleIntelEnvStop stops and removes a project's middleware container,
 // resetting it to missing.
 func (s *Server) handleIntelEnvStop(w http.ResponseWriter, r *http.Request) {
+	// 写操作仅管理员（web 会话）可执行：停容器会改动宿主运行状态。
+	// 与 server.go 的 adminAccess 等价（APP token 无 admin scope 概念，一律拒绝）。
 	if !s.requireWeb(r) {
-		if _, ok := s.requireToken(r); !ok {
-			writeErr(w, http.StatusUnauthorized, "web session or APP token required")
-			return
-		}
+		writeErr(w, http.StatusForbidden, "operation requires admin web session")
+		return
 	}
 	if r.Method != http.MethodPost {
 		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -318,11 +318,12 @@ func (s *Server) handleIntelEnvStop(w http.ResponseWriter, r *http.Request) {
 // provider=external. External services survive subsequent re-probes (they are
 // not re-probed as containers) and satisfy the environment gate when reachable.
 func (s *Server) handleIntelEnvExternal(w http.ResponseWriter, r *http.Request) {
+	// 写操作仅管理员（web 会话）可执行：外部中间件会落库明文 Username/Password
+	// 并参与环境门禁。与 server.go 的 adminAccess 等价（APP token 无 admin
+	// scope 概念，一律拒绝），避免设备 token 泄露即可注入凭据。
 	if !s.requireWeb(r) {
-		if _, ok := s.requireToken(r); !ok {
-			writeErr(w, http.StatusUnauthorized, "web session or APP token required")
-			return
-		}
+		writeErr(w, http.StatusForbidden, "operation requires admin web session")
+		return
 	}
 	if r.Method != http.MethodPost {
 		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -378,11 +379,12 @@ func (s *Server) handleIntelEnvExternal(w http.ResponseWriter, r *http.Request) 
 // tests: each script is fed via "docker exec -i <container> mysql ... on stdin".
 // It reports per-script success and the number of scripts executed.
 func (s *Server) handleIntelEnvSchemaInit(w http.ResponseWriter, r *http.Request) {
+	// 写操作仅管理员（web 会话）可执行：schema-init 会把项目 SQL 脚本灌进 MySQL
+	// 容器。与 server.go 的 adminAccess 等价（APP token 无 admin scope 概念，
+	// 一律拒绝），避免设备 token 泄露即可任意执行库初始化。
 	if !s.requireWeb(r) {
-		if _, ok := s.requireToken(r); !ok {
-			writeErr(w, http.StatusUnauthorized, "web session or APP token required")
-			return
-		}
+		writeErr(w, http.StatusForbidden, "operation requires admin web session")
+		return
 	}
 	if r.Method != http.MethodPost {
 		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -448,8 +450,16 @@ func (s *Server) handleIntelEnvSchemaInit(w http.ResponseWriter, r *http.Request
 					if is.Service != "" && is.Service != req.Service {
 						continue
 					}
+					// 脚本路径必须钳制在项目根目录之内：git 仓库内可控的
+					// intel-env.yaml 若写 ../../ 越界，脚本会被 docker exec 灌进
+					// MySQL，越界脚本一律跳过。
+					abs := filepath.Clean(filepath.Join(root, filepath.FromSlash(is.Script)))
+					rel, relErr := filepath.Rel(root, abs)
+					if relErr != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+						continue
+					}
 					seen[is.Script] = true
-					scripts = append(scripts, schemainit.Script{Rel: is.Script, Abs: filepath.Join(root, is.Script)})
+					scripts = append(scripts, schemainit.Script{Rel: is.Script, Abs: abs})
 				}
 			}
 		}

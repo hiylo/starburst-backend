@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -100,9 +101,17 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 	for {
 		err := s.openCode.StreamEvents(ctx, func(ev opencode.SSEEvent) error {
 			_ = rc.SetWriteDeadline(time.Now().Add(sseIdleTimeout))
-			if _, werr := fmt.Fprintf(w, "data: %s\n\n", ev.Data); werr != nil {
+			// SSE 规范：数据内的换行必须拆成多个 data: 行，否则客户端会把换行后的
+			// 内容当成新事件字段、遇空行提前终止事件。上游事件偶发携带 CRLF，逐行剥 \r。
+			for _, line := range strings.Split(string(ev.Data), "\n") {
+				if _, werr := fmt.Fprintf(w, "data: %s\n", strings.TrimSuffix(line, "\r")); werr != nil {
+					lastWriteErr = werr
+					return werr // client write failed; stop forwarding
+				}
+			}
+			if _, werr := fmt.Fprint(w, "\n"); werr != nil {
 				lastWriteErr = werr
-				return werr // client write failed; stop forwarding
+				return werr
 			}
 			writeFailures = 0
 			fl.Flush()

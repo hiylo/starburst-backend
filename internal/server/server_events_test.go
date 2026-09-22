@@ -178,7 +178,7 @@ func TestStreamRelaysEvents(t *testing.T) {
 	}
 	t.Cleanup(func() { st.Close() })
 	am := auth.NewManager(st)
-	if _, err := am.Initialize(context.Background(), "S3cureAdmin!"); err != nil {
+	if _, err := am.Initialize(context.Background(), "S3cureAdmin!", true); err != nil {
 		t.Fatalf("init auth: %v", err)
 	}
 	cfg := &config.Config{ListenAddr: "127.0.0.1:0", OpenCodeURL: upstream.URL, DBDriver: "sqlite"}
@@ -270,7 +270,7 @@ func TestSessionStatusAggClearsStaleBusy(t *testing.T) {
 		}
 		t.Cleanup(func() { st.Close() })
 		am := auth.NewManager(st)
-		if _, err := am.Initialize(ctx, "S3cureAdmin!"); err != nil {
+		if _, err := am.Initialize(ctx, "S3cureAdmin!", true); err != nil {
 			t.Fatalf("init auth: %v", err)
 		}
 		cfg := &config.Config{ListenAddr: "127.0.0.1:0", OpenCodeURL: upstream.URL, DBDriver: "sqlite"}

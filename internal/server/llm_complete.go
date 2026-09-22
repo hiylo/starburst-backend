@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"log"
 	"net/http"
 	"time"
 )
@@ -45,7 +46,9 @@ func (s *Server) handleLLMComplete(w http.ResponseWriter, r *http.Request) {
 
 	text, err := s.llm.Complete(ctx, req.System, req.User)
 	if err != nil {
-		writeErr(w, http.StatusBadGateway, "complete failed: "+err.Error())
+		// 原始错误可能含 LLM 网关地址，只进日志，回传泛化文案。
+		log.Printf("llm complete failed: %v", err)
+		writeErr(w, http.StatusBadGateway, "orchestration LLM request failed")
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"text": text})

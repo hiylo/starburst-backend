@@ -26,6 +26,10 @@ type workflowRequest struct {
 	Steps     []workflowStep `json:"steps"`
 }
 
+// maxWorkflowSteps 限制单个工作流的最大步骤数。steps 无上限时调用方可一次性
+// 灌入上千步任务，每步一次 DB 往返，既撑爆任务表也放大编排复杂度。
+const maxWorkflowSteps = 100
+
 // handleWorkflowCreate creates one task per step, each depending on the
 // previous (task[i].dependsOn = task[i-1].id), so the steps run strictly in
 // sequence. All tasks share the same workflow_id for the orchestration page to
@@ -45,6 +49,10 @@ func (s *Server) handleWorkflowCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(req.Steps) == 0 {
 		writeErr(w, http.StatusBadRequest, "steps are required")
+		return
+	}
+	if len(req.Steps) > maxWorkflowSteps {
+		writeErr(w, http.StatusBadRequest, "too many steps, max "+strconv.Itoa(maxWorkflowSteps)+" per workflow")
 		return
 	}
 	if err := validateWorkDirectory(req.Directory); err != nil {
@@ -154,6 +162,13 @@ func (s *Server) handleWorkflowSteps(w http.ResponseWriter, r *http.Request) {
 	} else if strings.HasSuffix(id, "/rerun") {
 		action = "rerun"
 		id = strings.TrimSuffix(id, "/rerun")
+	}
+	// 剥离动作后缀后再判空：`/api/workflow//cancel`（双斜杠）在 TrimPrefix 后是
+	// `/cancel`，剥掉动作后 id 变空串，若不拦会以 workflow_id='' 把全部独立任务
+	// 一次性取消/重跑。
+	if id == "" {
+		writeErr(w, http.StatusBadRequest, "missing workflow id")
+		return
 	}
 	switch action {
 	case "cancel":

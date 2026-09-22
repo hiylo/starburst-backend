@@ -86,10 +86,12 @@ func (s *Server) handleSystem(w http.ResponseWriter, r *http.Request) {
 	if pgErr != nil {
 		log.Printf("pgvector probe: %v", pgErr)
 	}
+	// opencodeURL 是内网可达地址，不随 /api/system 回传（任何有效 token 都能读）；
+	// 仅在服务端日志留痕供排障。
+	log.Printf("system: upstream opencode at %s", s.cfg.OpenCodeURL)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"backend":         "starburst-backend",
 		"version":         config.Version,
-		"opencodeURL":     s.cfg.OpenCodeURL,
 		"opencodeVersion": version,
 		"db":              s.cfg.DBDriver,
 		"pgvector":        pgVec,
@@ -211,7 +213,8 @@ func (s *Server) handleTokens(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		var req struct {
-			Name string `json:"name"`
+			Name  string `json:"name"`
+			Scope string `json:"scope"` // "device"(默认) 或 "admin"；仅 web 管理员可创建 admin token
 		}
 		if !readBody(w, r, &req) {
 			return
@@ -220,7 +223,15 @@ func (s *Server) handleTokens(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusBadRequest, "name is required")
 			return
 		}
-		raw, err := s.auth.CreateToken(r.Context(), req.Name)
+		scope := req.Scope
+		if scope == "" {
+			scope = "device"
+		}
+		if scope != "admin" && scope != "device" {
+			writeErr(w, http.StatusBadRequest, "scope must be 'admin' or 'device'")
+			return
+		}
+		raw, err := s.auth.CreateToken(r.Context(), req.Name, scope)
 		if err != nil {
 			writeErr(w, http.StatusInternalServerError, "create token failed")
 			return

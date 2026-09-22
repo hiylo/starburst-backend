@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/hiylo/starburst-backend/internal/opencode"
@@ -553,9 +554,10 @@ func (s *Server) seedSessionStatuses(ctx context.Context) {
 	}
 	// seed 项必须同步填 sessionActivity：否则重启后第一次聚合时所有 seed 项
 	// hasActivity=false → busy 立即 Delete、idle 也立即 Delete，seed 形同虚设。
-	// 用「近期」时间戳（现在 -10s）让 seed 项撑过一个 stale 窗口，等真实事件到来接管；
-	// 不用 time.Now() 是为 idle 项的 1 小时清理语义留出起点（避免清理计数被推得太近）。
-	seedActivity := time.Now().Add(-10 * time.Second)
+	// 用 time.Now() 让 seed 项撑过一个 stale 窗口（0 < activeWindow/busyStaleWindow），
+	// 等真实事件到来接管；与 push 路径（sessionActivity.Store(id, time.Now())）
+	// 保持一致的时间源语义，避免进程内短窗口比较被不同起点带偏。
+	seedActivity := time.Now()
 	for _, e := range events {
 		switch e.EventType {
 		case "session.status":
@@ -571,6 +573,39 @@ func (s *Server) seedSessionStatuses(ctx context.Context) {
 	if n := len(events); n > 0 {
 		log.Printf("events: seeded session statuses from %d recent events", n)
 	}
+}
+
+// statusAggCacheTTL 是 /session/status 聚合结果的短 TTL 缓存窗口。App 高频轮询
+// 时直接复用上次快照，避免每次请求都同步打上游快照 + 全表 Range 聚合。
+const statusAggCacheTTL = 3 * time.Second
+
+// statusAggEntry 是一次聚合快照的缓存条目。
+type statusAggEntry struct {
+	at  time.Time
+	out map[string]map[string]any
+}
+
+// statusAggCache 按 Server 实例缓存：生产单实例即单条目；测试各建 Server 互不干扰，
+// 不会把上一个测试服务器的快照误复用给下一个。
+var statusAggCache sync.Map // *Server → *statusAggEntry
+
+// cachedStatusAgg 返回 TTL 窗口内的聚合快照；命中时不再访问上游与聚合表。
+func (s *Server) cachedStatusAgg() (map[string]map[string]any, bool) {
+	v, ok := statusAggCache.Load(s)
+	if !ok {
+		return nil, false
+	}
+	entry := v.(*statusAggEntry)
+	if time.Since(entry.at) < statusAggCacheTTL {
+		return entry.out, true
+	}
+	statusAggCache.Delete(s)
+	return nil, false
+}
+
+// storeStatusAgg 写入本次聚合快照供后续请求复用。
+func (s *Server) storeStatusAgg(out map[string]map[string]any) {
+	statusAggCache.Store(s, &statusAggEntry{at: time.Now(), out: out})
 }
 
 // handleSessionStatusAgg 是原 `/session/status` 镜像的增强：上游快照 + 采集器
@@ -589,6 +624,11 @@ func (s *Server) handleSessionStatusAgg(w http.ResponseWriter, rr ...*http.Reque
 	}
 	ctx, cancel := context.WithTimeout(base, 5*time.Second)
 	defer cancel()
+	// 命中短 TTL 缓存：直接复用上次聚合结果，跳过上游快照与全表 Range。
+	if out, ok := s.cachedStatusAgg(); ok {
+		writeJSON(w, http.StatusOK, out)
+		return
+	}
 	// 快照是上游当前权威状态：优先保留；事件聚合只补充快照未覆盖的会话，
 	// 避免把已 idle 的会话误标成 busy，也补齐快照遗漏的 busy。
 	out := map[string]map[string]any{}
@@ -691,5 +731,6 @@ func (s *Server) handleSessionStatusAgg(w http.ResponseWriter, rr ...*http.Reque
 		}
 		return true
 	})
+	s.storeStatusAgg(out)
 	writeJSON(w, http.StatusOK, out)
 }

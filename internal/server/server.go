@@ -284,6 +284,7 @@ func (s *Server) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/kb/documents", s.handleKbDocuments)
 	mux.HandleFunc("/api/kb/documents/", s.handleKbDocumentByID)
 	mux.HandleFunc("/api/kb/ingest", s.handleKbIngest)
+	mux.HandleFunc("/api/kb/stats", s.handleKbStats)
 	mux.HandleFunc("/api/kb/search", s.handleKbSearch)
 	mux.HandleFunc("/api/documents/generate", s.handleDocGenerate)
 	mux.HandleFunc("/api/documents/regenerate", s.handleDocRegenerate)
@@ -301,7 +302,12 @@ func (s *Server) Start(ctx context.Context) error {
 		// 慢 VPN 上上传大附件（base64 内嵌可达 13MB）可能超过 60s，放宽整包读取时限；
 		// 响应侧不受 ReadTimeout 影响（SSE 长连靠 IdleTimeout 与客户端断连取消）。
 		ReadTimeout: 300 * time.Second,
-		IdleTimeout: 60 * time.Second,
+		// 慢客户端（不读数据但 TCP 未断）会让普通响应的写无限阻塞、钉死 handler
+		// goroutine。设一个合理上限回收；上传大附件只受 ReadTimeout 约束（上传不占写）。
+		// SSE/WS 长连不受影响：SSE 每写前用 ResponseController.SetWriteDeadline 自管
+		// deadline，WS 走 Hijack 后由 gorilla 管理，均与这里的整包上限无冲突。
+		WriteTimeout: 60 * time.Second,
+		IdleTimeout:  60 * time.Second,
 	}
 	errCh := make(chan error, 1)
 	go func() {
@@ -475,6 +481,22 @@ func (s *Server) requireWeb(r *http.Request) bool {
 		return false
 	}
 	return true
+}
+
+// adminAccess reports whether the request carries admin-level authorization:
+// a valid web session, or an APP token whose scope is "admin". Device-scoped
+// tokens（Scope=="device"）能通过普通端点的鉴权，但被挡在敏感操作之外
+// （可任意执行命令的代理路径、可对内网做带返回值探测的 intel 接口等）。
+// 已验证的 token 记录缓存在 request context（requireToken），这里直接复用
+// 缓存，不重复查库。
+func (s *Server) adminAccess(r *http.Request) bool {
+	if s.requireWeb(r) {
+		return true
+	}
+	if rec, ok := s.requireToken(r); ok {
+		return rec.Scope == "admin"
+	}
+	return false
 }
 
 // tokenCtxKey 是 request context 中缓存已验证 token 记录的键，避免同一

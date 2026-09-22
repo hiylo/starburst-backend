@@ -1,8 +1,10 @@
 package server
 
 import (
+	"context"
 	"net/http"
 	"strings"
+	"time"
 )
 
 // handleUnreadList returns the set of sessions flagged as having new/unread
@@ -16,7 +18,9 @@ func (s *Server) handleUnreadList(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
-	m, err := s.store.ListUnread(r.Context())
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+	m, err := s.store.ListUnread(ctx)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "list unread failed")
 		return
@@ -51,7 +55,9 @@ func (s *Server) handleUnreadMarkRead(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if err := s.store.MarkSessionRead(r.Context(), id); err != nil {
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+	if err := s.store.MarkSessionRead(ctx, id); err != nil {
 		writeErr(w, http.StatusInternalServerError, "mark read failed")
 		return
 	}

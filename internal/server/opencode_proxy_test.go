@@ -9,7 +9,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/hiylo/starburst-backend/internal/auth"
 	"github.com/hiylo/starburst-backend/internal/opencode"
+	"github.com/hiylo/starburst-backend/internal/store"
 )
 
 // newProxyEnv builds a Server whose openCode client points at the given fake
@@ -21,7 +23,7 @@ func newProxyEnv(t *testing.T, upstream http.HandlerFunc) (*Server, string) {
 	t.Cleanup(us.Close)
 	s.openCode = opencode.New(us.URL)
 
-	raw, err := s.auth.CreateToken(context.Background(), "proxy-test")
+	raw, err := s.auth.CreateToken(context.Background(), "proxy-test", "device")
 	if err != nil {
 		t.Fatalf("create token: %v", err)
 	}
@@ -225,6 +227,88 @@ func TestProviderCredentialPath(t *testing.T) {
 	for _, p := range closed {
 		if providerCredentialPath(p) {
 			t.Errorf("%s should not be credential-scanned", p)
+		}
+	}
+}
+
+// 任意命令执行（/shell、/command）与外部分发公链写操作（/share 的 POST/DELETE）
+// 必须对设备 token 判为敏感；发消息（/prompt）与 share 读取保持开放。
+func TestProxyIsSensitiveSessionRCEAndShare(t *testing.T) {
+	sensitive := []struct{ method, path string }{
+		{http.MethodPost, "/session/ses_1/shell"},
+		{http.MethodPost, "/session/ses_1/command"},
+		{http.MethodPost, "/session/ses_1/share"},
+		{http.MethodDelete, "/session/ses_1/share"},
+		{http.MethodPost, "/auth/anthropic"},
+		{http.MethodPatch, "/config/providers"},
+		{http.MethodPost, "/global/dispose"},
+	}
+	for _, c := range sensitive {
+		if !proxyIsSensitive(c.method, c.path) {
+			t.Errorf("%s %s should be sensitive", c.method, c.path)
+		}
+	}
+	open := []struct{ method, path string }{
+		{http.MethodGet, "/session/ses_1/share"},   // 读取已有共享链接
+		{http.MethodPost, "/session/ses_1/prompt"}, // App 核心：发消息
+		{http.MethodPost, "/session/ses_1/prompt_async"},
+		{http.MethodGet, "/session/ses_1/message"},
+		{http.MethodGet, "/session/ses_1/shell"}, // 非 POST 不触发
+		{http.MethodGet, "/config/providers"},    // 模型下拉框数据源豁免
+	}
+	for _, c := range open {
+		if proxyIsSensitive(c.method, c.path) {
+			t.Errorf("%s %s should stay open", c.method, c.path)
+		}
+	}
+}
+
+// 设备 scope 的 token 不能触发 shell / command / share 写等敏感代理操作，admin
+// scope 的 token 与 web session 可以；开放路径（GET share、POST prompt）不受挡。
+func TestOpenCodeProxyScopeGate(t *testing.T) {
+	s, _ := newProxyEnv(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	})
+	ctx := context.Background()
+	mk := func(scope, name string) string {
+		raw := "ocb_scope_" + name
+		if err := s.store.CreateToken(ctx, &store.Token{
+			ID:        "tok-" + name,
+			Name:      name,
+			TokenHash: auth.HashToken(raw),
+			Scope:     scope,
+		}); err != nil {
+			t.Fatalf("create %s token: %v", scope, err)
+		}
+		return raw
+	}
+	deviceH := map[string]string{"Authorization": "Bearer " + mk("device", "dev")}
+	adminH := map[string]string{"Authorization": "Bearer " + mk("admin", "adm")}
+
+	sensitive := []struct{ method, path string }{
+		{http.MethodPost, OpenCodeProxyPrefix + "/session/ses_1/shell"},
+		{http.MethodPost, OpenCodeProxyPrefix + "/session/ses_1/command"},
+		{http.MethodPost, OpenCodeProxyPrefix + "/session/ses_1/share"},
+		{http.MethodDelete, OpenCodeProxyPrefix + "/session/ses_1/share"},
+		{http.MethodPatch, OpenCodeProxyPrefix + "/config"},
+	}
+	for _, c := range sensitive {
+		if rec := s.do(t, c.method, c.path, "{}", deviceH); rec.Code != http.StatusForbidden {
+			t.Errorf("device %s %s: want 403, got %d %s", c.method, c.path, rec.Code, rec.Body.String())
+		}
+		if rec := s.do(t, c.method, c.path, "{}", adminH); rec.Code != http.StatusOK {
+			t.Errorf("admin %s %s: want 200, got %d %s", c.method, c.path, rec.Code, rec.Body.String())
+		}
+	}
+	open := []struct{ method, path string }{
+		{http.MethodGet, OpenCodeProxyPrefix + "/session/ses_1/share"},
+		{http.MethodPost, OpenCodeProxyPrefix + "/session/ses_1/prompt"},
+		{http.MethodPost, OpenCodeProxyPrefix + "/session/ses_1/prompt_async"},
+	}
+	for _, c := range open {
+		if rec := s.do(t, c.method, c.path, "{}", deviceH); rec.Code != http.StatusOK {
+			t.Errorf("device %s %s open path: want 200, got %d %s", c.method, c.path, rec.Code, rec.Body.String())
 		}
 	}
 }

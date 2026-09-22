@@ -61,6 +61,21 @@ func proxyIsSensitive(method, path string) bool {
 	if path == "/config" || strings.HasPrefix(path, "/config/") {
 		return true
 	}
+	// 任意命令执行（POST /session/{id}/shell 打开 shell、/command 执行 slash 命令）
+	// 与外部共享公链（POST/DELETE /session/{id}/share 生成/撤销外部分发链接）对设备
+	// token 一律敏感，只有管理员（web session 或 admin-scope token）可调用。
+	// /session/{id}/prompt（发消息）与 GET share（读取已有链接）保持开放——前者是
+	// App 核心功能，后者只是读取。
+	if strings.HasPrefix(path, "/session/") {
+		if method == http.MethodPost &&
+			(strings.HasSuffix(path, "/shell") || strings.HasSuffix(path, "/command")) {
+			return true
+		}
+		if (method == http.MethodPost || method == http.MethodDelete) &&
+			strings.HasSuffix(path, "/share") {
+			return true
+		}
+	}
 	return false
 }
 
@@ -174,6 +189,33 @@ func isHopByHopHeader(k string) bool {
 	return false
 }
 
+// forwardExcludeHeaders must NOT be relayed upstream on top of hop-by-hop and
+// the client Authorization: backend-admin session / cookies (a leaked session
+// would give the upstream holder full admin control) and routing headers whose
+// values belong to the proxy hop, not the real client（透传会污染上游看到的
+// 来源信息，X-Request-ID 则由上游自己生成）。
+var forwardExcludeHeaders = []string{
+	"X-Web-Session",
+	"Cookie",
+	"X-Forwarded-For",
+	"X-Forwarded-Proto",
+	"X-Forwarded-Host",
+	"Forwarded",
+	"X-Real-IP",
+	"X-Request-ID",
+}
+
+// isExcludedForwardHeader reports whether k must be stripped before relaying
+// upstream (backend-only credentials / routing metadata).
+func isExcludedForwardHeader(k string) bool {
+	for _, h := range forwardExcludeHeaders {
+		if strings.EqualFold(k, h) {
+			return true
+		}
+	}
+	return false
+}
+
 // handleOpenCodeProxy is the OpenCode mirror proxy. The registered route is the
 // whole OpenCodeProxyPrefix subtree; any method, any opencode path under it is
 // forwarded to the upstream server and the upstream response (headers, status,
@@ -204,10 +246,11 @@ func (s *Server) handleOpenCodeProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 高危上游操作只允许管理员（web session）调用：APP token 一旦泄露即
-	// 等同持有 opencode 全权——写 provider key、开 PTY、全局 dispose 都不该
-	// 由设备 token 直接触发。读取与 permission reply（App 远程批准）保留。
-	if !s.requireWeb(r) && proxyIsSensitive(r.Method, upstreamPath) {
+	// 高危上游操作只允许管理员：web session 或 admin-scope token（adminAccess）。
+	// APP/设备 token 一旦泄露即等同持有 opencode 全权——写 provider key、开 PTY、
+	// 全局 dispose、任意命令执行（/shell、/command）、生成外部分发公链（/share 写）
+	// 都不该由设备 token 直接触发。读取与 permission reply（App 远程批准）保留。
+	if !s.adminAccess(r) && proxyIsSensitive(r.Method, upstreamPath) {
 		writeErr(w, http.StatusForbidden, "operation requires admin web session")
 		return
 	}
@@ -228,11 +271,12 @@ func (s *Server) handleOpenCodeProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Relay headers to the upstream, skipping hop-by-hop and the client
-	// Authorization (replaced by the backend's own upstream credentials).
+	// Relay headers to the upstream, skipping hop-by-hop, the client
+	// Authorization (replaced by the backend's own upstream credentials) and
+	// backend-only / routing headers (see isExcludedForwardHeader).
 	hdr := make(http.Header, len(r.Header))
 	for k, vv := range r.Header {
-		if isHopByHopHeader(k) || strings.EqualFold(k, "Authorization") {
+		if isHopByHopHeader(k) || isExcludedForwardHeader(k) || strings.EqualFold(k, "Authorization") {
 			continue
 		}
 		hdr[k] = append([]string(nil), vv...)
@@ -262,7 +306,15 @@ func (s *Server) handleOpenCodeProxy(w http.ResponseWriter, r *http.Request) {
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, maxProxyRequestBytes)
 
-	resp, err := s.openCode.Do(ctx, r.Method, upstreamPath, r.URL.Query(), r.Body, hdr)
+	// RAG-in-Prompt：对 prompt_async 请求做知识库检索，命中则拼上下文再转发。
+	// 检索失败/超时/未命中一律原样转发，绝不阻塞发送（详见 docs/RAG_PROMPT.md）。
+	reqBody := io.Reader(r.Body)
+	ragSpliced := false
+	if promptAsyncPath(r.Method, upstreamPath) {
+		reqBody, ragSpliced = s.applyRagSpliceToProxy(r)
+	}
+
+	resp, err := s.openCode.Do(ctx, r.Method, upstreamPath, r.URL.Query(), reqBody, hdr)
 	if err != nil {
 		log.Printf("opencode proxy %s %s: %v", r.Method, upstreamPath, err)
 		writeErr(w, http.StatusBadGateway, "upstream opencode request failed")
@@ -288,6 +340,14 @@ func (s *Server) handleOpenCodeProxy(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	w.Header().Set("X-Accel-Buffering", "no") // disable proxy buffering for SSE
+	if promptAsyncPath(r.Method, upstreamPath) {
+		// 供客户端识别「本次消息是否带入了知识库资料」：0=未命中/降级，1=已拼装。
+		if ragSpliced {
+			w.Header().Set("X-Rag-Spliced", "1")
+		} else {
+			w.Header().Set("X-Rag-Spliced", "0")
+		}
+	}
 
 	if sanitize {
 		relaySanitizedJSON(w, resp, upstreamPath)
@@ -304,10 +364,12 @@ func (s *Server) handleOpenCodeProxy(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(resp.StatusCode)
 
 	// SSE: stream with a flush per read so events are delivered immediately.
-	// Non-SSE responses just copy through. 每次写前设写 deadline：客户端停读
-	// （不消费但 TCP 未断）时写会超时失败并立即退出，避免 handler 无限阻塞挂起。
-	// 依赖 statusWriter.Unwrap 让 NewResponseController 能触达底层连接；即使拿
-	// 不到 deadline 能力，写失败路径仍能保证断开。不改动响应头/压缩语义。
+	// Non-SSE responses are copied through with a per-write deadline as well:
+	// a slow client (still TCP-connected but never draining) would otherwise
+	// pin the upstream connection and this handler goroutine forever. 每次写前
+	// 设写超时（与 SSE 分支同一套 deadline），超时即断开回收；依赖
+	// statusWriter.Unwrap / gzipResponseWriter.Unwrap 让 NewResponseController
+	// 触达底层连接，拿不到 deadline 能力时写失败路径仍能保证断开。
 	if fl, ok := w.(http.Flusher); ok && isSSE {
 		rc := http.NewResponseController(w)
 		buf := make([]byte, 32*1024)
@@ -325,7 +387,20 @@ func (s *Server) handleOpenCodeProxy(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	_, _ = io.Copy(w, resp.Body)
+	rc := http.NewResponseController(w)
+	buf := make([]byte, 32*1024)
+	for {
+		n, rerr := resp.Body.Read(buf)
+		if n > 0 {
+			_ = rc.SetWriteDeadline(time.Now().Add(sseIdleTimeout))
+			if _, werr := w.Write(buf[:n]); werr != nil {
+				return
+			}
+		}
+		if rerr != nil {
+			return
+		}
+	}
 }
 
 // relaySanitizedJSON buffers an upstream credential-path response, blanks its

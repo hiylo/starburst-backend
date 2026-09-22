@@ -78,10 +78,9 @@ func (s *Server) handleBatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	created := make([]string, 0, len(req.Targets))
+	// 批量预校验：先校验全部 target（目录合法性 / sessionID 合法性），任一不合法
+	// 即整批拒绝。避免「建到第 N 个才发现后一个非法」的部分成功，调用方无从对账。
 	for _, tg := range req.Targets {
-		// 每个目标目录都会成为对应任务里 agent 的工作目录，逐个校验（一处不合法
-		// 即整批拒绝，避免只建成一半任务）。
 		if err := validateWorkDirectory(tg.Directory); err != nil {
 			writeErr(w, http.StatusBadRequest, "invalid directory: "+err.Error())
 			return
@@ -90,6 +89,10 @@ func (s *Server) handleBatch(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusBadRequest, "invalid sessionId")
 			return
 		}
+	}
+
+	created := make([]string, 0, len(req.Targets))
+	for _, tg := range req.Targets {
 		t := &store.Task{
 			ID:        newTaskID(),
 			SessionID: tg.SessionID,
@@ -97,7 +100,13 @@ func (s *Server) handleBatch(w http.ResponseWriter, r *http.Request) {
 			Prompt:    req.Prompt,
 		}
 		if err := s.store.CreateTask(ctx, t); err != nil {
-			writeErr(w, http.StatusInternalServerError, "create task failed")
+			// 部分成功：把已创建的任务 id 一并返回，调用方可按 createdIds 对账，
+			// 而不是收到裸 500 无从知道前 N-1 个是否入库。
+			writeJSON(w, http.StatusInternalServerError, map[string]any{
+				"createdIds": created,
+				"count":      len(created),
+				"error":      "create task failed",
+			})
 			return
 		}
 		created = append(created, t.ID)

@@ -88,8 +88,12 @@ func (l *loginLimiter) prune(recent time.Time) {
 }
 
 // clientKey derives a stable rate-limit key from the request: the peer IP with
-// the port stripped, falling back to the first X-Forwarded-For entry when the
+// the port stripped, falling back to the LAST X-Forwarded-For entry when the
 // peer is loopback (i.e. a reverse proxy is in front).
+//
+// 取最后一个（最右侧）条目而不是第一个：前置代理在 XFF 头部追加自己看到的
+// 来源，最右侧是离本服务最近一跳的真实来源；取第一个会让攻击者通过自控的首
+// IP 无限换 key 绕过登录爆破限流。无 XFF 时回退到 peer host。
 func clientKey(r *http.Request) string {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
@@ -97,8 +101,9 @@ func clientKey(r *http.Request) string {
 	}
 	if host == "127.0.0.1" || host == "::1" || host == "localhost" {
 		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-			if first := strings.TrimSpace(strings.Split(xff, ",")[0]); first != "" {
-				return first
+			parts := strings.Split(xff, ",")
+			if last := strings.TrimSpace(parts[len(parts)-1]); last != "" {
+				return last
 			}
 		}
 	}

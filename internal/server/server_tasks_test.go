@@ -228,6 +228,56 @@ func TestBatchCreatesMultipleTasks(t *testing.T) {
 	}
 }
 
+// TestBatchPrevalidatesAllTargets 验证批量创建先整体预校验：任一 target 不合法
+// 即整批 400 且零任务入库（修复前会先建成前面的 target 再在后一个失败，造成
+// 无法对账的部分成功）。
+func TestBatchPrevalidatesAllTargets(t *testing.T) {
+	s := newTestServer(t)
+
+	rec := s.do(t, http.MethodPost, "/api/web/session", `{"password":"S3cureAdmin!"}`, nil)
+	var login struct {
+		Session string `json:"session"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &login)
+	wh := map[string]string{"X-Web-Session": login.Session}
+	rec = s.do(t, http.MethodPost, "/api/tokens", `{"name":"batch-rej"}`, wh)
+	var tok struct {
+		Token string `json:"token"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &tok)
+	th := map[string]string{"Authorization": "Bearer " + tok.Token}
+
+	// 第一个 target 合法、第二个是系统目录（/etc）：整批拒绝。
+	rec = s.do(t, http.MethodPost, "/api/batch",
+		`{"prompt":"x","targets":[{"directory":"/a"},{"directory":"/etc"}]}`, th)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// 不应有任何任务被创建。
+	rec = s.do(t, http.MethodGet, "/api/tasks", "", th)
+	var list struct {
+		Tasks []map[string]any `json:"tasks"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &list)
+	if len(list.Tasks) != 0 {
+		t.Fatalf("expected 0 tasks after rejected batch, got %d", len(list.Tasks))
+	}
+
+	// 非法 sessionId 同样整批拒绝。
+	rec = s.do(t, http.MethodPost, "/api/batch",
+		`{"prompt":"x","targets":[{"directory":"/a"},{"sessionId":"bad/../id"}]}`, th)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for invalid sessionId, got %d: %s", rec.Code, rec.Body.String())
+	}
+	rec = s.do(t, http.MethodGet, "/api/tasks", "", th)
+	list.Tasks = nil
+	_ = json.Unmarshal(rec.Body.Bytes(), &list)
+	if len(list.Tasks) != 0 {
+		t.Fatalf("expected 0 tasks, got %d", len(list.Tasks))
+	}
+}
+
 // TestTaskListPagination covers the paged task listing: limit/offset params,
 // the total count, clamping of out-of-range values and the status filter.
 func TestTaskListPagination(t *testing.T) {

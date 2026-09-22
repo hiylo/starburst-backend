@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -329,8 +330,16 @@ func engineInfo(data []byte) map[string]any {
 	return info
 }
 
-// writeRaw emits an engine response body verbatim.
+// writeRaw emits an engine response. 2xx bodies pass through verbatim; error
+// responses are replaced with a generic message — the engine body may embed its
+// own path, version or stack trace, which must not reach the client — and the
+// raw body stays in the server log for diagnosis.
 func writeRaw(w http.ResponseWriter, status int, data []byte) {
+	if status < 200 || status >= 300 {
+		log.Printf("stt engine error: status %d body: %s", status, data)
+		writeErr(w, proxyStatus(status), "recognition engine error")
+		return
+	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(status)
 	_, _ = w.Write(data)

@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"regexp"
 	"strconv"
@@ -91,7 +92,10 @@ func (s *Server) archiveSession(w http.ResponseWriter, r *http.Request) {
 
 	msgs, err := s.openCode.FetchSessionMessages(ctx, req.SessionID)
 	if err != nil {
-		writeErr(w, http.StatusBadGateway, "opencode: "+err.Error())
+		// 原始错误可能含内网上游地址（Get "http://127.0.0.1:4096/..."），
+		// 只进日志，回传泛化文案。
+		log.Printf("archive session %s: %v", req.SessionID, err)
+		writeErr(w, http.StatusBadGateway, "opencode request failed")
 		return
 	}
 

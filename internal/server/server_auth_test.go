@@ -257,6 +257,19 @@ func TestSystemRequiresAuth(t *testing.T) {
 	}
 }
 
+// /api/system 不再回传内网上游地址（任何有效 token 都能读），仅服务端日志留痕。
+func TestSystemEndpointDoesNotLeakOpenCodeURL(t *testing.T) {
+	s := newTestServer(t)
+	wh := loginWeb(t, s)
+	rec := s.do(t, http.MethodGet, "/api/system", "", wh)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("system status %d", rec.Code)
+	}
+	if strings.Contains(rec.Body.String(), "opencodeURL") {
+		t.Fatalf("opencodeURL leaked in /api/system: %s", rec.Body.String())
+	}
+}
+
 // TestQueryTokenOnlyOnUpgradeEndpoints pins the credential narrowing: ?token=
 // authenticates the WS/SSE handshakes, where a browser cannot set headers, and
 // is ignored on every other route (query strings land in access logs and

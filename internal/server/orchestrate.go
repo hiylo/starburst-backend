@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -32,18 +33,55 @@ var upgrader = websocket.Upgrader{
 	},
 }
 
+// errMissingProjectID 表示 /api/projects/ 缺省 id（客户端错误，400）。
+var errMissingProjectID = errors.New("missing project id")
+
 // projectIDFromPath extracts the project directory from /api/projects/{dir}.
 // EscapedPath is used so an encoded slash (%2F) inside an absolute directory
-// does not get mistaken for a path separator.
+// does not get mistaken for a path separator. The unescaped id is then
+// whitelist-checked (validProjectID) so `../`、`?`、`#`、`\` 之类不能拼进上游
+// URL 造成路径/查询串混淆。
 func projectIDFromPath(r *http.Request) (string, error) {
 	raw := r.URL.EscapedPath()[len("/api/projects/"):]
 	if i := strings.Index(raw, "/"); i >= 0 {
 		raw = raw[:i]
 	}
 	if raw == "" {
-		return "", fmt.Errorf("missing project id")
+		return "", errMissingProjectID
 	}
-	return url.PathUnescape(raw)
+	id, err := url.PathUnescape(raw)
+	if err != nil || !validProjectID(id) {
+		return "", fmt.Errorf("invalid project id %q", raw)
+	}
+	return id, nil
+}
+
+// validProjectID 校验解引用后的项目目录 id：只允许字母数字与 `/`、`.`、`_`、`-`，
+// 且任一路径段不能是 `.` 或 `..`；拒绝控制字符以及 `?`、`#`、`\` 等可能被
+// 上游当作查询串/路径边界的字符。
+func validProjectID(id string) bool {
+	if id == "" {
+		return false
+	}
+	for _, seg := range strings.Split(id, "/") {
+		if seg == "." || seg == ".." {
+			return false
+		}
+	}
+	for _, r := range id {
+		if r <= ' ' || r == 0x7f {
+			return false
+		}
+		switch r {
+		case '/', '.', '_', '-':
+			continue
+		}
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 // sessionDir returns the working directory that identifies a session's project,
@@ -168,7 +206,12 @@ func (s *Server) handleProjectSessions(w http.ResponseWriter, r *http.Request) {
 
 	id, err := projectIDFromPath(r)
 	if err != nil {
-		writeErr(w, http.StatusBadRequest, err.Error())
+		if errors.Is(err, errMissingProjectID) {
+			writeErr(w, http.StatusBadRequest, err.Error())
+		} else {
+			// 白名单外的项目 id（../、? 等）视为不存在。
+			writeErr(w, http.StatusNotFound, err.Error())
+		}
 		return
 	}
 
