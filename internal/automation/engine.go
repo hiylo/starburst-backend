@@ -116,11 +116,13 @@ func (e *Engine) pollGit(ctx context.Context) error {
 			continue
 		}
 		if prev != head {
-			e.gitHeads[r.ID] = head
 			log.Printf("automation: git rule %s fired (head %s -> %s)", r.ID, prev, head)
 			if err := e.Fire(ctx, r.ID); err != nil {
 				log.Printf("automation: fire git rule %s: %v", r.ID, err)
+				// 建任务失败：不推进基线，下一轮 poll 重试而不是吞掉这次提交。
+				continue
 			}
+			e.gitHeads[r.ID] = head
 		}
 	}
 	return nil

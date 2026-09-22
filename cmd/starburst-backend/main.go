@@ -90,7 +90,7 @@ func main() {
 
 	// Initialize admin password (first run only) and the auth manager.
 	am := auth.NewManager(st)
-	created, err := am.Initialize(ctx, cfg.DefaultAdminPassword)
+	created, err := am.Initialize(ctx, cfg.DefaultAdminPassword, cfg.DefaultAdminPasswordSet)
 	if err != nil {
 		log.Fatalf("initialize auth: %v", err)
 	}
@@ -157,6 +157,10 @@ func main() {
 	// pipeline: run-all (RunIntelAllTask) or single-module (RunIntelModuleTask),
 	// both executed by the shared test-run worker.
 	exec.WithIntelRunner(srv.RunIntelTask)
+	// RunDocGenerateTask executes kind=doc-generate tasks in the shared doc
+	// worker: async document generation for clients that want a task id instead
+	// of a synchronous 2min render.
+	exec.WithDocRunner(srv.RunDocGenerateTask)
 	exec.WithWorkers(cfg.Workers)
 	exec.WithRetention(cfg.TaskRetention)
 	exec.WithConcurrencyCap(cfg.MaxConcurrency)

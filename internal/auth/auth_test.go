@@ -23,7 +23,7 @@ func TestInitializeAndVerify(t *testing.T) {
 	ctx := context.Background()
 	m := newTestManager(t)
 
-	created, err := m.Initialize(ctx, "Str0ngPass")
+	created, err := m.Initialize(ctx, "Str0ngPass", true)
 	if err != nil {
 		t.Fatalf("initialize: %v", err)
 	}
@@ -41,7 +41,7 @@ func TestInitializeAndVerify(t *testing.T) {
 	}
 
 	// Second initialize is a no-op.
-	created, err = m.Initialize(ctx, "OtherPass2")
+	created, err = m.Initialize(ctx, "OtherPass2", true)
 	if err != nil {
 		t.Fatalf("re-init: %v", err)
 	}
@@ -62,11 +62,39 @@ func TestSetPasswordTooShort(t *testing.T) {
 	}
 }
 
+// 内置默认 "admin"（未显式传入）且强度不足时必须拒绝启动；显式传入弱口令仍
+// 放行（用户明确选择），只留告警。
+func TestInitializeRejectsWeakImplicitDefault(t *testing.T) {
+	ctx := context.Background()
+	m := newTestManager(t)
+	if _, err := m.Initialize(ctx, "admin", false); err == nil {
+		t.Fatal("built-in default weak password must be rejected")
+	}
+	// 先用强口令完成初始化。
+	if _, err := m.Initialize(ctx, "S3cureAdmin!", false); err != nil {
+		t.Fatalf("init with strong default: %v", err)
+	}
+	// 已初始化后重复 Initialize（哪怕弱口令）是 no-op，不再报错。
+	if created, err := m.Initialize(ctx, "admin", false); err != nil || created {
+		t.Fatalf("re-init after existing hash must be a no-op: created=%v err=%v", created, err)
+	}
+
+	m2 := newTestManager(t)
+	created, err := m2.Initialize(ctx, "admin", true)
+	if err != nil || !created {
+		t.Fatalf("explicit weak password rejected: created=%v err=%v", created, err)
+	}
+	ok, err := m2.VerifyPassword(ctx, "admin")
+	if err != nil || !ok {
+		t.Fatalf("explicit weak password not stored: ok=%v err=%v", ok, err)
+	}
+}
+
 func TestTokenRoundTrip(t *testing.T) {
 	ctx := context.Background()
 	m := newTestManager(t)
 
-	raw, err := m.CreateToken(ctx, "my-phone")
+	raw, err := m.CreateToken(ctx, "my-phone", "device")
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -148,7 +176,7 @@ func TestEnsureDefaultToken(t *testing.T) {
 
 func TestTokenPrefix(t *testing.T) {
 	m := newTestManager(t)
-	raw, err := m.CreateToken(context.Background(), "x")
+	raw, err := m.CreateToken(context.Background(), "x", "device")
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}

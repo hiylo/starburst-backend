@@ -24,12 +24,15 @@ var PullJUnitXML = pullJUnitXMLExec
 // files / empty listings degrade to an empty map (a suite that failed before
 // writing its reports simply yields nothing to parse). workDir/relPaths are
 // reviewed constants or pass the caller's shell-metacharacter guard, so the
-// interpolated shell strings stay injectable-free.
-func pullArtifactsExec(ctx context.Context, host, user string, port int, workDir string, relPaths []string) (map[string][]byte, error) {
+// interpolated shell strings stay injectable-free. authText authenticates the
+// dial exactly like the command-execution path (see SSHClient), so a node that
+// only accepts its configured credential accepts the report pull too. Output
+// per cat session is tail-bounded by SSHCommand (outputTailLimit).
+func pullArtifactsExec(ctx context.Context, host, user string, port int, authText, workDir string, relPaths []string) (map[string][]byte, error) {
 	if len(relPaths) == 0 {
 		return map[string][]byte{}, nil
 	}
-	c, err := DialSSH(ctx, host, port, user, "")
+	c, err := DialSSH(ctx, host, port, user, authText)
 	if err != nil {
 		return nil, err
 	}
@@ -49,9 +52,9 @@ func pullArtifactsExec(ctx context.Context, host, user string, port int, workDir
 // pullJUnitXMLExec lists junit XML files recursively under workDir with a
 // remote find and reads each back via cat. Recursive discovery mirrors the
 // local xctest path; pipeline failures and empty results both degrade to an
-// empty map.
-func pullJUnitXMLExec(ctx context.Context, host, user string, port int, workDir string) (map[string][]byte, error) {
-	c, err := DialSSH(ctx, host, port, user, "")
+// empty map. authText authenticates the dial like pullArtifactsExec.
+func pullJUnitXMLExec(ctx context.Context, host, user string, port int, authText, workDir string) (map[string][]byte, error) {
+	c, err := DialSSH(ctx, host, port, user, authText)
 	if err != nil {
 		return nil, err
 	}

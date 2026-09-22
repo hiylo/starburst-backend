@@ -32,6 +32,7 @@ type Executor struct {
 	httpClient   *http.Client
 	llm          *llm.Client                                              // optional orchestration LLM for summaries/self-healing
 	intelRunner  func(ctx context.Context, t *store.Task) (string, error) // runs built-in tracking tasks (kind != "")
+	docRunner    func(ctx context.Context, t *store.Task) (string, error) // runs kind=doc-generate tasks (document skeleton + render)
 	maxRetries   int                                                      // additional attempts after the first failure
 	workers      int                                                      // concurrent task executions
 	retention    time.Duration                                            // finished-task retention; 0 keeps them forever
@@ -41,6 +42,9 @@ type Executor struct {
 	dirGates     map[string]*sessionGate // per-directory gates for new-session tasks
 	busyMu       sync.Mutex              // guards busyCache
 	busyCache    map[string]busyEntry    // session busy-status short TTL
+	// llmWG 追踪在后台运行的 LLM 摘要/失败分析 goroutine，Run 退出前等待它们
+	// 结束，避免进程关闭时这些 goroutine 被孤儿化。
+	llmWG sync.WaitGroup
 }
 
 // busyTTL bounds how long a /session/status lookup is cached, so a busy task
@@ -133,6 +137,14 @@ func (e *Executor) WithIntelRunner(fn func(ctx context.Context, t *store.Task) (
 	return e
 }
 
+// WithDocRunner wires the callback that executes kind=doc-generate tasks
+// (document skeleton drafting + rendering, the async sibling of the synchronous
+// /api/documents/generate). When unset such tasks fail defensively.
+func (e *Executor) WithDocRunner(fn func(ctx context.Context, t *store.Task) (string, error)) *Executor {
+	e.docRunner = fn
+	return e
+}
+
 // Run is the worker pool: each worker claims one queued task and executes it,
 // repeating until ctx is canceled. It returns once every worker has drained.
 func (e *Executor) Run(ctx context.Context) {
@@ -170,7 +182,18 @@ func (e *Executor) Run(ctx context.Context) {
 		defer wg.Done()
 		e.testRunWorker(ctx)
 	}()
+	// Another dedicated worker for kind=doc-generate tasks: document rendering
+	// is LLM-bound but CPU-light relative to prompt runs, so it gets its own
+	// claim slot rather than competing with intel runs or prompt tasks.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		e.docWorker(ctx)
+	}()
 	wg.Wait()
+	// worker 全部结束后再等后台 LLM 摘要/失败分析 goroutine：它们由 worker 派生、
+	// 归 llmWG 追踪，等它们跑完（Run ctx 取消会随之取消其请求）再返回。
+	e.llmWG.Wait()
 }
 
 // worker is the claim-execute loop of a single prompt worker goroutine.
@@ -187,6 +210,15 @@ func (e *Executor) worker(ctx context.Context) {
 func (e *Executor) testRunWorker(ctx context.Context) {
 	e.workerLoop(ctx, func(ctx context.Context) (*store.Task, error) {
 		return e.store.ClaimNextTaskOfKind(ctx, "test-run")
+	})
+}
+
+// docWorker is the dedicated claim-execute loop for kind=doc-generate tasks
+// (async document generation). Separate from the prompt/intel pools so a long
+// render queue never starves either.
+func (e *Executor) docWorker(ctx context.Context) {
+	e.workerLoop(ctx, func(ctx context.Context) (*store.Task, error) {
+		return e.store.ClaimNextTaskOfKind(ctx, "doc-generate")
 	})
 }
 
@@ -450,23 +482,28 @@ func (e *Executor) execute(ctx context.Context, t *store.Task) {
 }
 
 // executeTracked drives a built-in tracking task (kind != "") through the
-// injected intel runner instead of the prompt-session path. The callback is
+// injected per-kind runner instead of the prompt-session path. The callback is
 // responsible for actually running the tracked workload and returning a
 // human-readable result; an error falls through the same retry branch as a
 // prompt failure so transient execution errors are re-queued up to maxRetries.
 // Without a wired callback the task is failed defensively.
 func (e *Executor) executeTracked(ctx context.Context, t *store.Task, pushTask func(status string, _ *store.Task), failWithRetry func(errMsg string)) {
-	if e.intelRunner == nil {
-		failWithRetry("no intel runner wired for kind " + t.Kind)
-		return
-	}
 	runCtx := ctx
 	var cancelRun context.CancelFunc
 	if t.TimeoutSec > 0 {
 		runCtx, cancelRun = context.WithTimeout(ctx, time.Duration(t.TimeoutSec)*time.Second)
 		defer cancelRun()
 	}
-	result, err := e.intelRunner(runCtx, t)
+	runner := e.intelRunner
+	switch t.Kind {
+	case "doc-generate":
+		runner = e.docRunner
+	}
+	if runner == nil {
+		failWithRetry("no runner wired for kind " + t.Kind)
+		return
+	}
+	result, err := runner(runCtx, t)
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) {
 			failWithRetry(fmt.Sprintf("任务超时（%d 秒）", t.TimeoutSec))
@@ -821,8 +858,12 @@ func (e *Executor) pushSummary(ctx context.Context, t *store.Task, result string
 	if e.llm == nil || !e.llm.Enabled() {
 		return
 	}
+	e.llmWG.Add(1)
 	go func() {
-		c, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer e.llmWG.Done()
+		// 从 Run 生命周期 ctx 派生 30s 预算：进程退出时随之取消，避免孤儿请求
+		// 在关闭后仍占用上游连接。
+		c, cancel := context.WithTimeout(ctx, 30*time.Second)
 		defer cancel()
 		summary, err := e.llm.Complete(c, summarySystem, "任务指令："+t.Prompt+"\n\n执行结果：\n"+truncateStr(result, 4000))
 		if err != nil {
@@ -844,8 +885,11 @@ func (e *Executor) pushFailureAnalysis(ctx context.Context, t *store.Task, errMs
 	if e.llm == nil || !e.llm.Enabled() {
 		return
 	}
+	e.llmWG.Add(1)
 	go func() {
-		c, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer e.llmWG.Done()
+		// 从 Run 生命周期 ctx 派生 30s 预算：进程退出时随之取消，避免孤儿请求。
+		c, cancel := context.WithTimeout(ctx, 30*time.Second)
 		defer cancel()
 		analysis, err := e.llm.Complete(c, analyzeFailureSystem, "任务指令："+t.Prompt+"\n\n失败信息："+truncateStr(errMsg, 4000))
 		if err != nil {

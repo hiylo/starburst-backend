@@ -76,11 +76,16 @@ func TestHubDropsBrokenClient(t *testing.T) {
 	}
 
 	// A dead peer fails the write, so Broadcast must drop it instead of
-	// keeping it in the fan-out set.
+	// keeping it in the fan-out set. 写失败→Unregister 是异步且依赖 TCP RST 往返：
+	// 回环上首次写入可能成功进内核缓冲，需多轮广播直到连接被判定死亡。
 	conn.Close()
-	hub.Broadcast(Message{Type: "after-close"})
-	if hub.Count() != 0 {
-		t.Fatalf("count = %d after dead peer, want 0", hub.Count())
+	deadline := time.Now().Add(2 * time.Second)
+	for hub.Count() != 0 {
+		if time.Now().After(deadline) {
+			t.Fatalf("count = %d after dead peer, want 0", hub.Count())
+		}
+		hub.Broadcast(Message{Type: "after-close"})
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 

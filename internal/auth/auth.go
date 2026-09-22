@@ -32,7 +32,10 @@ func NewManager(st store.Store) *Manager {
 
 // Initialize ensures the admin password is set. If no password exists yet,
 // it hashes the provided default and stores it. Returns whether it created one.
-func (m *Manager) Initialize(ctx context.Context, defaultPassword string) (bool, error) {
+// explicit reports whether the password came from an explicit flag/env value
+// rather than the built-in default "admin"; a weak default password is refused
+// so a fresh install cannot boot on an easily guessed admin credential.
+func (m *Manager) Initialize(ctx context.Context, defaultPassword string, explicit bool) (bool, error) {
 	_, err := m.store.GetSetting(ctx, SettingAdminPasswordHash)
 	if err == nil {
 		return false, nil // already initialized
@@ -42,6 +45,12 @@ func (m *Manager) Initialize(ctx context.Context, defaultPassword string) (bool,
 	}
 	if strings.TrimSpace(defaultPassword) == "" {
 		return false, fmt.Errorf("admin password must not be empty (set --default-admin-password or STARBURST_ADMIN_PASSWORD)")
+	}
+	// 未显式传入（flag/env 都没设置、用了内置默认 "admin"）且口令强度不足时拒绝
+	// 启动：内置弱口令会让任何能访问机器的方直接登进管理台。显式传入弱口令仍放行
+	//（用户明确选择），只留告警。
+	if !explicit && !isStrongPassword(defaultPassword) {
+		return false, fmt.Errorf("default admin password is too weak; set STARBURST_ADMIN_PASSWORD (or --default-admin-password) to a strong value")
 	}
 	if err := m.store.SetSetting(ctx, SettingAdminPasswordHash, mustHash(defaultPassword)); err != nil {
 		return false, err
@@ -79,6 +88,9 @@ func (m *Manager) EnsureDefaultToken(ctx context.Context, defaultToken string) (
 		ID:        "default",
 		Name:      "default",
 		TokenHash: HashToken(defaultToken),
+		// STARBURST_DEFAULT_TOKEN 是 App 设备 token：显式 device scope，
+		// 不能做敏感代理操作（shell/command/share/config 等由 adminAccess 拦截）。
+		Scope: "device",
 	}
 	if err := m.store.CreateToken(ctx, rec); err != nil {
 		return "", err
@@ -136,9 +148,15 @@ func (m *Manager) VerifyPassword(ctx context.Context, plain string) (bool, error
 	return true, nil
 }
 
-// CreateToken issues a new API token for a named device and stores only its hash.
-// The raw token is returned once and must be shown to the user; it is not recoverable.
-func (m *Manager) CreateToken(ctx context.Context, name string) (string, error) {
+// CreateToken issues a new API token with the given scope and stores only its
+// hash. The raw token is returned once and must be shown to the user; it is not
+// recoverable. 默认 device scope：能通过普通端点鉴权，但敏感操作（任意命令执行、
+// 内网 SSRF 探测等）由 server.adminAccess 挡在门外；scope 仅允许 admin 由
+// requireWeb 通道显式创建（见 handleTokens）。
+func (m *Manager) CreateToken(ctx context.Context, name string, scope string) (string, error) {
+	if !validScope(scope) {
+		scope = "device"
+	}
 	raw, err := randomToken()
 	if err != nil {
 		return "", err
@@ -151,11 +169,17 @@ func (m *Manager) CreateToken(ctx context.Context, name string) (string, error) 
 		ID:        id,
 		Name:      name,
 		TokenHash: HashToken(raw),
+		Scope:     scope,
 	}
 	if err := m.store.CreateToken(ctx, rec); err != nil {
 		return "", err
 	}
 	return raw, nil
+}
+
+// validScope reports whether scope is a supported token scope.
+func validScope(scope string) bool {
+	return scope == "admin" || scope == "device"
 }
 
 // VerifyToken returns the matching token record if raw is a valid, non-revoked token.

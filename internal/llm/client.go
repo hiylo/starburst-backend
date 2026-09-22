@@ -130,15 +130,23 @@ func isRetryable(statusCode int, err error) bool {
 }
 
 // backoffDelay computes the delay before retry attempt n (1-indexed).
-// Respects a Retry-After header when present (seconds or HTTP date).
+// Respects a Retry-After header when present (seconds or HTTP date); the value
+// is clamped to backoffMax so a hostile/misconfigured upstream cannot park the
+// caller for a day.
 func backoffDelay(attempt int, resp *http.Response) time.Duration {
 	if resp != nil {
 		if ra := resp.Header.Get("Retry-After"); ra != "" {
 			if secs, err := time.ParseDuration(ra + "s"); err == nil {
+				if secs > backoffMax {
+					secs = backoffMax
+				}
 				return secs
 			}
 			if t, err := http.ParseTime(ra); err == nil {
 				if d := time.Until(t); d > 0 {
+					if d > backoffMax {
+						d = backoffMax
+					}
 					return d
 				}
 			}
@@ -225,7 +233,9 @@ func (c *Client) CompleteJSONStream(ctx context.Context, system, user string, on
 
 // chatStream performs a streaming completion request with exponential backoff
 // retry on transient failures. It delegates to chatStreamOnce for the actual
-// HTTP call.
+// HTTP call. Once the stream has delivered any delta to onDelta, a subsequent
+// error is returned without retrying: a retry would replay the same tokens
+// that were already pushed to the caller.
 func (c *Client) chatStream(ctx context.Context, messages []ChatMessage, temperature float64, onDelta func(string) error) (string, error) {
 	var lastResp *http.Response
 	maxRetries := int(c.maxRetries.Load())
@@ -238,10 +248,14 @@ func (c *Client) chatStream(ctx context.Context, messages []ChatMessage, tempera
 			case <-time.After(delay):
 			}
 		}
-		result, resp, err := c.chatStreamOnce(ctx, messages, temperature, onDelta)
+		result, resp, streamed, err := c.chatStreamOnce(ctx, messages, temperature, onDelta)
 		lastResp = resp
 		if err == nil {
 			return result, nil
+		}
+		// 已产生任何 delta 后的流中断：不再重试，直接返回错误（重试会重复输出）。
+		if streamed {
+			return "", err
 		}
 		status := 0
 		if resp != nil {
@@ -254,8 +268,11 @@ func (c *Client) chatStream(ctx context.Context, messages []ChatMessage, tempera
 	return "", nil
 }
 
-// chatStreamOnce performs a single streaming completion request.
-func (c *Client) chatStreamOnce(ctx context.Context, messages []ChatMessage, temperature float64, onDelta func(string) error) (string, *http.Response, error) {
+// chatStreamOnce performs a single streaming completion request. The boolean
+// result reports whether at least one delta was delivered to onDelta before the
+// stream ended (successfully or with an error); the caller uses it to decide
+// whether a retry would duplicate already-emitted tokens.
+func (c *Client) chatStreamOnce(ctx context.Context, messages []ChatMessage, temperature float64, onDelta func(string) error) (string, *http.Response, bool, error) {
 	baseURL, apiKey, model := c.Snapshot()
 	payload := map[string]any{
 		"model":       model,
@@ -266,24 +283,24 @@ func (c *Client) chatStreamOnce(ctx context.Context, messages []ChatMessage, tem
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {
-		return "", nil, err
+		return "", nil, false, err
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+"/chat/completions", bytes.NewReader(body))
 	if err != nil {
-		return "", nil, err
+		return "", nil, false, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+apiKey)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return "", nil, fmt.Errorf("llm: request: %w", err)
+		return "", nil, false, fmt.Errorf("llm: request: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4*1024))
-		return "", resp, fmt.Errorf("llm: %s: %s", resp.Status, truncate(string(raw), 500))
+		return "", resp, false, fmt.Errorf("llm: %s: %s", resp.Status, truncate(string(raw), 500))
 	}
 
 	// Parse the OpenAI-compatible SSE stream. Each "data:" line carries a JSON
@@ -291,6 +308,7 @@ func (c *Client) chatStreamOnce(ctx context.Context, messages []ChatMessage, tem
 	scanner := bufio.NewScanner(resp.Body)
 	scanner.Buffer(make([]byte, 0, 64*1024), 2*1024*1024)
 	var full strings.Builder
+	streamed := false
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 		if !strings.HasPrefix(line, "data:") {
@@ -318,16 +336,17 @@ func (c *Client) chatStreamOnce(ctx context.Context, messages []ChatMessage, tem
 			continue
 		}
 		full.WriteString(delta)
+		streamed = true
 		if onDelta != nil {
 			if err := onDelta(delta); err != nil {
-				return "", nil, err
+				return "", nil, streamed, err
 			}
 		}
 	}
 	if err := scanner.Err(); err != nil {
-		return "", nil, fmt.Errorf("llm: read stream: %w", err)
+		return "", nil, streamed, fmt.Errorf("llm: read stream: %w", err)
 	}
-	return strings.TrimSpace(full.String()), nil, nil
+	return strings.TrimSpace(full.String()), nil, streamed, nil
 }
 
 // chat performs a completion request with exponential backoff retry on

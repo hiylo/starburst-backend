@@ -26,6 +26,11 @@ type Config struct {
 	PostgresDSN string
 	// DefaultAdminPassword is the initial web admin password if no stored one exists.
 	DefaultAdminPassword string
+	// DefaultAdminPasswordSet records whether the admin password was explicitly
+	// configured (--default-admin-password flag or STARBURST_ADMIN_PASSWORD env).
+	// When false the built-in default "admin" is in effect, and a weak value is
+	// rejected at startup by auth.Initialize.
+	DefaultAdminPasswordSet bool
 	// DefaultToken is an optional pre-provisioned API token registered on first run,
 	// so clients can connect without first creating a token via the web UI.
 	DefaultToken string
@@ -70,6 +75,11 @@ type Config struct {
 	// Embedding round trips can be slow (cold model / remote gateway), so the
 	// default is 8s rather than the original 800ms which dropped most splices.
 	RagTimeout time.Duration
+	// RagCollectionIDs optionally narrows the prompt_async RAG splice to a set
+	// of knowledge-base collections (comma-separated ids). Empty = search every
+	// collection. This lets an operator scope which team library auto-injects
+	// into conversations without touching per-collection client settings.
+	RagCollectionIDs []int64
 	// ShowVersion prints the version and exits when true.
 	ShowVersion bool
 	// HealthCheck runs connectivity checks and exits when true.
@@ -78,7 +88,7 @@ type Config struct {
 
 // Version is the semantic version reported by --version. CI 打 tag 时用
 // -ldflags "-X .../config.Version=<tag>" 注入，所以这里必须是 var（const 无法被链接器改写）。
-var Version = "2.0.1"
+var Version = "2.1.0"
 
 // Parse reads configuration from command-line flags and environment variables.
 // Environment variables take precedence over flag defaults where set.
@@ -107,11 +117,25 @@ func Parse(args []string) (*Config, error) {
 	sttMaxChunk := fs.Int("stt-max-chunk-bytes", envInt("STARBURST_STT_MAX_CHUNK_BYTES", 2*1024*1024), "max bytes accepted per audio chunk")
 	docsDir := fs.String("docs-dir", envOr("STARBURST_DOCS_DIR", "./data/docs"), "directory to persist generated documents (created on demand)")
 	ragTimeout := fs.Duration("rag-timeout", envDuration("STARBURST_RAG_TIMEOUT", 8*time.Second), "KB retrieval timeout inside the prompt_async RAG splice")
+	ragCollectionIDs := fs.String("rag-collection-ids", os.Getenv("STARBURST_RAG_COLLECTION_IDS"), "comma-separated KB collection ids to narrow the prompt_async RAG splice (empty = all)")
 	showVersion := fs.Bool("version", false, "print version and exit")
 	healthCheck := fs.Bool("health-check", false, "run connectivity checks and exit")
 
 	if err := fs.Parse(args); err != nil {
 		return nil, err
+	}
+
+	// 记录管理口令是否被显式传入：fs.Visit 只遍历被实际设置的 flag；env 设置
+	// 同样算显式。未显式传入时用的是内置默认 "admin"，auth.Initialize 据此拒绝
+	// 弱口令启动。
+	explicitAdminPassword := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "default-admin-password" {
+			explicitAdminPassword = true
+		}
+	})
+	if _, ok := os.LookupEnv("STARBURST_ADMIN_PASSWORD"); ok {
+		explicitAdminPassword = true
 	}
 
 	driver := strings.ToLower(*dbDriver)
@@ -123,31 +147,51 @@ func Parse(args []string) (*Config, error) {
 	}
 
 	return &Config{
-		ListenAddr:           *listenAddr,
-		OpenCodeURL:          strings.TrimRight(*opencodeURL, "/"),
-		DBDriver:             driver,
-		SQLitePath:           *sqlitePath,
-		PostgresDSN:          *postgresDSN,
-		DefaultAdminPassword: *defaultAdmin,
-		DefaultToken:         *defaultToken,
-		WebhookSecret:        *webhookSecret,
-		Workers:              clampInt(*workers, 1, 64),
-		MaxConcurrency:       clampInt(*maxConcurrency, 0, 64),
-		TaskRetention:        *taskRetention,
-		LLMURL:               strings.TrimRight(*llmURL, "/"),
-		LLMKey:               *llmKey,
-		LLMModel:             *llmModel,
-		EmbedURL:             strings.TrimRight(*embedURL, "/"),
-		EmbedKey:             *embedKey,
-		EmbedModel:           *embedModel,
-		STTURL:               strings.TrimRight(*sttURL, "/"),
-		STTTimeout:           sttTimeoutOrDefault(*sttTimeout, DefaultSTTTimeout),
-		STTMaxChunkBytes:     clampInt(*sttMaxChunk, 1024, 8*1024*1024),
-		DocsDir:              *docsDir,
-		RagTimeout:           *ragTimeout,
-		ShowVersion:          *showVersion,
-		HealthCheck:          *healthCheck,
+		ListenAddr:              *listenAddr,
+		OpenCodeURL:             strings.TrimRight(*opencodeURL, "/"),
+		DBDriver:                driver,
+		SQLitePath:              *sqlitePath,
+		PostgresDSN:             *postgresDSN,
+		DefaultAdminPassword:    *defaultAdmin,
+		DefaultAdminPasswordSet: explicitAdminPassword,
+		DefaultToken:            *defaultToken,
+		WebhookSecret:           *webhookSecret,
+		Workers:                 clampInt(*workers, 1, 64),
+		MaxConcurrency:          clampInt(*maxConcurrency, 0, 64),
+		TaskRetention:           *taskRetention,
+		LLMURL:                  strings.TrimRight(*llmURL, "/"),
+		LLMKey:                  *llmKey,
+		LLMModel:                *llmModel,
+		EmbedURL:                strings.TrimRight(*embedURL, "/"),
+		EmbedKey:                *embedKey,
+		EmbedModel:              *embedModel,
+		STTURL:                  strings.TrimRight(*sttURL, "/"),
+		STTTimeout:              sttTimeoutOrDefault(*sttTimeout, DefaultSTTTimeout),
+		STTMaxChunkBytes:        clampInt(*sttMaxChunk, 1024, 8*1024*1024),
+		DocsDir:                 *docsDir,
+		RagTimeout:              *ragTimeout,
+		RagCollectionIDs:        parseIDList(*ragCollectionIDs),
+		ShowVersion:             *showVersion,
+		HealthCheck:             *healthCheck,
 	}, nil
+}
+
+// parseIDList parses a comma-separated list of positive integers, dropping
+// empty entries and non-numeric segments (so a stray value never kills startup).
+func parseIDList(raw string) []int64 {
+	out := make([]int64, 0, 4)
+	for _, part := range strings.Split(raw, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		n, err := strconv.ParseInt(part, 10, 64)
+		if err != nil || n <= 0 {
+			continue
+		}
+		out = append(out, n)
+	}
+	return out
 }
 
 func envOr(key, fallback string) string {

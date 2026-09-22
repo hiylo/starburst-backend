@@ -57,8 +57,16 @@ func (hc *hubConn) writeOne(data []byte) error {
 }
 
 // writer drains the outbox until done or a write error, then self-unregisters.
+// A non-blocking done check runs before every receive: once done is closed the
+// writer exits without consuming yet another buffered message, so a stopped
+// connection never performs an extra write after Unregister.
 func (hc *hubConn) writer(h *Hub) {
 	for {
+		select {
+		case <-hc.done:
+			return
+		default:
+		}
 		select {
 		case <-hc.done:
 			return

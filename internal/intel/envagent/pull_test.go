@@ -44,6 +44,7 @@ func TestPullArtifactsUsesFindAndCat(t *testing.T) {
 	var gotDialHost string
 	var gotDialPort int
 	var gotDialUser string
+	var gotDialAuth string
 	cmds := stubDialRun(t, func(cmd string) ([]byte, error) {
 		if strings.HasPrefix(cmd, "cd ") {
 			return []byte("target/surefire-reports/TEST-ok.xml\n"), nil
@@ -51,16 +52,20 @@ func TestPullArtifactsUsesFindAndCat(t *testing.T) {
 		return []byte(`<testsuite><testcase name="a"/></testsuite>`), nil
 	})
 	DialSSH = func(ctx context.Context, host string, port int, user, auth string) (SSHConnection, error) {
-		gotDialHost, gotDialPort, gotDialUser = host, port, user
+		gotDialHost, gotDialPort, gotDialUser, gotDialAuth = host, port, user, auth
 		return fakeConn{}, nil
 	}
 
-	files, err := pullArtifactsExec(ctx, "192.0.2.10", "runner", 22, "/srv/repos/demo", []string{"target/surefire-reports"})
+	files, err := pullArtifactsExec(ctx, "192.0.2.10", "runner", 22, "node-secret", "/srv/repos/demo", []string{"target/surefire-reports"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if gotDialHost != "192.0.2.10" || gotDialPort != 22 || gotDialUser != "runner" {
 		t.Errorf("dial args = %q/%d/%q, want 192.0.2.10/22/runner", gotDialHost, gotDialPort, gotDialUser)
+	}
+	// 拉报告的拨号必须沿用节点凭据，不能回退本机默认 key / 空认证。
+	if gotDialAuth != "node-secret" {
+		t.Errorf("dial auth = %q, want node-secret", gotDialAuth)
 	}
 	if len(*cmds) == 0 {
 		t.Fatal("no remote commands issued")
@@ -93,7 +98,7 @@ func TestPullArtifactsEmptyRelPaths(t *testing.T) {
 		t.Fatal("DialSSH must not be invoked for an empty path list")
 		return nil, nil
 	}
-	files, err := pullArtifactsExec(ctx, "192.0.2.10", "runner", 22, "/srv", nil)
+	files, err := pullArtifactsExec(ctx, "192.0.2.10", "runner", 22, "", "/srv", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -114,7 +119,7 @@ func TestPullJUnitXMLUsesFindAndCat(t *testing.T) {
 		return []byte("<testsuites/>"), nil
 	})
 
-	files, err := pullJUnitXMLExec(ctx, "192.0.2.10", "runner", 22, "/srv/ios")
+	files, err := pullJUnitXMLExec(ctx, "192.0.2.10", "runner", 22, "", "/srv/ios")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -139,7 +144,7 @@ func TestPullArtifactsErrorPropagates(t *testing.T) {
 	stubDialRun(t, func(cmd string) ([]byte, error) {
 		return nil, errors.New("ssh: connect to host failed")
 	})
-	if _, err := pullArtifactsExec(ctx, "198.51.100.9", "u", 22, "/srv", []string{"junit.xml"}); err == nil {
+	if _, err := pullArtifactsExec(ctx, "198.51.100.9", "u", 22, "", "/srv", []string{"junit.xml"}); err == nil {
 		t.Error("expected ssh error to propagate")
 	}
 }

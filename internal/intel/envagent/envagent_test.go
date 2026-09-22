@@ -2,6 +2,7 @@ package envagent
 
 import (
 	"context"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -137,6 +138,36 @@ func TestToolchainInstallCommand(t *testing.T) {
 	}
 	if ToolchainInstallCommand("android-sdk", "") != nil {
 		t.Error("android-sdk should have no auto-install command")
+	}
+}
+
+// TestTailBufferDropsOldest verifies the bounded tail buffer keeps only the
+// last limit bytes (dropping the oldest), so chatty command output cannot
+// balloon memory.
+func TestTailBufferDropsOldest(t *testing.T) {
+	var tb tailBuffer
+	tb.limit = 10
+	if _, err := tb.Write([]byte("0123456789")); err != nil {
+		t.Fatal(err)
+	}
+	if got := tb.buf.String(); got != "0123456789" {
+		t.Errorf("under-limit write = %q", got)
+	}
+	if _, err := tb.Write([]byte("abcdef")); err != nil {
+		t.Fatal(err)
+	}
+	if got := tb.buf.String(); got != "6789abcdef" {
+		t.Errorf("over-limit write = %q, want last-10 tail", got)
+	}
+}
+
+// TestHostKeyCallbackFailClosed verifies known_hosts handling fails closed:
+// an unreadable/absent file rejects the connection with an error instead of
+// silently disabling host-key verification.
+func TestHostKeyCallbackFailClosed(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "no-such-known_hosts")
+	if _, err := hostKeyCallback(missing); err == nil {
+		t.Error("hostKeyCallback on a missing file must fail closed")
 	}
 }
 

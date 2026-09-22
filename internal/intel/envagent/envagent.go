@@ -13,7 +13,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"log"
 	"net"
 	"os"
 	"os/exec"
@@ -466,14 +465,15 @@ func RunSSHStream(ctx context.Context, onStdout func([]byte), args ...string) (s
 		return "", err
 	}
 	defer client.Close()
-	var full bytes.Buffer
+	var full tailBuffer
+	full.limit = outputTailLimit
 	_, err = SSHSessionOutput(ctx, client, command, func(p []byte) {
 		if onStdout != nil {
 			onStdout(p)
 		}
 		full.Write(p)
 	})
-	return full.String(), err
+	return full.buf.String(), err
 }
 
 // RunCommandOn executes a command on a remote node via the library ssh client,
@@ -536,6 +536,11 @@ type SSHClientOptions struct {
 	HostKeyPath string
 	// ConnectTimeout bounds the TCP dial + handshake (default 10s).
 	ConnectTimeout time.Duration
+	// InsecureHostKey disables host-key verification (ssh.InsecureIgnoreHostKey)
+	// when true. Default false keeps the fail-closed known_hosts check; only
+	// enable this when the caller explicitly accepts first-contact MITM risk —
+	// never pick it up implicitly from an unreadable known_hosts file.
+	InsecureHostKey bool
 }
 
 // SSHClient dials host:port with the library ssh client and authenticates with
@@ -564,7 +569,15 @@ func SSHClientWithOptions(ctx context.Context, host string, port int, user, auth
 		user = defaultSSHUser()
 	}
 	if opt.HostKeyCallback == nil {
-		opt.HostKeyCallback = hostKeyCallback(opt.HostKeyPath)
+		if opt.InsecureHostKey {
+			opt.HostKeyCallback = ssh.InsecureIgnoreHostKey()
+		} else {
+			cb, err := hostKeyCallback(opt.HostKeyPath)
+			if err != nil {
+				return nil, err
+			}
+			opt.HostKeyCallback = cb
+		}
 	}
 	addr := net.JoinHostPort(host, strconv.Itoa(port))
 	cfg := &ssh.ClientConfig{
@@ -603,13 +616,12 @@ func SSHClientWithOptions(ctx context.Context, host string, port int, user, auth
 }
 
 // hostKeyCallback returns a strict known_hosts host-key verifier for the given
-// file (default ~/.ssh/known_hosts). When the file cannot be read — typically
-// a node that has never been contacted — it falls back to accepting any key
-// with a warning. This is a documented TOFU risk put in place deliberately:
-// like the old StrictHostKeyChecking=accept-new the first contact is trusted,
-// but unlike it the key is not pinned for later connections. Once the node is
-// recorded in known_hosts, changed keys are rejected deterministically.
-func hostKeyCallback(knownHostsPath string) ssh.HostKeyCallback {
+// file (default ~/.ssh/known_hosts). fail-closed：known_hosts 不可读或不存在时
+// 返回 error 拒绝建立连接。后端常以服务账号运行、known_hosts 缺失，若此处回退
+// 为不校验 host key，任何能伪造节点的人都能 MITM，且 defaultKeyAuth 还会收走
+// 后端本机私钥。如需首连信任，请管理员把节点 host key 手工写入 known_hosts；
+// 只有调用方显式传入 InsecureHostKey 时才允许关闭校验。
+func hostKeyCallback(knownHostsPath string) (ssh.HostKeyCallback, error) {
 	if knownHostsPath == "" {
 		if home, err := os.UserHomeDir(); err == nil {
 			knownHostsPath = filepath.Join(home, ".ssh", "known_hosts")
@@ -617,10 +629,9 @@ func hostKeyCallback(knownHostsPath string) ssh.HostKeyCallback {
 	}
 	cb, err := knownhosts.New(knownHostsPath)
 	if err != nil {
-		log.Printf("envagent: known_hosts %q 不可读，回退为不校验 host key（TOFU 风险）：%v", knownHostsPath, err)
-		return ssh.InsecureIgnoreHostKey()
+		return nil, fmt.Errorf("known_hosts %q 不可读，拒绝建立连接（如需首连信任请手工把节点 host key 写入该文件）：%w", knownHostsPath, err)
 	}
-	return cb
+	return cb, nil
 }
 
 // sshAuthMethods turns a node's Auth text into ssh auth methods: a
@@ -697,27 +708,56 @@ type SSHConnection interface {
 	Close() error
 }
 
+// outputTailLimit 是远程/本地命令输出保留的尾部上限：有界缓冲丢弃最旧字节、
+// 保留最后 N 字节（与 server 侧 intelOutputLimit 同一常量），避免 go test
+// -json / playwright 数百 MB 输出把内存打满。
+const outputTailLimit = 256 << 10
+
+// tailBuffer 是有界保留尾部的 writer：写入超过 limit 时丢弃最旧字节，只保留
+// 最后 limit 字节。用于命令输出的内存上限控制。
+type tailBuffer struct {
+	buf   bytes.Buffer
+	limit int
+}
+
+func (t *tailBuffer) Write(p []byte) (int, error) {
+	t.buf.Write(p)
+	if n := t.buf.Len() - t.limit; n > 0 {
+		t.buf.Next(n)
+	}
+	return len(p), nil
+}
+
 // SSHCommand runs command on an existing ssh connection and returns its
-// combined stdout+stderr. ctx cancellation closes the session so a stalled
-// remote command cannot block the caller forever.
+// combined stdout+stderr (tail-bounded to outputTailLimit). ctx cancellation
+// sends SIGKILL and closes the session so a stalled remote command cannot block
+// the caller forever.
 func SSHCommand(ctx context.Context, c SSHConnection, command string) ([]byte, error) {
 	sess, err := c.NewSession()
 	if err != nil {
 		return nil, err
 	}
 	defer sess.Close()
-	var buf bytes.Buffer
+	var buf tailBuffer
+	buf.limit = outputTailLimit
 	sess.Stdout = &buf
 	sess.Stderr = &buf
 	errCh := make(chan error, 1)
 	go func() { errCh <- sess.Run(command) }()
 	select {
 	case err := <-errCh:
-		return buf.Bytes(), err
+		return buf.buf.Bytes(), err
 	case <-ctx.Done():
+		// 取消时先发 SIGKILL 再关会话：仅 Close 时 sess.Run 在远端进程持续运行
+		// 且网络黑洞下可能永不返回，导致 SSHCommand 永久挂起、连接与 intelSem
+		// 槽位泄漏。SIGKILL 后给 errCh 留 5s 兜底，不无限等待。
+		_ = sess.Signal(ssh.SIGKILL)
 		_ = sess.Close()
-		<-errCh
-		return buf.Bytes(), ctx.Err()
+		select {
+		case <-errCh:
+		case <-time.After(5 * time.Second):
+		}
+		return buf.buf.Bytes(), ctx.Err()
 	}
 }
 
@@ -732,15 +772,16 @@ func (w chunkWriter) Write(p []byte) (int, error) {
 
 // SSHSessionOutput runs command on an existing ssh connection streaming stdout
 // to onStdout as chunks arrive (edge-produced output for long test commands);
-// stderr is collected and returned together with the run error. Whether the
-// exit status signals an ssh.ExitError is the caller's concern.
+// stderr is collected (tail-bounded) and returned together with the run error.
+// Whether the exit status signals an ssh.ExitError is the caller's concern.
 func SSHSessionOutput(ctx context.Context, c SSHConnection, command string, onStdout func([]byte)) ([]byte, error) {
 	sess, err := c.NewSession()
 	if err != nil {
 		return nil, err
 	}
 	defer sess.Close()
-	var stderr bytes.Buffer
+	var stderr tailBuffer
+	stderr.limit = outputTailLimit
 	sess.Stderr = &stderr
 	if onStdout != nil {
 		sess.Stdout = chunkWriter{onChunk: onStdout}
@@ -749,11 +790,17 @@ func SSHSessionOutput(ctx context.Context, c SSHConnection, command string, onSt
 	go func() { errCh <- sess.Run(command) }()
 	select {
 	case err := <-errCh:
-		return stderr.Bytes(), err
+		return stderr.buf.Bytes(), err
 	case <-ctx.Done():
+		// 与 SSHCommand 相同：SIGKILL + Close 后给 errCh 留 5s 兜底，避免远端
+		// 进程持续运行且网络黑洞下永久挂起。
+		_ = sess.Signal(ssh.SIGKILL)
 		_ = sess.Close()
-		<-errCh
-		return stderr.Bytes(), ctx.Err()
+		select {
+		case <-errCh:
+		case <-time.After(5 * time.Second):
+		}
+		return stderr.buf.Bytes(), ctx.Err()
 	}
 }
 
