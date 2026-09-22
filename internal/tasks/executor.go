@@ -495,12 +495,14 @@ func (e *Executor) executeTracked(ctx context.Context, t *store.Task, pushTask f
 		defer cancelRun()
 	}
 	runner := e.intelRunner
+	runnerName := "intel runner"
 	switch t.Kind {
 	case "doc-generate":
 		runner = e.docRunner
+		runnerName = "doc runner"
 	}
 	if runner == nil {
-		failWithRetry("no runner wired for kind " + t.Kind)
+		failWithRetry("no runner wired for kind " + t.Kind + " (" + runnerName + " missing)")
 		return
 	}
 	result, err := runner(runCtx, t)
