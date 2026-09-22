@@ -25,13 +25,33 @@
   #fileInput { display:none; }
 </style>
 </head>
-<body>
-  <div class="kb-top">
-    <button class="ghost sm" id="btnHome" type="button">← 返回工作台</button>
-    <h1>文档生成</h1>
-    <span class="chip">LLM 出骨架 → 渲染 → 下载/预览/重新生成</span>
-    <span class="spacer"></span>
-  </div>
+<body><div class="app">
+  <aside class="sidebar">
+    <div class="logo">
+      <span class="mark" aria-hidden="true"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2l2.9 6.26 6.6.57-5 4.4 1.53 6.52L12 16.9 5.97 19.75 7.5 13.23l-5-4.4 6.6-.57z"/></svg></span>
+      <span class="txt">StarBurst</span>
+    </div>
+    <nav class="nav" id="nav">
+      <div class="nav-label">控制台</div>
+      <button data-href="/" title="AI 工作台"><span class="txt">AI 工作台</span></button>
+      <button data-href="/" title="任务"><span class="txt">任务</span></button>
+      <button data-href="/" title="编排"><span class="txt">编排</span></button>
+      <button data-href="/" title="实时流"><span class="txt">实时流</span></button>
+      <div class="nav-label">开发</div>
+      <button data-href="/" title="项目 / 会话"><span class="txt">项目 / 会话</span></button>
+      <button data-href="/" title="自动化规则"><span class="txt">自动化规则</span></button>
+      <button data-href="/" title="会话归档"><span class="txt">会话归档</span></button>
+      <div class="nav-label">系统</div>
+      <button data-href="/" title="智能测试（Test Intelligence）"><span class="txt">智能测试</span></button>
+      <button data-href="/" title="审计日志"><span class="txt">审计日志</span></button>
+      <button data-href="/" title="Token 管理"><span class="txt">Token 管理</span></button>
+      <button data-href="/" title="设置"><span class="txt">设置</span></button>
+      <div class="nav-label">文档</div>
+      <button data-href="/kb.html" title="知识库"><span class="txt">知识库</span></button>
+      <button class="active" data-href="/docgen.html" title="文档生成"><span class="txt">文档生成</span></button>
+    </nav>
+  </aside>
+  <div class="main">
 
   <div class="kb-wrap">
     <div id="authMsg" class="hint" style="display:none;padding:40px;text-align:center">
@@ -52,6 +72,9 @@
           <option value="">不同步知识库</option>
         </select>
         <input type="text" id="docPrompt" class="mono" style="flex:1;min-width:260px" placeholder="描述文档，如：做一份 6 页立项汇报 PPT，含方案对比表和一张趋势图">
+        <label class="hint" style="display:flex;align-items:center;gap:4px;cursor:pointer" title="入队后台渲染（task），可关页面；进度见任务页 / 完成后自动刷新">
+          <input type="checkbox" id="docAsync" style="margin:0"> 后台
+        </label>
         <button class="primary sm" id="btnGenerate" type="button">生成</button>
       </div>
       <p class="hint" style="margin:6px 0 0">选择集合后产物会自动入库，下次聊天可直接引用自己生成的文档。</p>
@@ -62,5 +85,8 @@
   </div>
 
   <script src="/assets/docgen.js"></script>
+
+  </div>
+</div>
 </body>
 </html>

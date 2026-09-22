@@ -199,3 +199,7 @@
   setAuthed(authed);
   if (authed) { populateDocTemplates(); populateDocKbCollections(); loadDocHistory(); }
 })();
+/* 侧边栏导航（data-href → 整页跳转） */
+document.querySelectorAll("#nav button[data-href]").forEach(function (b) {
+  b.addEventListener("click", function () { location.href = b.dataset.href || "/"; });
+});

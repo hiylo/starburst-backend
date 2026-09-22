@@ -266,3 +266,8 @@ async function loadRagStats() {
 }
 
 })();
+
+/* 侧边栏导航（data-href → 整页跳转；SPA 主站用 /，独立页互相指） */
+document.querySelectorAll("#nav button[data-href]").forEach(function (b) {
+  b.addEventListener("click", function () { location.href = b.dataset.href || "/"; });
+});

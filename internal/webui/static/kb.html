@@ -31,14 +31,33 @@
   .muted { color:var(--muted); }
 </style>
 </head>
-<body>
-  <div class="kb-top">
-    <button class="ghost sm" id="btnHome" type="button">← 返回工作台</button>
-    <h1>知识库管理</h1>
-    <span class="chip">团队文档 → 向量检索 → RAG-in-Prompt 自动带入会话</span>
-    <span class="spacer"></span>
-    <button class="primary sm" id="btnNewCollection" type="button">新建集合</button>
-  </div>
+<body><div class="app">
+  <aside class="sidebar">
+    <div class="logo">
+      <span class="mark" aria-hidden="true"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2l2.9 6.26 6.6.57-5 4.4 1.53 6.52L12 16.9 5.97 19.75 7.5 13.23l-5-4.4 6.6-.57z"/></svg></span>
+      <span class="txt">StarBurst</span>
+    </div>
+    <nav class="nav" id="nav">
+      <div class="nav-label">控制台</div>
+      <button data-href="/" title="AI 工作台"><span class="txt">AI 工作台</span></button>
+      <button data-href="/" title="任务"><span class="txt">任务</span></button>
+      <button data-href="/" title="编排"><span class="txt">编排</span></button>
+      <button data-href="/" title="实时流"><span class="txt">实时流</span></button>
+      <div class="nav-label">开发</div>
+      <button data-href="/" title="项目 / 会话"><span class="txt">项目 / 会话</span></button>
+      <button data-href="/" title="自动化规则"><span class="txt">自动化规则</span></button>
+      <button data-href="/" title="会话归档"><span class="txt">会话归档</span></button>
+      <div class="nav-label">系统</div>
+      <button data-href="/" title="智能测试（Test Intelligence）"><span class="txt">智能测试</span></button>
+      <button data-href="/" title="审计日志"><span class="txt">审计日志</span></button>
+      <button data-href="/" title="Token 管理"><span class="txt">Token 管理</span></button>
+      <button data-href="/" title="设置"><span class="txt">设置</span></button>
+      <div class="nav-label">文档</div>
+      <button class="active" data-href="/kb.html" title="知识库：上传/检索"><span class="txt">知识库</span></button>
+      <button data-href="/docgen.html" title="文档生成"><span class="txt">文档生成</span></button>
+    </nav>
+  </aside>
+  <div class="main">
 
   <div class="kb-wrap">
     <div id="authMsg" class="hint" style="display:none;padding:40px;text-align:center">
@@ -76,5 +95,8 @@
   </div>
 
   <script src="/assets/kb.js"></script>
+
+  </div>
+</div>
 </body>
 </html>
