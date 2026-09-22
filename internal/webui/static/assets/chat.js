@@ -320,6 +320,14 @@ function renderPart(p, ctx) {
     case "text": {
       const txt = String(p.text || "");
       if (!txt.trim()) return "";
+      // RAG-in-Prompt 注入的知识库上下文块：默认折叠成小纸条，避免每条消息被刷屏；
+      // 点开可看原始来源片段。
+      if (ctx.liveId !== p.id && txt.indexOf("[RAG_CONTEXT_START]") === 0 && txt.indexOf("[RAG_CONTEXT_END]") > 0) {
+        const n = (txt.match(/\[来源\d+\]/g) || []).length;
+        return `<div class="ct-card sys">${collapseHead(key,
+          `<span class="ct-label">📚 已带入知识库资料（${n} 条）</span>`, false)}
+          <div class="ct-body${open ? " open" : ""}"><pre class="ct-pre muted">${esc(clipText(txt, 6000).text)}</pre></div></div>`;
+      }
       if (p.synthetic || p.ignored) {
         return `<div class="ct-card sys">${collapseHead(key,
           `<span class="ct-label">系统注入上下文</span><span class="ct-sub">${txt.length} 字</span>`, false)}

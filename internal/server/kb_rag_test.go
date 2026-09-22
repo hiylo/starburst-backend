@@ -164,3 +164,38 @@ func TestRagTimeoutConfig(t *testing.T) {
 		t.Fatalf("zero-override ragTimeout = %v, want default 8s", got)
 	}
 }
+
+// TestRagQueryWorthy pins the retrieval-intent gate: casual/continuation chatter
+// must NOT trigger a KB splice, real questions/requests must.
+func TestRagQueryWorthy(t *testing.T) {
+	skip := []string{
+		"继续", "好的", "谢谢", "收到", "嗯", "ok",
+		"继续吧", "再来",
+		"可以了", "就这样",
+	}
+	for _, s := range skip {
+		if ragQueryWorthy(s) {
+			t.Errorf("casual %q should NOT trigger retrieval", s)
+		}
+	}
+	ask := []string{
+		"安全库存的规则是什么？",
+		"帮我找一下 agent 工具的说明",
+		"为什么 web 端能用知识库而 app 不行",
+		"计划模式支持哪些只读工具",
+		"请分析一下这 30 个字符以上的长问题（即便没有问号也应该触发，因为够长像真需求）",
+	}
+	for _, s := range ask {
+		if !ragQueryWorthy(s) {
+			t.Errorf("query %q should trigger retrieval", s)
+		}
+	}
+	// 边界：恰好 30 rune 的文本（无问号、无关键词）算 query（够长）。
+	if !ragQueryWorthy("一二三四五六七八九十一二三四五六七八九十一二三四五六七八九十") {
+		t.Error("30-rune text should be query-worthy")
+	}
+	// 问号单独触发。
+	if !ragQueryWorthy("规则是？") {
+		t.Error("question mark should trigger")
+	}
+}
