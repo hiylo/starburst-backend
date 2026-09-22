@@ -175,22 +175,23 @@ func lastUserText(parts []promptPartBody) string {
 }
 
 // ragQueryWorthy gates whether a user message should trigger KB retrieval.
-// Without this gate, short conversational turns (“继续”、“好的”、“谢谢”, or a bare
-// continuation prompt) would each pull a bulky context block into the bubble —
-// the "RAG 太乱" feedback. A message is query-worthy when it is long enough to be
-// a real prompt, contains a question mark, or carries explicit query keywords.
+// Without this gate, short conversational turns (“继续”、“什么意思？”, bare
+// follow-ups) would each pull a bulky context block into the bubble — the
+// "RAG 太乱" feedback. A message is query-worthy only when it carries a strong
+// retrieval keyword or is long enough to be a real prompt; a bare question mark
+// is not enough.
 func ragQueryWorthy(text string) bool {
 	runes := []rune(text)
 	if len(runes) >= 30 {
 		return true
 	}
-	if strings.ContainsRune(text, '?') || strings.ContainsRune(text, '？') {
-		return true
+	if len(runes) < 4 {
+		return false
 	}
 	for _, kw := range []string{
-		"怎么", "如何", "为什么", "是什么", "哪些", "能不能", "怎么用", "有何", "几个",
+		"怎么", "如何", "为什么", "是什么", "哪些", "能不能", "怎样", "咋",
 		"帮我", "找", "查", "分析", "总结", "比较", "推荐", "介绍", "解释", "区别",
-		"规则", "库存", "配置", "设置", "文档", "文件", "功能", "能力", "支持", "是否",
+		"规则", "库存", "排期", "会不会", "有没有", "是否支持", "作用",
 	} {
 		if strings.Contains(text, kw) {
 			return true

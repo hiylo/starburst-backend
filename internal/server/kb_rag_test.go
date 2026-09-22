@@ -172,6 +172,8 @@ func TestRagQueryWorthy(t *testing.T) {
 		"继续", "好的", "谢谢", "收到", "嗯", "ok",
 		"继续吧", "再来",
 		"可以了", "就这样",
+		"什么意思？增加了一个配置项对吗？", // 纯追问/元问题，不应触发检索
+		"你看看这个",
 	}
 	for _, s := range skip {
 		if ragQueryWorthy(s) {
