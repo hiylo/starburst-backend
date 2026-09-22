@@ -774,3 +774,105 @@ func TestExecutorKindTaskNoRunnerFails(t *testing.T) {
 		t.Fatalf("error = %q, want it to mention the intel runner", got.Error)
 	}
 }
+
+// TestExecutorDocRunnerExecutesKindTask verifies kind=doc-generate tasks are
+// dispatched to the injected doc runner (not the intel runner) by the dedicated
+// doc worker, and that the result is stored.
+func TestExecutorDocRunnerExecutesKindTask(t *testing.T) {
+	exec, st, _ := newTestEnv(t, func(w http.ResponseWriter, r *http.Request) {
+		http.NotFound(w, r) // doc tasks must not touch the OpenCode upstream
+	})
+	runs := 0
+	exec.WithDocRunner(func(ctx context.Context, tk *store.Task) (string, error) {
+		runs++
+		if tk.Kind != "doc-generate" {
+			t.Errorf("doc runner got kind %q, want doc-generate", tk.Kind)
+		}
+		if tk.Prompt != `{"type":"xlsx","prompt":"排期表"}` {
+			t.Errorf("doc runner prompt = %q", tk.Prompt)
+		}
+		return "文档已生成 #1（排期表）", nil
+	})
+	// 只注册 doc runner，不注册 intel runner：若 kind 分发错会走 intel 的
+	// 防御性失败，测试即失败。
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	if err := st.CreateTask(ctx, &store.Task{ID: "doc1", Kind: "doc-generate", Prompt: `{"type":"xlsx","prompt":"排期表"}`}); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		exec.Run(ctx)
+	}()
+
+	var got *store.Task
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		got, _ = st.GetTask(ctx, "doc1")
+		if got != nil && got.Status == store.TaskSucceeded {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	cancel()
+	<-done
+
+	if got == nil || got.Status != store.TaskSucceeded {
+		t.Fatalf("doc-generate task did not succeed: %+v", got)
+	}
+	if got.Result != "文档已生成 #1（排期表）" {
+		t.Fatalf("result = %q", got.Result)
+	}
+	if runs != 1 {
+		t.Fatalf("doc runner called %d times, want 1", runs)
+	}
+}
+
+// TestExecutorDocRunnerDispatchIsKindSpecific verifies test-run and doc-generate
+// go to their own runners and never cross-dispatch.
+func TestExecutorDocRunnerDispatchIsKindSpecific(t *testing.T) {
+	exec, st, _ := newTestEnv(t, http.NotFound)
+	intelRuns, docRuns := 0, 0
+	exec.WithIntelRunner(func(ctx context.Context, tk *store.Task) (string, error) {
+		intelRuns++
+		if tk.Kind != "test-run" {
+			t.Errorf("intel runner got kind %q", tk.Kind)
+		}
+		return "intel ok", nil
+	})
+	exec.WithDocRunner(func(ctx context.Context, tk *store.Task) (string, error) {
+		docRuns++
+		if tk.Kind != "doc-generate" {
+			t.Errorf("doc runner got kind %q", tk.Kind)
+		}
+		return "doc ok", nil
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	_ = st.CreateTask(ctx, &store.Task{ID: "d1", Kind: "doc-generate", Prompt: "{}"})
+	_ = st.CreateTask(ctx, &store.Task{ID: "i1", Kind: "test-run", Prompt: "{}"})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		exec.Run(ctx)
+	}()
+
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		a, _ := st.GetTask(ctx, "d1")
+		b, _ := st.GetTask(ctx, "i1")
+		if a != nil && a.Status == store.TaskSucceeded && b != nil && b.Status == store.TaskSucceeded {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	cancel()
+	<-done
+
+	if docRuns != 1 || intelRuns != 1 {
+		t.Fatalf("docRuns=%d intelRuns=%d, want 1/1", docRuns, intelRuns)
+	}
+}
