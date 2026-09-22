@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 )
 
@@ -52,7 +53,7 @@ func TestKnowledgeBaseCRUD(t *testing.T) {
 		t.Fatalf("persisted = %+v, %v", persisted, err)
 	}
 
-	docs, err := st.ListKBDocuments(ctx, col.ID, 10)
+	docs, err := st.ListKBDocuments(ctx, col.ID, 10, 0)
 	if err != nil || len(docs) != 1 {
 		t.Fatalf("list docs = %d, %v", len(docs), err)
 	}
@@ -129,5 +130,116 @@ func TestKnowledgeBaseCounters(t *testing.T) {
 	}
 	if got.DocumentCount != 1 || got.ChunkCount != 2 {
 		t.Fatalf("counters = docs:%d chunks:%d, want 1/2", got.DocumentCount, got.ChunkCount)
+	}
+}
+
+// TestKBDocumentsPagination covers offset paging: ListKBDocuments must skip
+// offset rows and CountKBDocuments report the real total.
+func TestKBDocumentsPagination(t *testing.T) {
+	ctx := context.Background()
+	st := newTestStore(t)
+	col, err := st.CreateKBCollection(ctx, "分页库", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 5; i++ {
+		d := &KBDocument{CollectionID: col.ID, Name: fmt.Sprintf("doc%d.md", i), Status: "pending"}
+		if err := st.CreateKBDocument(ctx, d); err != nil {
+			t.Fatal(err)
+		}
+	}
+	total, err := st.CountKBDocuments(ctx, col.ID)
+	if err != nil || total != 5 {
+		t.Fatalf("total = %d, %v (want 5)", total, err)
+	}
+	// 第 3 页临界：limit=2 offset=4 只应剩 1 条；offset 越界返回空。
+	if docs, err := st.ListKBDocuments(ctx, col.ID, 2, 0); err != nil || len(docs) != 2 {
+		t.Fatalf("page0 = %d, %v", len(docs), err)
+	}
+	if docs, err := st.ListKBDocuments(ctx, col.ID, 2, 4); err != nil || len(docs) != 1 {
+		t.Fatalf("page4 = %d, %v", len(docs), err)
+	}
+	if docs, err := st.ListKBDocuments(ctx, col.ID, 2, 99); err != nil || len(docs) != 0 {
+		t.Fatalf("overflow page = %d, %v", len(docs), err)
+	}
+}
+
+// TestFindKBDocumentByNameAndSuffixDelete covers the replace-building blocks:
+// by-name resolution and generation-marker cascade delete.
+func TestFindKBDocumentByNameAndSuffixDelete(t *testing.T) {
+	ctx := context.Background()
+	st := newTestStore(t)
+	col, err := st.CreateKBCollection(ctx, "替换库", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := &KBDocument{CollectionID: col.ID, Name: "排期.md", Status: "indexed"}
+	if err := st.CreateKBDocument(ctx, d); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.ReplaceKBDocumentChunks(ctx, d, []*KBChunk{
+		{Seq: 1, Title: "a", Content: "需求", Embedding: []float32{0.1}},
+		{Seq: 2, Title: "b", Content: "排期", Embedding: []float32{0.2}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	found, err := st.FindKBDocumentByName(ctx, col.ID, "排期.md")
+	if err != nil || found == nil || found.ID != d.ID {
+		t.Fatalf("find by name = %+v, %v", found, err)
+	}
+	if _, err := st.FindKBDocumentByName(ctx, col.ID, "不存在.md"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("missing doc should ErrNotFound, got %v", err)
+	}
+
+	// 集合内再放一版相同 docId 标记的生成产物，删除后缀后仅保留指定 doc。
+	g1 := &KBDocument{CollectionID: col.ID, Name: "汇报-@doc9", Status: "indexed"}
+	if err := st.CreateKBDocument(ctx, g1); err != nil {
+		t.Fatal(err)
+	}
+	g2 := &KBDocument{CollectionID: col.ID, Name: "迭代-@doc9", Status: "indexed"}
+	if err := st.CreateKBDocument(ctx, g2); err != nil {
+		t.Fatal(err)
+	}
+	removed, err := st.DeleteKBDocumentsByNameSuffix(ctx, col.ID, "-@doc9")
+	if err != nil || removed != 2 {
+		t.Fatalf("suffix delete removed = %d, %v (want 2)", removed, err)
+	}
+	if _, err := st.GetKBDocument(ctx, g1.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("g1 should be gone, got %v", err)
+	}
+	if got, err := st.GetKBDocument(ctx, d.ID); err != nil || got.Name != "排期.md" {
+		t.Fatalf("unrelated doc must stay: %+v, %v", got, err)
+	}
+}
+
+// TestUpdateKBCollection covers rename/re-describe: empty name keeps old one,
+// duplicate name → ErrConflict, absent id → ErrNotFound.
+func TestUpdateKBCollection(t *testing.T) {
+	ctx := context.Background()
+	st := newTestStore(t)
+	col, err := st.CreateKBCollection(ctx, "原名", "d")
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, _ := st.CreateKBCollection(ctx, "别的", "")
+
+	got, err := st.UpdateKBCollection(ctx, col.ID, "  新名  ", "新描述")
+	if err != nil || got.Name != "新名" || got.Description != "新描述" {
+		t.Fatalf("update = %+v, %v", got, err)
+	}
+	// 空 name → 保持原名。
+	got, err = st.UpdateKBCollection(ctx, col.ID, "  ", "仅改描述")
+	if err != nil || got.Name != "新名" || got.Description != "仅改描述" {
+		t.Fatalf("keep-name update = %+v, %v", got, err)
+	}
+	// 重名 → ErrConflict。
+	if _, err := st.UpdateKBCollection(ctx, col.ID, "别的", ""); !errors.Is(err, ErrConflict) {
+		t.Fatalf("dup name should ErrConflict, got %v", err)
+	}
+	_ = other
+	// 未知道 → ErrNotFound。
+	if _, err := st.UpdateKBCollection(ctx, 99999, "x", ""); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("unknown id should ErrNotFound, got %v", err)
 	}
 }

@@ -31,26 +31,26 @@ func (s *sqlStore) ReplaceIntelDevices(ctx context.Context, projectID int64, dev
 	return s.upsertIntelDevices(ctx, devs)
 }
 
-// UpsertIntelDevices upserts devices by serial, preserving binding state.
+// UpsertIntelDevices upserts devices by serial, preserving binding state. The
+// serial key is UNIQUE, so INSERT ... ON CONFLICT is race-free where the old
+// DELETE+INSERT could double-insert under concurrency.
 func (s *sqlStore) UpsertIntelDevices(ctx context.Context, devs []*IntelDevice) error {
-	for _, d := range devs {
-		if d.Serial == "" {
-			continue
-		}
-		if _, err := s.db.ExecContext(ctx, s.q(
-			`DELETE FROM env_devices WHERE serial = ?`), d.Serial); err != nil {
-			return err
-		}
-	}
 	return s.upsertIntelDevices(ctx, devs)
 }
 
 func (s *sqlStore) upsertIntelDevices(ctx context.Context, devs []*IntelDevice) error {
 	for _, d := range devs {
+		if d.Serial == "" {
+			continue
+		}
 		if _, err := s.db.ExecContext(ctx, s.q(`
 			INSERT INTO env_devices (project_id, name, method, adb_host, adb_port, serial,
 				avd, bound, status, last_seen_at, created_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`),
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+			ON CONFLICT (serial) DO UPDATE SET
+				project_id = excluded.project_id, name = excluded.name, method = excluded.method,
+				adb_host = excluded.adb_host, adb_port = excluded.adb_port, avd = excluded.avd,
+				bound = excluded.bound, status = excluded.status, last_seen_at = excluded.last_seen_at`),
 			d.ProjectID, d.Name, d.Method, d.ADBHost, d.ADBPort, d.Serial,
 			d.AVD, d.Bound, d.Status, d.LastSeenAt); err != nil {
 			return err

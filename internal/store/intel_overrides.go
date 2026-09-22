@@ -59,13 +59,34 @@ func (s *sqlStore) CreateIntelOverride(ctx context.Context, o *IntelOverride) er
 // UpsertIntelOverride replaces the existing override for the same
 // (project_id, target, row_key, field) natural key (status applied), so a
 // human edit is idempotent and no duplicates accumulate across re-analysis.
+// The natural key is UNIQUE (migration unique_upsert_keys), so the single
+// INSERT ... ON CONFLICT is race-free where the old DELETE+INSERT could insert
+// two rows under concurrency.
 func (s *sqlStore) UpsertIntelOverride(ctx context.Context, o *IntelOverride) error {
-	if _, err := s.db.ExecContext(ctx, s.q(`
-		DELETE FROM intel_overrides WHERE project_id = ? AND target = ? AND row_key = ? AND field = ?`),
-		o.ProjectID, o.Target, o.RowKey, o.Field); err != nil {
+	var id int64
+	err := s.db.QueryRowContext(ctx, s.q(`
+		INSERT INTO intel_overrides (project_id, module_id, target, row_key, field,
+			auto_value_json, manual_value, confidence, status, source, anchor,
+			created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+		ON CONFLICT (project_id, target, row_key, field) DO UPDATE SET
+			module_id = excluded.module_id,
+			auto_value_json = excluded.auto_value_json,
+			manual_value = excluded.manual_value,
+			confidence = excluded.confidence,
+			status = excluded.status,
+			source = excluded.source,
+			anchor = excluded.anchor,
+			updated_at = CURRENT_TIMESTAMP
+		RETURNING id`),
+		o.ProjectID, o.ModuleID, o.Target, o.RowKey, o.Field, o.AutoValueJSON,
+		o.ManualValue, o.Confidence, o.Status, o.Source, o.Anchor,
+	).Scan(&id)
+	if err != nil {
 		return err
 	}
-	return s.CreateIntelOverride(ctx, o)
+	o.ID = id
+	return nil
 }
 
 // ListIntelOverrides returns overrides for a project, optionally only pending.

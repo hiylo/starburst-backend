@@ -98,6 +98,29 @@ func (s *sqlStore) GetKBCollection(ctx context.Context, id int64) (*KBCollection
 	return c, nil
 }
 
+// UpdateKBCollection renames a collection and/or replaces its description.
+// Empty name keeps the old one; a name collision with another collection
+// returns ErrConflict. Returns the refreshed collection.
+func (s *sqlStore) UpdateKBCollection(ctx context.Context, id int64, name, description string) (*KBCollection, error) {
+	cur, err := s.GetKBCollection(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	name = strings.TrimSpace(name)
+	if name == "" {
+		name = cur.Name
+	}
+	if _, err := s.db.ExecContext(ctx, s.q(
+		`UPDATE kb_collections SET name = ?, description = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`),
+		name, strings.TrimSpace(description), id); err != nil {
+		if isUniqueViolation(err) {
+			return nil, ErrConflict
+		}
+		return nil, err
+	}
+	return s.GetKBCollection(ctx, id)
+}
+
 // ListKBCollections returns all collections, newest first.
 func (s *sqlStore) ListKBCollections(ctx context.Context) ([]*KBCollection, error) {
 	rows, err := s.db.QueryContext(ctx, s.q(`
@@ -165,18 +188,21 @@ func (s *sqlStore) GetKBDocument(ctx context.Context, id int64) (*KBDocument, er
 	return d, nil
 }
 
-// ListKBDocuments returns a collection's documents, newest first, newest 50 by
-// default (max 200).
-func (s *sqlStore) ListKBDocuments(ctx context.Context, collectionID int64, limit int) ([]*KBDocument, error) {
+// ListKBDocuments returns a collection's documents, newest first, skipping
+// `offset` rows and taking at most `limit` rows (default 50, max 200).
+func (s *sqlStore) ListKBDocuments(ctx context.Context, collectionID int64, limit, offset int) ([]*KBDocument, error) {
 	if limit <= 0 {
 		limit = 50
 	}
 	if limit > 200 {
 		limit = 200
 	}
+	if offset < 0 {
+		offset = 0
+	}
 	rows, err := s.db.QueryContext(ctx, s.q(`
 		SELECT id, collection_id, name, mime, size_bytes, status, chunk_count, error, created_at, updated_at
-		FROM kb_documents WHERE collection_id = ? ORDER BY id DESC LIMIT ?`), collectionID, limit)
+		FROM kb_documents WHERE collection_id = ? ORDER BY id DESC LIMIT ? OFFSET ?`), collectionID, limit, offset)
 	if err != nil {
 		return nil, err
 	}
@@ -191,6 +217,33 @@ func (s *sqlStore) ListKBDocuments(ctx context.Context, collectionID int64, limi
 		out = append(out, d)
 	}
 	return out, rows.Err()
+}
+
+// CountKBDocuments returns how many documents a collection holds, used to
+// render pagination alongside ListKBDocuments.
+func (s *sqlStore) CountKBDocuments(ctx context.Context, collectionID int64) (int64, error) {
+	var n int64
+	err := s.db.QueryRowContext(ctx, s.q(
+		`SELECT COUNT(*) FROM kb_documents WHERE collection_id = ?`), collectionID).Scan(&n)
+	return n, err
+}
+
+// FindKBDocumentByName resolves a document by (collection, name), returning
+// ErrNotFound when absent. The name match ignores surrounding whitespace.
+func (s *sqlStore) FindKBDocumentByName(ctx context.Context, collectionID int64, name string) (*KBDocument, error) {
+	d := &KBDocument{}
+	err := s.db.QueryRowContext(ctx, s.q(`
+		SELECT id, collection_id, name, mime, size_bytes, status, chunk_count, error, created_at, updated_at
+		FROM kb_documents WHERE collection_id = ? AND name = ? LIMIT 1`), collectionID, strings.TrimSpace(name)).
+		Scan(&d.ID, &d.CollectionID, &d.Name, &d.MIME, &d.SizeBytes, &d.Status,
+			&d.ChunkCount, &d.Error, &d.CreatedAt, &d.UpdatedAt)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+	return d, nil
 }
 
 // UpdateKBDocumentResult persists the terminal (or in-progress) state of an
@@ -335,6 +388,50 @@ func (s *sqlStore) SearchKBChunks(ctx context.Context, collectionIDs []int64, em
 		out = append(out, c)
 	}
 	return out, rows.Err()
+}
+
+// DeleteKBDocumentsByNameSuffix removes every document in a collection whose
+// name ends with suffix, cascading their chunks. It backs the generated-document
+// reverse-ingest: a regenerated doc keeps its `-@doc<id>` marker, so re-ingesting
+// replaces the previous KB copy instead of accumulating duplicates. Returns the
+// number of documents removed.
+func (s *sqlStore) DeleteKBDocumentsByNameSuffix(ctx context.Context, collectionID int64, suffix string) (int, error) {
+	if collectionID <= 0 || suffix == "" {
+		return 0, nil
+	}
+	rows, err := s.db.QueryContext(ctx, s.q(
+		`SELECT id FROM kb_documents WHERE collection_id = ? AND name LIKE ? ESCAPE '\'`),
+		collectionID, "%"+escapeLike(suffix))
+	if err != nil {
+		return 0, err
+	}
+	ids := []int64{}
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return 0, err
+	}
+	rows.Close()
+	for _, id := range ids {
+		if err := s.DeleteKBDocument(ctx, id); err != nil {
+			return 0, err
+		}
+	}
+	return len(ids), nil
+}
+
+// escapeLike escapes LIKE wildcards so a literal suffix never matches more than
+// intended (paired with ESCAPE '\').
+func escapeLike(s string) string {
+	r := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
+	return r.Replace(s)
 }
 
 // CountKBChunks returns how many chunks exist for a collection (detail view /

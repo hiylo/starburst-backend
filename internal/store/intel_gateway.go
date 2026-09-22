@@ -21,6 +21,10 @@ type IntelGatewayRoute struct {
 // ReplaceIntelGatewayRoutes deletes the project's gateway routes and re-inserts
 // the given set, so a rescan reflects the current configuration.
 func (s *sqlStore) ReplaceIntelGatewayRoutes(ctx context.Context, projectID int64, routes []*IntelGatewayRoute) error {
+	// 空列表保护：同 ReplaceIntelEntities——无结果保留旧快照，避免误清空。
+	if len(routes) == 0 {
+		return nil
+	}
 	if _, err := s.db.ExecContext(ctx, s.q(`DELETE FROM intel_gateway_routes WHERE project_id = ?`), projectID); err != nil {
 		return err
 	}

@@ -50,6 +50,10 @@ func VectorString(v []float32) string {
 // ReplaceProjectChunks rebuilds a project's knowledge base: it deletes the
 // existing chunks and inserts the given set (with embeddings) in one pass.
 func (s *sqlStore) ReplaceProjectChunks(ctx context.Context, projectID int64, chunks []*RagChunk) error {
+	// 空列表保护：同 ReplaceIntelEntities——无结果保留旧快照，避免误清空。
+	if len(chunks) == 0 {
+		return nil
+	}
 	if _, err := s.db.ExecContext(ctx, s.q(`DELETE FROM intel_chunks WHERE project_id = ?`), projectID); err != nil {
 		return err
 	}

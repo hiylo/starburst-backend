@@ -4,8 +4,13 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"strings"
 	"time"
 )
+
+// testRunColumns is the canonical SELECT column list for test_runs, kept in a
+// single place so scanIntelTestRun and every query stay in lockstep.
+const testRunColumns = "id, project_id, module_id, scope, kind, command, status, attempts, started_at, finished_at, log_path, progress, output, priority, created_at"
 
 // TestCase is a discovered test asset (unit/integration/e2e/…), classified by
 // the scanner into kind/framework/class/method and kept for execution and
@@ -105,31 +110,53 @@ type IntelFeature struct {
 }
 
 // ReplaceIntelTestCases deletes a module's test cases and re-inserts the given
-// set, so a scan reflects the current repository layout.
+// set, so a scan reflects the current repository layout. The wipe+reload runs
+// in one transaction with a batched multi-value INSERT.
 func (s *sqlStore) ReplaceIntelTestCases(ctx context.Context, projectID int64, cases []*TestCase) error {
 	// 空列表保护：同 ReplaceIntelEntities——无结果保留旧快照，避免误清空。
 	if len(cases) == 0 {
 		return nil
 	}
-	if _, err := s.db.ExecContext(ctx, s.q(`DELETE FROM test_cases WHERE project_id = ?`), projectID); err != nil {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
 		return err
 	}
-	for _, c := range cases {
-		if _, err := s.db.ExecContext(ctx, s.q(`
-			INSERT INTO test_cases (project_id, module_id, module, kind, framework, class, method,
-				path, tags, last_status, last_duration_ms, flaky_count, last_run_at, created_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`),
-			projectID, c.ModuleID, c.Module, c.Kind, c.Framework, c.Class, c.Method,
-			c.Path, c.Tags, c.LastStatus, c.LastDurationMs, c.FlakyCount, c.LastRunAt); err != nil {
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx, s.q(`DELETE FROM test_cases WHERE project_id = ?`), projectID); err != nil {
+		return err
+	}
+	const batch = 2500
+	for start := 0; start < len(cases); start += batch {
+		end := start + batch
+		if end > len(cases) {
+			end = len(cases)
+		}
+		var sb strings.Builder
+		sb.WriteString(`INSERT INTO test_cases (project_id, module_id, module, kind, framework, class, method,
+			path, tags, last_status, last_duration_ms, flaky_count, last_run_at, created_at) VALUES `)
+		args := make([]any, 0, (end-start)*13)
+		for i, c := range cases[start:end] {
+			if i > 0 {
+				sb.WriteString(",")
+			}
+			sb.WriteString("(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)")
+			args = append(args, projectID, c.ModuleID, c.Module, c.Kind, c.Framework, c.Class, c.Method,
+				c.Path, c.Tags, c.LastStatus, c.LastDurationMs, c.FlakyCount, c.LastRunAt)
+		}
+		if _, err := tx.ExecContext(ctx, s.q(sb.String()), args...); err != nil {
 			return err
 		}
 	}
-	return nil
+	return tx.Commit()
 }
 
 // DeleteIntelModuleTestCases removes one module's test cases.
 func (s *sqlStore) DeleteIntelModuleTestCases(ctx context.Context, projectID, moduleID int64) error {
-	_, err := s.db.ExecContext(ctx, s.q(`
+	return s.deleteIntelModuleTestCases(ctx, s.db, projectID, moduleID)
+}
+
+func (s *sqlStore) deleteIntelModuleTestCases(ctx context.Context, e execer, projectID, moduleID int64) error {
+	_, err := e.ExecContext(ctx, s.q(`
 		DELETE FROM test_cases WHERE project_id = ? AND module_id = ?`), projectID, moduleID)
 	return err
 }
@@ -247,6 +274,8 @@ func (s *sqlStore) UnquarantineIntelTestCase(ctx context.Context, projectID, mod
 }
 
 // CreateIntelTestRun persists a new run and populates its auto-generated id.
+// started_at/finished_at are stored as UTC text on SQLite so the retention
+// comparisons stay aligned with the plain-UTC format.
 func (s *sqlStore) CreateIntelTestRun(ctx context.Context, run *TestRun) error {
 	if isPostgres(s.driver) {
 		return s.db.QueryRowContext(ctx, s.q(`
@@ -263,7 +292,8 @@ func (s *sqlStore) CreateIntelTestRun(ctx context.Context, run *TestRun) error {
 			attempts, started_at, finished_at, log_path, progress, output, priority, created_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`),
 		run.ProjectID, run.ModuleID, run.Scope, run.Kind, run.Command, run.Status,
-		run.Attempts, run.StartedAt, run.FinishedAt, run.LogPath, run.Progress, run.Output, run.Priority,
+		run.Attempts, sqliteTimePtr(run.StartedAt), sqliteTimePtr(run.FinishedAt),
+		run.LogPath, run.Progress, run.Output, run.Priority,
 	)
 	if err != nil {
 		return err
@@ -279,8 +309,7 @@ func (s *sqlStore) CreateIntelTestRun(ctx context.Context, run *TestRun) error {
 // GetIntelTestRun loads a single test run.
 func (s *sqlStore) GetIntelTestRun(ctx context.Context, id int64) (*TestRun, error) {
 	row := s.db.QueryRowContext(ctx, s.q(`
-		SELECT id, project_id, module_id, scope, kind, command, status, attempts,
-			started_at, finished_at, log_path, progress, output, priority, created_at FROM test_runs WHERE id = ?`), id)
+		SELECT `+testRunColumns+` FROM test_runs WHERE id = ?`), id)
 	run, err := scanIntelTestRun(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
@@ -289,12 +318,13 @@ func (s *sqlStore) GetIntelTestRun(ctx context.Context, id int64) (*TestRun, err
 }
 
 // ListIntelTestRuns returns test runs for a project, newest first. The output
-// column is omitted (empty) to keep list payloads small; fetch a single run for
-// the full log.
+// column is substituted with an empty literal to keep list payloads small;
+// fetch a single run for the full log. The explicit column list keeps the
+// SELECT order in lockstep with scanIntelTestRun.
 func (s *sqlStore) ListIntelTestRuns(ctx context.Context, projectID int64) ([]*TestRun, error) {
 	rows, err := s.db.QueryContext(ctx, s.q(`
 		SELECT id, project_id, module_id, scope, kind, command, status, attempts,
-			started_at, finished_at, log_path, progress, '', priority, created_at
+			started_at, finished_at, log_path, progress, '' AS output, priority, created_at
 		FROM test_runs WHERE project_id = ? ORDER BY created_at DESC`), projectID)
 	if err != nil {
 		return nil, err
@@ -312,12 +342,18 @@ func (s *sqlStore) ListIntelTestRuns(ctx context.Context, projectID int64) ([]*T
 }
 
 // UpdateIntelTestRun persists mutable run fields. An empty progress/output keeps
-// the existing stored values; pass values to overwrite them.
+// the existing stored values; pass values to overwrite them. Timestamps are
+// stored as UTC text on SQLite for consistent retention comparisons.
 func (s *sqlStore) UpdateIntelTestRun(ctx context.Context, run *TestRun) error {
+	var started, finished any = run.StartedAt, run.FinishedAt
+	if !isPostgres(s.driver) {
+		started = sqliteTimePtr(run.StartedAt)
+		finished = sqliteTimePtr(run.FinishedAt)
+	}
 	_, err := s.db.ExecContext(ctx, s.q(`
 		UPDATE test_runs SET status = ?, started_at = ?, finished_at = ?, log_path = ?,
 			command = COALESCE(?, command), progress = COALESCE(?, progress), output = COALESCE(?, output) WHERE id = ?`),
-		run.Status, run.StartedAt, run.FinishedAt, run.LogPath, run.Command, run.Progress, run.Output, run.ID)
+		run.Status, started, finished, run.LogPath, run.Command, run.Progress, run.Output, run.ID)
 	return err
 }
 
@@ -328,11 +364,16 @@ func (s *sqlStore) UpdateIntelTestRun(ctx context.Context, run *TestRun) error {
 // starting run loop; the fixed 20-second window is long enough that no live run
 // is ever older than it at startup.
 func (s *sqlStore) FailStaleIntelRuns(ctx context.Context, olderThan time.Time) (int64, error) {
+	var cutoff any = olderThan
+	if !isPostgres(s.driver) {
+		// stored created_at 是 CURRENT_TIMESTAMP 的 UTC 文本，比较参数须用同格式。
+		cutoff = sqliteTime(olderThan)
+	}
 	res, err := s.db.ExecContext(ctx, s.q(`
 		UPDATE test_runs SET status = 'failed',
 			finished_at = COALESCE(finished_at, CURRENT_TIMESTAMP),
 			progress = '进程重启，运行被中断（启动恢复标记为失败）'
-		WHERE status IN ('running', 'queued') AND created_at < ?`), olderThan)
+		WHERE status IN ('running', 'queued') AND created_at < ?`), cutoff)
 	if err != nil {
 		return 0, err
 	}
@@ -350,6 +391,12 @@ func (s *sqlStore) PurgeOldIntelTestRuns(ctx context.Context, olderThan time.Tim
 	if limit <= 0 {
 		limit = 500
 	}
+	var cutoff any = olderThan
+	if !isPostgres(s.driver) {
+		// finished_at 列值为 UTC 文本（CURRENT_TIMESTAMP 或本文件写入侧格式化），
+		// 比较参数须用同格式，否则时区偏移会让旧行永远清不掉。
+		cutoff = sqliteTime(olderThan)
+	}
 	// The candidate set is the same bounded subquery for both deletes, and both
 	// run in one transaction so the per-case results of a purged run never linger
 	// as orphans. The limit lives in the inner select: SQLite refuses DELETE ...
@@ -363,14 +410,14 @@ func (s *sqlStore) PurgeOldIntelTestRuns(ctx context.Context, olderThan time.Tim
 		DELETE FROM test_results WHERE run_id IN (
 			SELECT id FROM test_runs WHERE finished_at < ?
 			ORDER BY id LIMIT `+itoa(limit)+`
-		)`), olderThan); err != nil {
+		)`), cutoff); err != nil {
 		return 0, err
 	}
 	res, err := tx.ExecContext(ctx, s.q(`
 		DELETE FROM test_runs WHERE id IN (
 			SELECT id FROM test_runs WHERE finished_at < ?
 			ORDER BY id LIMIT `+itoa(limit)+`
-		)`), olderThan)
+		)`), cutoff)
 	if err != nil {
 		return 0, err
 	}

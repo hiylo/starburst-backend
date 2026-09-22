@@ -510,6 +510,8 @@ type Store interface {
 	CreateKBCollection(ctx context.Context, name, description string) (*KBCollection, error)
 	// GetKBCollection loads a collection by id; returns ErrNotFound when missing.
 	GetKBCollection(ctx context.Context, id int64) (*KBCollection, error)
+	// UpdateKBCollection renames/re-describes a collection; ErrConflict on name collision.
+	UpdateKBCollection(ctx context.Context, id int64, name, description string) (*KBCollection, error)
 	// ListKBCollections returns all collections, newest first.
 	ListKBCollections(ctx context.Context) ([]*KBCollection, error)
 	// DeleteKBCollection removes a collection and all its documents/chunks.
@@ -519,7 +521,11 @@ type Store interface {
 	// GetKBDocument loads a document by id; returns ErrNotFound when missing.
 	GetKBDocument(ctx context.Context, id int64) (*KBDocument, error)
 	// ListKBDocuments returns a collection's documents, newest first.
-	ListKBDocuments(ctx context.Context, collectionID int64, limit int) ([]*KBDocument, error)
+	ListKBDocuments(ctx context.Context, collectionID int64, limit, offset int) ([]*KBDocument, error)
+	// CountKBDocuments returns the number of documents in a collection.
+	CountKBDocuments(ctx context.Context, collectionID int64) (int64, error)
+	// FindKBDocumentByName resolves a document by (collection, name); ErrNotFound when absent.
+	FindKBDocumentByName(ctx context.Context, collectionID int64, name string) (*KBDocument, error)
 	// UpdateKBDocumentResult persists an ingestion's terminal state.
 	UpdateKBDocumentResult(ctx context.Context, id int64, status string, chunkCount int64, errMsg string) error
 	// DeleteKBDocument removes a document and all its chunks.
@@ -530,6 +536,9 @@ type Store interface {
 	// given collections (empty = all). PostgreSQL/pgvector only: returns
 	// ErrRagUnsupported on SQLite.
 	SearchKBChunks(ctx context.Context, collectionIDs []int64, embedding []float32, limit int) ([]*KBChunk, error)
+	// DeleteKBDocumentsByNameSuffix removes every document in a collection whose
+	// name ends with suffix (cascading chunks), returning the removed count.
+	DeleteKBDocumentsByNameSuffix(ctx context.Context, collectionID int64, suffix string) (int, error)
 	// CountKBChunks returns the number of chunks in a collection.
 	CountKBChunks(ctx context.Context, collectionID int64) (int64, error)
 

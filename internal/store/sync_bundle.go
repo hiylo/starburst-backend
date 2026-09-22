@@ -34,24 +34,20 @@ func (s *sqlStore) GetSyncBundle(ctx context.Context, key string) (*SyncBundle, 
 
 // PutSyncBundle upserts a bundle under key (last-write-wins) and returns the new
 // revision. A fresh key starts at revision 1; every subsequent write increments
-// it so callers get a strictly increasing version number.
+// it so callers get a strictly increasing version number. The revision is
+// returned by the same statement via RETURNING (supported by SQLite >=3.35 and
+// PostgreSQL), so a concurrent writer's revision is never read back by mistake.
 func (s *sqlStore) PutSyncBundle(ctx context.Context, key, payload string) (int64, error) {
-	_, err := s.db.ExecContext(ctx, s.q(`
+	var rev int64
+	err := s.db.QueryRowContext(ctx, s.q(`
 		INSERT INTO sync_bundle (key, payload, revision, updated_at)
 		VALUES (?, ?, 1, CURRENT_TIMESTAMP)
 		ON CONFLICT(key) DO UPDATE SET
 			payload = excluded.payload,
 			revision = sync_bundle.revision + 1,
-			updated_at = CURRENT_TIMESTAMP`),
+			updated_at = CURRENT_TIMESTAMP
+		RETURNING revision`),
 		key, payload,
-	)
-	if err != nil {
-		return 0, err
-	}
-	var rev int64
-	if err := s.db.QueryRowContext(ctx, s.q(
-		`SELECT revision FROM sync_bundle WHERE key = ?`), key).Scan(&rev); err != nil {
-		return 0, err
-	}
-	return rev, nil
+	).Scan(&rev)
+	return rev, err
 }

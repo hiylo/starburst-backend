@@ -23,6 +23,10 @@ type IntelWebBinding struct {
 // ReplaceIntelWebBindings deletes the project's web bindings and re-inserts the
 // given set, so a rescan reflects the current templates.
 func (s *sqlStore) ReplaceIntelWebBindings(ctx context.Context, projectID int64, bindings []*IntelWebBinding) error {
+	// 空列表保护：同 ReplaceIntelEntities——无结果保留旧快照，避免误清空。
+	if len(bindings) == 0 {
+		return nil
+	}
 	if _, err := s.db.ExecContext(ctx, s.q(`DELETE FROM intel_web_bindings WHERE project_id = ?`), projectID); err != nil {
 		return err
 	}

@@ -76,21 +76,28 @@ func (s *sqlStore) CreateIntelFinding(ctx context.Context, f *IntelFinding) erro
 // CreateIntelFindingIfAbsent inserts a finding only when no finding with the
 // same detector + rule + location already exists for the project, so a rescan
 // preserves user review state (waive/resolve) instead of duplicating rows.
-// It reports whether a new row was inserted.
+// The natural key is UNIQUE (migration unique_upsert_keys), so the single
+// INSERT ... ON CONFLICT DO NOTHING is race-free where the old SELECT-then-
+// INSERT could double-insert under concurrent scans. It reports whether a new
+// row was inserted.
 func (s *sqlStore) CreateIntelFindingIfAbsent(ctx context.Context, f *IntelFinding) (bool, error) {
-	var n int
-	if err := s.db.QueryRowContext(ctx, s.q(`
-		SELECT COUNT(*) FROM intel_findings
-		WHERE project_id = ? AND detector = ? AND cve_or_rule_id = ? AND location = ?`),
-		f.ProjectID, f.Detector, f.CveOrRuleID, f.Location).Scan(&n); err != nil {
+	var id int64
+	err := s.db.QueryRowContext(ctx, s.q(`
+		INSERT INTO intel_findings (project_id, module_id, detector, severity, category,
+			cve_or_rule_id, location, summary, status, removed_at, waived_reason, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+		ON CONFLICT (project_id, detector, cve_or_rule_id, location) DO NOTHING
+		RETURNING id`),
+		f.ProjectID, f.ModuleID, f.Detector, f.Severity, f.Category,
+		f.CveOrRuleID, f.Location, f.Summary, f.Status, f.RemovedAt, f.WaivedReason,
+	).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil // 已存在，未插入
+	}
+	if err != nil {
 		return false, err
 	}
-	if n > 0 {
-		return false, nil
-	}
-	if err := s.CreateIntelFinding(ctx, f); err != nil {
-		return false, err
-	}
+	f.ID = id
 	return true, nil
 }
 

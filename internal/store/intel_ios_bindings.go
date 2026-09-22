@@ -23,6 +23,10 @@ type IntelIosBinding struct {
 // ReplaceIntelIosBindings deletes the project's iOS bindings and re-inserts the
 // given set, so a rescan reflects the current views.
 func (s *sqlStore) ReplaceIntelIosBindings(ctx context.Context, projectID int64, bindings []*IntelIosBinding) error {
+	// 空列表保护：同 ReplaceIntelEntities——无结果保留旧快照，避免误清空。
+	if len(bindings) == 0 {
+		return nil
+	}
 	if _, err := s.db.ExecContext(ctx, s.q(`DELETE FROM intel_ios_bindings WHERE project_id = ?`), projectID); err != nil {
 		return err
 	}

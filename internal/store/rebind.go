@@ -1,6 +1,9 @@
 package store
 
-import "strings"
+import (
+	"strings"
+	"time"
+)
 
 // rebind converts a SQLite-style statement (using ? placeholders) into a
 // statement using $N placeholders for PostgreSQL. SQLite queries are returned
@@ -38,4 +41,22 @@ func itoa(n int) string {
 		n /= 10
 	}
 	return string(digits[i:])
+}
+
+// sqliteTime renders t in the plain UTC format SQLite stores for
+// CURRENT_TIMESTAMP ("2006-01-02 15:04:05"). Binding time.Time directly on
+// SQLite produces a zone-suffixed text (e.g. "+0800"), which miscompares
+// against the UTC column values on non-UTC hosts; this keeps both sides on the
+// same format. PostgreSQL receives time.Time as-is.
+func sqliteTime(t time.Time) string {
+	return t.UTC().Format("2006-01-02 15:04:05")
+}
+
+// sqliteTimePtr is the *time.Time variant of sqliteTime: nil stays nil (NULL),
+// non-nil is rendered as UTC text for SQLite bindings.
+func sqliteTimePtr(t *time.Time) any {
+	if t == nil {
+		return nil
+	}
+	return sqliteTime(*t)
 }

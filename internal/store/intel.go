@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"strings"
 	"time"
 )
 
@@ -233,8 +234,15 @@ func (s *sqlStore) MarkIntelAnalyzeFailed(ctx context.Context, id int64) error {
 	return err
 }
 
-// DeleteIntelProject removes a project and all its intel data.
+// DeleteIntelProject removes a project and all its intel data. All deletes run
+// inside one transaction so a mid-way failure never leaves orphan rows (e.g. a
+// removed project whose endpoints/entities survive).
 func (s *sqlStore) DeleteIntelProject(ctx context.Context, id int64) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
 	stmts := []string{
 		`DELETE FROM intel_chat_messages WHERE chat_id IN (SELECT id FROM intel_chats WHERE project_id = ?)`,
 		`DELETE FROM intel_chats WHERE project_id = ?`,
@@ -264,19 +272,25 @@ func (s *sqlStore) DeleteIntelProject(ctx context.Context, id int64) error {
 		`DELETE FROM projects WHERE id = ?`,
 	}
 	for _, stmt := range stmts {
-		if _, err := s.db.ExecContext(ctx, s.q(stmt), id); err != nil {
+		if _, err := tx.ExecContext(ctx, s.q(stmt), id); err != nil {
 			return err
 		}
 	}
-	return nil
+	return tx.Commit()
 }
 
 // ReplaceIntelModules syncs the project's module set by natural key (rel_path):
 // existing modules keep their stable id and cached summary, newly detected
 // modules are inserted, and modules no longer present are removed. Stable ids
 // keep child rows and overrides (keyed by rel_path) valid across analyses, and
-// the LLM summary survives re-analysis.
+// the LLM summary survives re-analysis. All changes run in one transaction, and
+// removing a module deletes its child rows (entities/endpoints/test_cases keyed
+// by module_id) alongside it so no orphans linger.
 func (s *sqlStore) ReplaceIntelModules(ctx context.Context, projectID int64, mods []*IntelModule) error {
+	// 空列表保护：扫描无结果时保留旧模块快照，避免误清空。
+	if len(mods) == 0 {
+		return nil
+	}
 	existing, err := s.ListIntelModules(ctx, projectID)
 	if err != nil {
 		return err
@@ -288,10 +302,25 @@ func (s *sqlStore) ReplaceIntelModules(ctx context.Context, projectID int64, mod
 			keep[m.RelPath] = true
 		}
 	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
 	for _, m := range existing {
 		byPath[m.RelPath] = m.ID
 		if !keep[m.RelPath] {
-			if _, err := s.db.ExecContext(ctx, s.q(`DELETE FROM project_modules WHERE id = ?`), m.ID); err != nil {
+			// 模块不再存在：先删其子行，再删模块本身，避免孤儿行残留。
+			if err := s.deleteIntelModuleEntities(ctx, tx, projectID, m.ID); err != nil {
+				return err
+			}
+			if err := s.deleteIntelModuleEndpoints(ctx, tx, projectID, m.ID); err != nil {
+				return err
+			}
+			if err := s.deleteIntelModuleTestCases(ctx, tx, projectID, m.ID); err != nil {
+				return err
+			}
+			if _, err := tx.ExecContext(ctx, s.q(`DELETE FROM project_modules WHERE id = ?`), m.ID); err != nil {
 				return err
 			}
 		}
@@ -302,7 +331,7 @@ func (s *sqlStore) ReplaceIntelModules(ctx context.Context, projectID int64, mod
 		}
 		if id, ok := byPath[m.RelPath]; ok {
 			// Update auto-derived fields only; summary and id are preserved.
-			if _, err := s.db.ExecContext(ctx, s.q(`
+			if _, err := tx.ExecContext(ctx, s.q(`
 				UPDATE project_modules SET kind_type = ?, kind_role = ?, build_tool = ?,
 					commands_json = ?, last_tested_sha = ?, analyzed_at = CURRENT_TIMESTAMP
 				WHERE id = ?`),
@@ -312,7 +341,7 @@ func (s *sqlStore) ReplaceIntelModules(ctx context.Context, projectID int64, mod
 			m.ID = id
 			continue
 		}
-		if _, err := s.db.ExecContext(ctx, s.q(`
+		if _, err := tx.ExecContext(ctx, s.q(`
 			INSERT INTO project_modules (project_id, rel_path, kind_type, kind_role, build_tool,
 				commands_json, summary, last_tested_sha, analyzed_at, created_at)
 			VALUES (?, ?, ?, ?, ?, ?, '', ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`),
@@ -321,7 +350,7 @@ func (s *sqlStore) ReplaceIntelModules(ctx context.Context, projectID int64, mod
 			return err
 		}
 	}
-	return nil
+	return tx.Commit()
 }
 
 // GetIntelModule loads a single module by id.
@@ -373,28 +402,47 @@ func (s *sqlStore) ListIntelModules(ctx context.Context, projectID int64) ([]*In
 
 // ReplaceIntelEntities deletes the project's entity mappings and re-inserts the
 // given set (a full rescan replaces the prior snapshot). Each entity carries
-// its own ModuleID.
+// its own ModuleID. The wipe+reload runs in one transaction and uses a
+// multi-value INSERT (batched well under PostgreSQL's 65535 parameter limit).
 func (s *sqlStore) ReplaceIntelEntities(ctx context.Context, projectID int64, ents []*IntelEntity) error {
 	// 空列表保护：扫描阶段超时/失败会让调用方以空列表清库、把项目数据抹空。
 	// 无结果时保留旧快照（宁可数据略旧，不可误清空）；下一次成功扫描会覆盖。
 	if len(ents) == 0 {
 		return nil
 	}
-	if _, err := s.db.ExecContext(ctx, s.q(`
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx, s.q(`
 		DELETE FROM intel_entities WHERE project_id = ?`), projectID); err != nil {
 		return err
 	}
-	for _, e := range ents {
-		if _, err := s.db.ExecContext(ctx, s.q(`
-			INSERT INTO intel_entities (project_id, module_id, entity, table_name, column_name,
-				field_type, nullable, is_primary, source_file, source_line)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
-			projectID, e.ModuleID, e.Entity, e.TableName, e.ColumnName,
-			e.FieldType, e.Nullable, e.IsPrimary, e.SourceFile, e.SourceLine); err != nil {
+	// 单语句多值 INSERT：每批 ≤2500 行，规避 PG 参数上限（65535）。
+	const batch = 2500
+	for start := 0; start < len(ents); start += batch {
+		end := start + batch
+		if end > len(ents) {
+			end = len(ents)
+		}
+		var sb strings.Builder
+		sb.WriteString(`INSERT INTO intel_entities (project_id, module_id, entity, table_name, column_name,
+			field_type, nullable, is_primary, source_file, source_line) VALUES `)
+		args := make([]any, 0, (end-start)*10)
+		for i, e := range ents[start:end] {
+			if i > 0 {
+				sb.WriteString(",")
+			}
+			sb.WriteString("(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+			args = append(args, projectID, e.ModuleID, e.Entity, e.TableName, e.ColumnName,
+				e.FieldType, e.Nullable, e.IsPrimary, e.SourceFile, e.SourceLine)
+		}
+		if _, err := tx.ExecContext(ctx, s.q(sb.String()), args...); err != nil {
 			return err
 		}
 	}
-	return nil
+	return tx.Commit()
 }
 
 // ListIntelEntities returns entity mappings for a project (optionally narrowed
@@ -425,9 +473,19 @@ func (s *sqlStore) ListIntelEntities(ctx context.Context, projectID, moduleID in
 	return out, rows.Err()
 }
 
+// execer abstracts *sql.DB and *sql.Tx so child-row deletion can run inside a
+// caller-owned transaction when needed (see ReplaceIntelModules).
+type execer interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+}
+
 // DeleteIntelModuleEntities removes one module's entity mappings.
 func (s *sqlStore) DeleteIntelModuleEntities(ctx context.Context, projectID, moduleID int64) error {
-	_, err := s.db.ExecContext(ctx, s.q(`
+	return s.deleteIntelModuleEntities(ctx, s.db, projectID, moduleID)
+}
+
+func (s *sqlStore) deleteIntelModuleEntities(ctx context.Context, e execer, projectID, moduleID int64) error {
+	_, err := e.ExecContext(ctx, s.q(`
 		DELETE FROM intel_entities WHERE project_id = ? AND module_id = ?`), projectID, moduleID)
 	return err
 }
@@ -448,27 +506,45 @@ func (s *sqlStore) AppendIntelEntities(ctx context.Context, projectID int64, ent
 }
 
 // ReplaceIntelEndpoints deletes the project's endpoint contracts and re-inserts
-// the given set (a full rescan replaces the prior snapshot).
+// the given set (a full rescan replaces the prior snapshot). The wipe+reload
+// runs in one transaction with a batched multi-value INSERT.
 func (s *sqlStore) ReplaceIntelEndpoints(ctx context.Context, projectID int64, eps []*IntelEndpoint) error {
 	// 空列表保护：同 ReplaceIntelEntities——无结果保留旧快照，避免误清空。
 	if len(eps) == 0 {
 		return nil
 	}
-	if _, err := s.db.ExecContext(ctx, s.q(`
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx, s.q(`
 		DELETE FROM intel_endpoints WHERE project_id = ?`), projectID); err != nil {
 		return err
 	}
-	for _, ep := range eps {
-		if _, err := s.db.ExecContext(ctx, s.q(`
-			INSERT INTO intel_endpoints (project_id, module_id, method, path, response_type,
-				request_json, fields_json, source_file, source_line, summary)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
-			projectID, ep.ModuleID, ep.Method, ep.Path, ep.ResponseType,
-			ep.RequestJSON, ep.FieldsJSON, ep.SourceFile, ep.SourceLine, ep.Summary); err != nil {
+	const batch = 2500
+	for start := 0; start < len(eps); start += batch {
+		end := start + batch
+		if end > len(eps) {
+			end = len(eps)
+		}
+		var sb strings.Builder
+		sb.WriteString(`INSERT INTO intel_endpoints (project_id, module_id, method, path, response_type,
+			request_json, fields_json, source_file, source_line, summary) VALUES `)
+		args := make([]any, 0, (end-start)*10)
+		for i, ep := range eps[start:end] {
+			if i > 0 {
+				sb.WriteString(",")
+			}
+			sb.WriteString("(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+			args = append(args, projectID, ep.ModuleID, ep.Method, ep.Path, ep.ResponseType,
+				ep.RequestJSON, ep.FieldsJSON, ep.SourceFile, ep.SourceLine, ep.Summary)
+		}
+		if _, err := tx.ExecContext(ctx, s.q(sb.String()), args...); err != nil {
 			return err
 		}
 	}
-	return nil
+	return tx.Commit()
 }
 
 // ListIntelEndpoints returns endpoint contracts for a project (optionally
@@ -515,7 +591,11 @@ func (s *sqlStore) GetIntelEndpoint(ctx context.Context, id int64) (*IntelEndpoi
 
 // DeleteIntelModuleEndpoints removes one module's endpoint contracts.
 func (s *sqlStore) DeleteIntelModuleEndpoints(ctx context.Context, projectID, moduleID int64) error {
-	_, err := s.db.ExecContext(ctx, s.q(`
+	return s.deleteIntelModuleEndpoints(ctx, s.db, projectID, moduleID)
+}
+
+func (s *sqlStore) deleteIntelModuleEndpoints(ctx context.Context, e execer, projectID, moduleID int64) error {
+	_, err := e.ExecContext(ctx, s.q(`
 		DELETE FROM intel_endpoints WHERE project_id = ? AND module_id = ?`), projectID, moduleID)
 	return err
 }

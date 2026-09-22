@@ -8,6 +8,11 @@ import (
 	"strings"
 )
 
+// migrateAdvisoryLockKey is the PostgreSQL advisory-lock key that serializes
+// concurrent migration runs (multi-instance startup / crash re-entry). Any
+// fixed value that does not collide with other advisory-lock users is fine.
+const migrateAdvisoryLockKey = 61701
+
 // migrate applies schema migrations to the database.
 // Migration version is tracked in a meta table, so both SQLite and
 // PostgreSQL start from the same version sequence.
@@ -17,6 +22,23 @@ func migrate(ctx context.Context, driver string, db *sql.DB) error {
 		applied_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 	)`); err != nil {
 		return fmt.Errorf("create schema_migrations: %w", err)
+	}
+
+	// PostgreSQL: take a single advisory lock for the whole migration so two
+	// instances starting concurrently (or a crash re-entering mid-run) never
+	// interleave DDL / schema_migrations writes. The lock is held on a
+	// dedicated connection for its lifetime; SQLite serializes writers itself
+	// and needs no such guard.
+	if isPostgres(driver) {
+		conn, err := db.Conn(ctx)
+		if err != nil {
+			return fmt.Errorf("acquire migration conn: %w", err)
+		}
+		defer conn.Close()
+		if _, err := conn.ExecContext(ctx, `SELECT pg_advisory_lock(`+itoa(migrateAdvisoryLockKey)+`)`); err != nil {
+			return fmt.Errorf("acquire migration advisory lock: %w", err)
+		}
+		defer func() { _, _ = conn.ExecContext(ctx, `SELECT pg_advisory_unlock(`+itoa(migrateAdvisoryLockKey)+`)`) }()
 	}
 
 	current, err := currentVersion(ctx, db)
@@ -131,6 +153,8 @@ var migrations = []migration{
 	{name: "intel_run_attempts", apply: migrationIntelRunAttempts},
 	{name: "task_kind", apply: migrationTaskKind},
 	{name: "test_runs_priority", apply: migrationTestRunsPriority},
+	{name: "tokens_scope", apply: migrationTokensScope},
+	{name: "unique_upsert_keys", apply: migrationUniqueUpsertKeys},
 	{name: "knowledge_base", apply: migrationKnowledgeBase},
 	{name: "doc_documents", apply: migrationDocDocuments},
 }
@@ -212,7 +236,8 @@ func migrationIntelFieldMeta(ctx context.Context, driver string, db *sql.DB) err
 		`ALTER TABLE intel_entities ADD COLUMN is_primary BOOLEAN NOT NULL DEFAULT FALSE`,
 	}
 	for _, s := range stmts {
-		if _, err := db.ExecContext(ctx, s); err != nil {
+		if _, err := db.ExecContext(ctx, s); err != nil &&
+			!strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
 			return err
 		}
 	}
@@ -251,7 +276,8 @@ func migrationTasksDependsOn(ctx context.Context, driver string, db *sql.DB) err
 		`CREATE INDEX IF NOT EXISTS idx_tasks_depends_on ON tasks(depends_on, status)`,
 	}
 	for _, s := range stmts {
-		if _, err := db.ExecContext(ctx, s); err != nil {
+		if _, err := db.ExecContext(ctx, s); err != nil &&
+			!strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
 			return err
 		}
 	}
@@ -268,7 +294,8 @@ func migrationTasksSchedule(ctx context.Context, driver string, db *sql.DB) erro
 		`ALTER TABLE tasks ADD COLUMN last_fired_at TIMESTAMP NULL`,
 	}
 	for _, s := range stmts {
-		if _, err := db.ExecContext(ctx, s); err != nil {
+		if _, err := db.ExecContext(ctx, s); err != nil &&
+			!strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
 			return err
 		}
 	}
@@ -279,7 +306,8 @@ func migrationTasksSchedule(ctx context.Context, driver string, db *sql.DB) erro
 // result summary (success) or root-cause analysis (failure) for a task.
 func migrationTasksAISummary(ctx context.Context, driver string, db *sql.DB) error {
 	if _, err := db.ExecContext(ctx, `
-		ALTER TABLE tasks ADD COLUMN ai_summary TEXT NOT NULL DEFAULT ''`); err != nil {
+		ALTER TABLE tasks ADD COLUMN ai_summary TEXT NOT NULL DEFAULT ''`); err != nil &&
+		!strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
 		return err
 	}
 	return nil
@@ -392,7 +420,8 @@ func migrationRules(ctx context.Context, driver string, db *sql.DB) error {
 func migrationTasksAvailableAt(ctx context.Context, driver string, db *sql.DB) error {
 	// SQLite supports ADD COLUMN with a constant default; PG too.
 	if _, err := db.ExecContext(ctx, `
-		ALTER TABLE tasks ADD COLUMN available_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP`); err != nil {
+		ALTER TABLE tasks ADD COLUMN available_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP`); err != nil &&
+		!strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
 		return err
 	}
 	if _, err := db.ExecContext(ctx, `
@@ -443,7 +472,8 @@ func migrationTasksPriorityTimeoutWorkflow(ctx context.Context, driver string, d
 		`CREATE INDEX IF NOT EXISTS idx_tasks_claim ON tasks(status, available_at, priority, created_at)`,
 	}
 	for _, s := range stmts {
-		if _, err := db.ExecContext(ctx, s); err != nil {
+		if _, err := db.ExecContext(ctx, s); err != nil &&
+			!strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
 			return err
 		}
 	}
@@ -482,7 +512,10 @@ func migrationTaskKind(ctx context.Context, driver string, db *sql.DB) error {
 // session per run, previous behavior).
 func migrationRulesSessionID(ctx context.Context, driver string, db *sql.DB) error {
 	_, err := db.ExecContext(ctx, `ALTER TABLE rules ADD COLUMN session_id TEXT NOT NULL DEFAULT ''`)
-	return err
+	if err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+		return err
+	}
+	return nil
 }
 
 // migrationSessionUnread adds the session unread table used by the shared
@@ -799,7 +832,8 @@ func migrationIntelEndpointSummary(ctx context.Context, driver string, db *sql.D
 		`ALTER TABLE intel_endpoints ADD COLUMN summary TEXT NOT NULL DEFAULT ''`,
 	}
 	for _, s := range stmts {
-		if _, err := db.ExecContext(ctx, s); err != nil {
+		if _, err := db.ExecContext(ctx, s); err != nil &&
+			!strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
 			return err
 		}
 	}
@@ -860,7 +894,8 @@ func migrationIntelFixFinding(ctx context.Context, driver string, db *sql.DB) er
 		`ALTER TABLE intel_fixes ADD COLUMN finding_id INTEGER NOT NULL DEFAULT 0`,
 	}
 	for _, s := range stmts {
-		if _, err := db.ExecContext(ctx, s); err != nil {
+		if _, err := db.ExecContext(ctx, s); err != nil &&
+			!strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
 			return err
 		}
 	}
@@ -1215,21 +1250,30 @@ func migrationIntelFeatureChats(ctx context.Context, driver string, db *sql.DB) 
 // instead of defaulting to the node's home.
 func migrationRemoteNodesWorkDir(ctx context.Context, driver string, db *sql.DB) error {
 	_, err := db.ExecContext(ctx, `ALTER TABLE remote_nodes ADD COLUMN work_dir TEXT NOT NULL DEFAULT ''`)
-	return err
+	if err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+		return err
+	}
+	return nil
 }
 
 // migrationProjectModulesSummary adds the LLM-generated module business summary
 // column (lazy: first detail view generates it, then it is cached here).
 func migrationProjectModulesSummary(ctx context.Context, driver string, db *sql.DB) error {
 	_, err := db.ExecContext(ctx, `ALTER TABLE project_modules ADD COLUMN summary TEXT NOT NULL DEFAULT ''`)
-	return err
+	if err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+		return err
+	}
+	return nil
 }
 
 // migrationProjectsDescription adds the free-text project description column
 // (shown on the project overview page; empty by default).
 func migrationProjectsDescription(ctx context.Context, driver string, db *sql.DB) error {
 	_, err := db.ExecContext(ctx, `ALTER TABLE projects ADD COLUMN description TEXT NOT NULL DEFAULT ''`)
-	return err
+	if err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+		return err
+	}
+	return nil
 }
 
 // migrationTestRunsProgress adds the live progress text and bounded output log
@@ -1340,6 +1384,49 @@ func migrationTestRunsPriority(ctx context.Context, driver string, db *sql.DB) e
 	return nil
 }
 
+// migrationTokensScope adds the token scope column (admin | device), defaulting
+// to "admin" for legacy/existing tokens.
+func migrationTokensScope(ctx context.Context, driver string, db *sql.DB) error {
+	_, err := db.ExecContext(ctx, `ALTER TABLE tokens ADD COLUMN scope TEXT NOT NULL DEFAULT 'admin'`)
+	if err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+		return err
+	}
+	return nil
+}
+
+// migrationUniqueUpsertKeys enforces single-row-per-natural-key for the
+// DELETE+INSERT upsert tables and the audit-finding dedup table. First it
+// collapses any duplicate rows the pre-index racing upserts left behind
+// (keeping the lowest id, like migrationIntelDedup), then creates a UNIQUE
+// index per key so the code can switch to INSERT ... ON CONFLICT without ever
+// inserting a second row. SQLite and PostgreSQL share the DDL.
+func migrationUniqueUpsertKeys(ctx context.Context, driver string, db *sql.DB) error {
+	stmts := []string{
+		`DELETE FROM intel_overrides WHERE id NOT IN (
+			SELECT MIN(id) FROM intel_overrides
+			GROUP BY project_id, target, row_key, field)`,
+		`DELETE FROM env_services WHERE id NOT IN (
+			SELECT MIN(id) FROM env_services
+			GROUP BY project_id, service)`,
+		`DELETE FROM env_devices WHERE id NOT IN (
+			SELECT MIN(id) FROM env_devices
+			GROUP BY serial)`,
+		`DELETE FROM intel_findings WHERE id NOT IN (
+			SELECT MIN(id) FROM intel_findings
+			GROUP BY project_id, detector, cve_or_rule_id, location)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_intel_overrides_key ON intel_overrides(project_id, target, row_key, field)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_env_services_project_service ON env_services(project_id, service)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_env_devices_serial ON env_devices(serial)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_intel_findings_key ON intel_findings(project_id, detector, cve_or_rule_id, location)`,
+	}
+	for _, s := range stmts {
+		if _, err := db.ExecContext(ctx, s); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // migrationKnowledgeBase creates the generic knowledge-base tables:
 // kb_collections, kb_documents and kb_chunks. Unlike the intel project-scoped
 // index (intel_chunks), the KB is client-managed: clients upload text/markdown,
@@ -1433,4 +1520,3 @@ func migrationDocDocuments(ctx context.Context, driver string, db *sql.DB) error
 	}
 	return nil
 }
-

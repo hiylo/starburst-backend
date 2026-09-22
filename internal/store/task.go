@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 )
@@ -18,6 +19,7 @@ const (
 	TaskPending   = "pending"   // 等待前置依赖完成
 	TaskBlocked   = "blocked"   // 前置依赖最终失败被阻塞
 	TaskScheduled = "scheduled" // 已排期：等待 scheduled_at 到期，或周期模板（cron 非空）
+	TaskRetrying  = "retrying"  // 失败后已排队等待重试
 )
 
 // taskColumns is the canonical SELECT/RETURNING column list, kept in a single
@@ -456,7 +458,7 @@ func (s *sqlStore) CancelTasks(ctx context.Context, ids []string) (int, error) {
 	for _, id := range ids {
 		args = append(args, id)
 	}
-	args = append(args, TaskQueued, TaskPending, TaskRunning, "retrying")
+	args = append(args, TaskQueued, TaskPending, TaskRunning, TaskRetrying)
 	res, err := s.db.ExecContext(ctx, s.q(`
 		UPDATE tasks SET status = ?, finished_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
 		WHERE id IN (`+placeholders+`) AND status IN (?, ?, ?, ?)`), args...)
@@ -496,7 +498,7 @@ func (s *sqlStore) CancelWorkflow(ctx context.Context, workflowID string) (int, 
 	res, err := s.db.ExecContext(ctx, s.q(`
 		UPDATE tasks SET status = ?, finished_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
 		WHERE workflow_id = ? AND status IN (?, ?, ?, ?)`),
-		TaskCanceled, workflowID, TaskQueued, TaskPending, TaskRunning, "retrying")
+		TaskCanceled, workflowID, TaskQueued, TaskPending, TaskRunning, TaskRetrying)
 	if err != nil {
 		return 0, err
 	}
@@ -521,7 +523,7 @@ func (s *sqlStore) RerunWorkflowFromFailed(ctx context.Context, workflowID strin
 		switch t.Status {
 		case TaskSucceeded:
 			prevSucceeded = true
-		case TaskRunning, TaskQueued, TaskScheduled, "retrying", TaskPending:
+		case TaskRunning, TaskQueued, TaskScheduled, TaskRetrying, TaskPending:
 			// 进行中/未被上游阻塞最终化：不动它；其下游仍需等待。
 			prevSucceeded = false
 		default: // failed / canceled / blocked → 从这里恢复
@@ -587,16 +589,28 @@ func (s *sqlStore) ListWorkflowSummaries(ctx context.Context, limit int) ([]*Wor
 	sum := func(status string) string {
 		return `SUM(CASE WHEN status = '` + status + `' THEN 1 ELSE 0 END)`
 	}
+	// 每组的 name 用窗口函数 first_value 取最早创建的任务名，替代相关子查询
+	// （SQL 内 N+1）；SQLite（>=3.25）与 PostgreSQL 均支持。聚合列（含
+	// MIN(created_at)）从基础表折叠，避免窗口子查询丢失列的声明类型。
 	rows, err := s.db.QueryContext(ctx, s.q(`
-		SELECT workflow_id,
-			(SELECT name FROM tasks t2 WHERE t2.workflow_id = t.workflow_id ORDER BY created_at ASC LIMIT 1) AS name,
+		SELECT t.workflow_id,
+			fn.name,
 			COUNT(*) AS steps,
 			`+sum(TaskSucceeded)+` AS succeeded,
 			`+sum(TaskFailed)+` AS failed,
-			`+sum(TaskRunning)+`+`+sum(TaskQueued)+`+`+sum(TaskPending)+`+`+sum("retrying")+` AS running,
-			MIN(created_at) AS created_at
-		FROM tasks t WHERE workflow_id <> '' GROUP BY workflow_id
-		ORDER BY MIN(created_at) DESC LIMIT `+itoa(limit)))
+			`+sum(TaskRunning)+`+`+sum(TaskQueued)+`+`+sum(TaskPending)+`+`+sum(TaskRetrying)+` AS running,
+			MIN(t.created_at) AS created_at
+		FROM tasks t
+		JOIN (
+			SELECT workflow_id, name FROM (
+				SELECT workflow_id,
+					first_value(name) OVER (PARTITION BY workflow_id ORDER BY created_at ASC, id ASC) AS name
+				FROM tasks WHERE workflow_id <> ''
+			) GROUP BY workflow_id, name
+		) fn ON fn.workflow_id = t.workflow_id
+		WHERE t.workflow_id <> ''
+		GROUP BY t.workflow_id
+		ORDER BY MIN(t.created_at) DESC LIMIT `+itoa(limit)))
 	if err != nil {
 		return nil, err
 	}
@@ -604,8 +618,22 @@ func (s *sqlStore) ListWorkflowSummaries(ctx context.Context, limit int) ([]*Wor
 	out := make([]*WorkflowSummary, 0)
 	for rows.Next() {
 		var ws WorkflowSummary
-		if err := rows.Scan(&ws.WorkflowID, &ws.Name, &ws.Steps, &ws.Succeeded, &ws.Failed, &ws.Running, &ws.CreatedAt); err != nil {
-			return nil, err
+		if isPostgres(s.driver) {
+			if err := rows.Scan(&ws.WorkflowID, &ws.Name, &ws.Steps, &ws.Succeeded, &ws.Failed, &ws.Running, &ws.CreatedAt); err != nil {
+				return nil, err
+			}
+		} else {
+			// SQLite 上 MIN(created_at) 失去列的声明类型，驱动返回原始文本；
+			// 按 CURRENT_TIMESTAMP 的 UTC 文本格式解析回 time.Time。
+			var createdStr string
+			if err := rows.Scan(&ws.WorkflowID, &ws.Name, &ws.Steps, &ws.Succeeded, &ws.Failed, &ws.Running, &createdStr); err != nil {
+				return nil, err
+			}
+			created, err := time.Parse("2006-01-02 15:04:05", createdStr)
+			if err != nil {
+				return nil, fmt.Errorf("parse workflow created_at %q: %w", createdStr, err)
+			}
+			ws.CreatedAt = created
 		}
 		out = append(out, &ws)
 	}
@@ -666,12 +694,18 @@ func (s *sqlStore) TaskStatsDetailed(ctx context.Context, windowDays int) (*Task
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	// Success/failure + avg duration over finished tasks.
+	// Success/failure + avg duration over finished tasks. The average-duration
+	// expression differs by dialect: SQLite has no EXTRACT(FROM ...), so it
+	// computes the delta via julianday() and converts to seconds.
+	durationExpr := "AVG(EXTRACT(EPOCH FROM (finished_at - started_at)))"
+	if !isPostgres(s.driver) {
+		durationExpr = "AVG((julianday(finished_at) - julianday(started_at)) * 86400.0)"
+	}
 	if err := s.db.QueryRowContext(ctx, s.q(`
 		SELECT
 			COUNT(*) FILTER (WHERE status = ?),
 			COUNT(*) FILTER (WHERE status = ?),
-			AVG(EXTRACT(EPOCH FROM (finished_at - started_at)))
+			`+durationExpr+`
 		FROM tasks
 		WHERE `+cutoff+` AND status IN (?, ?) AND started_at IS NOT NULL AND finished_at IS NOT NULL`),
 		TaskSucceeded, TaskFailed, itoa(windowDays), TaskSucceeded, TaskFailed).Scan(

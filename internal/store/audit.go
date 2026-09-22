@@ -82,7 +82,12 @@ type RecordAuditFn func(ctx context.Context, tokenID, tokenName, method, path st
 
 // DeleteAuditOlderThan purges audit entries older than cutoff.
 func (s *sqlStore) DeleteAuditOlderThan(ctx context.Context, cutoff time.Time) (int, error) {
-	res, err := s.db.ExecContext(ctx, s.q(`DELETE FROM audit_log WHERE created_at <= ?`), cutoff)
+	var arg any = cutoff
+	if !isPostgres(s.driver) {
+		// audit_log.created_at 是 CURRENT_TIMESTAMP 的 UTC 文本，比较参数须同格式。
+		arg = sqliteTime(cutoff)
+	}
+	res, err := s.db.ExecContext(ctx, s.q(`DELETE FROM audit_log WHERE created_at <= ?`), arg)
 	if err != nil {
 		return 0, err
 	}

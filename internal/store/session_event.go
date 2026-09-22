@@ -22,12 +22,18 @@ type SessionEvent struct {
 
 // InsertEvent stores one session event. The caller sets CreatedAt (the
 // collector timestamps with UTC so sub-second events stay ordered and the
-// since cursor never skips a row sharing the same second).
+// since cursor never skips a row sharing the same second). On SQLite the
+// timestamp is stored as plain UTC text so comparisons in ListEvents /
+// DeleteEventsOlderThan stay aligned.
 func (s *sqlStore) InsertEvent(ctx context.Context, e *SessionEvent) error {
+	var created any = e.CreatedAt
+	if !isPostgres(s.driver) {
+		created = sqliteTime(e.CreatedAt)
+	}
 	_, err := s.db.ExecContext(ctx, s.q(`
 		INSERT INTO session_events (session_id, event_type, payload, created_at)
 		VALUES (?, ?, ?, ?)`),
-		e.SessionID, e.EventType, string(sanitizePayloadForJSONB(e.Payload)), e.CreatedAt)
+		e.SessionID, e.EventType, string(sanitizePayloadForJSONB(e.Payload)), created)
 	return err
 }
 
@@ -47,8 +53,12 @@ func (s *sqlStore) InsertEvents(ctx context.Context, events []*SessionEvent) err
 		if i > 0 {
 			sb.WriteString(",")
 		}
+		var created any = e.CreatedAt
+		if !isPostgres(s.driver) {
+			created = sqliteTime(e.CreatedAt)
+		}
 		sb.WriteString("(?, ?, ?, ?)")
-		args = append(args, e.SessionID, e.EventType, string(sanitizePayloadForJSONB(e.Payload)), e.CreatedAt)
+		args = append(args, e.SessionID, e.EventType, string(sanitizePayloadForJSONB(e.Payload)), created)
 	}
 	_, err := s.db.ExecContext(ctx, s.q(sb.String()), args...)
 	return err
@@ -88,7 +98,12 @@ func (s *sqlStore) ListEvents(ctx context.Context, sessionID string, since time.
 			query += ` AND`
 		}
 		query += ` created_at > ?`
-		args = append(args, since)
+		if isPostgres(s.driver) {
+			args = append(args, since)
+		} else {
+			// created_at 列存 UTC 文本，游标参数须同格式，否则非 UTC 主机时区错位。
+			args = append(args, sqliteTime(since))
+		}
 	}
 	if limit <= 0 {
 		limit = 200
@@ -130,7 +145,11 @@ func (s *sqlStore) ListEvents(ctx context.Context, sessionID string, since time.
 // DeleteEventsOlderThan purges session events created strictly before cutoff,
 // keeping the retention window bounded. Returns the number of rows deleted.
 func (s *sqlStore) DeleteEventsOlderThan(ctx context.Context, cutoff time.Time) (int, error) {
-	res, err := s.db.ExecContext(ctx, s.q(`DELETE FROM session_events WHERE created_at < ?`), cutoff)
+	var arg any = cutoff
+	if !isPostgres(s.driver) {
+		arg = sqliteTime(cutoff)
+	}
+	res, err := s.db.ExecContext(ctx, s.q(`DELETE FROM session_events WHERE created_at < ?`), arg)
 	if err != nil {
 		return 0, err
 	}

@@ -13,10 +13,16 @@ type WebSession struct {
 	ExpiresAt time.Time
 }
 
-// CreateWebSession stores a web session with an expiry.
+// CreateWebSession stores a web session with an expiry. On SQLite the expiry
+// is stored as plain UTC text so the SQL comparison in
+// DeleteExpiredWebSessions stays aligned (GetWebSession validates in Go).
 func (s *sqlStore) CreateWebSession(ctx context.Context, id string, expiresAt time.Time) error {
+	var exp any = expiresAt
+	if !isPostgres(s.driver) {
+		exp = sqliteTime(expiresAt)
+	}
 	_, err := s.db.ExecContext(ctx, s.q(`
-		INSERT INTO web_sessions (id, expires_at) VALUES (?, ?)`), id, expiresAt)
+		INSERT INTO web_sessions (id, expires_at) VALUES (?, ?)`), id, exp)
 	return err
 }
 
@@ -54,7 +60,12 @@ func (s *sqlStore) DeleteWebSession(ctx context.Context, id string) error {
 
 // DeleteExpiredWebSessions purges sessions expired before now; returns count.
 func (s *sqlStore) DeleteExpiredWebSessions(ctx context.Context) (int, error) {
-	res, err := s.db.ExecContext(ctx, s.q(`DELETE FROM web_sessions WHERE expires_at <= ?`), time.Now())
+	var arg any = time.Now()
+	if !isPostgres(s.driver) {
+		// expires_at 列存 UTC 文本（CreateWebSession 写入），比较参数须同格式。
+		arg = sqliteTime(time.Now())
+	}
+	res, err := s.db.ExecContext(ctx, s.q(`DELETE FROM web_sessions WHERE expires_at <= ?`), arg)
 	if err != nil {
 		return 0, err
 	}

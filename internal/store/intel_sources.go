@@ -42,7 +42,9 @@ func (s *sqlStore) ListIntelProjectSources(ctx context.Context, projectID int64)
 }
 
 // ReplaceIntelProjectSources replaces the project's associated source list in
-// one transaction-like pass (delete all + insert each).
+// one transaction-like pass (delete all + insert each). This is an explicit
+// user-facing replace-all endpoint (PUT /api/intel/projects/{id}/sources): an
+// empty list legitimately clears the project's sources, so no empty-list guard.
 func (s *sqlStore) ReplaceIntelProjectSources(ctx context.Context, projectID int64, sources []*IntelProjectSource) error {
 	if _, err := s.db.ExecContext(ctx, s.q(`DELETE FROM project_sources WHERE project_id = ?`), projectID); err != nil {
 		return err

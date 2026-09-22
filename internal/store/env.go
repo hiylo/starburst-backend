@@ -47,6 +47,10 @@ type IntelEnvService struct {
 // requirements and re-inserts the given set (a full rescan replaces the
 // snapshot). Requirements are the input for the environment gate.
 func (s *sqlStore) ReplaceIntelEnvRequirements(ctx context.Context, projectID int64, reqs []*IntelEnvRequirement) error {
+	// 空列表保护：同 ReplaceIntelEntities——无结果保留旧快照，避免误清空。
+	if len(reqs) == 0 {
+		return nil
+	}
 	if _, err := s.db.ExecContext(ctx, s.q(`DELETE FROM env_requirements WHERE project_id = ?`), projectID); err != nil {
 		return err
 	}
@@ -86,6 +90,10 @@ func (s *sqlStore) ListIntelEnvRequirements(ctx context.Context, projectID int64
 // ReplaceIntelEnvServices deletes the project's environment status rows and
 // re-inserts the given set, so a rescan reflects the current live status.
 func (s *sqlStore) ReplaceIntelEnvServices(ctx context.Context, projectID int64, services []*IntelEnvService) error {
+	// 空列表保护：同 ReplaceIntelEntities——无结果保留旧快照，避免误清空。
+	if len(services) == 0 {
+		return nil
+	}
 	if _, err := s.db.ExecContext(ctx, s.q(`DELETE FROM env_services WHERE project_id = ?`), projectID); err != nil {
 		return err
 	}
@@ -93,14 +101,10 @@ func (s *sqlStore) ReplaceIntelEnvServices(ctx context.Context, projectID int64,
 }
 
 // UpsertIntelEnvServices upserts per-service status rows without deleting
-// unrelated services, preserving manually-entered external config.
+// unrelated services, preserving manually-entered external config. The natural
+// key (project_id, service) is UNIQUE, so INSERT ... ON CONFLICT keeps it
+// race-free where the old DELETE+INSERT could double-insert under concurrency.
 func (s *sqlStore) UpsertIntelEnvServices(ctx context.Context, projectID int64, services []*IntelEnvService) error {
-	for _, svc := range services {
-		if _, err := s.db.ExecContext(ctx, s.q(`
-			DELETE FROM env_services WHERE project_id = ? AND service = ?`), projectID, svc.Service); err != nil {
-			return err
-		}
-	}
 	return s.upsertIntelEnvServices(ctx, projectID, services)
 }
 
@@ -114,7 +118,14 @@ func (s *sqlStore) upsertIntelEnvServices(ctx context.Context, projectID int64, 
 			INSERT INTO env_services (project_id, service, category, version, provider, status,
 				host, port, endpoint, healthy, container_name, container_id, username, password,
 				health_check_at, created_at, updated_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`),
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+			ON CONFLICT (project_id, service) DO UPDATE SET
+				category = excluded.category, version = excluded.version, provider = excluded.provider,
+				status = excluded.status, host = excluded.host, port = excluded.port,
+				endpoint = excluded.endpoint, healthy = excluded.healthy,
+				container_name = excluded.container_name, container_id = excluded.container_id,
+				username = excluded.username, password = excluded.password,
+				health_check_at = excluded.health_check_at, updated_at = CURRENT_TIMESTAMP`),
 			projectID, svc.Service, svc.Category, svc.Version, svc.Provider, svc.Status,
 			svc.Host, svc.Port, svc.Endpoint, svc.Healthy, svc.ContainerName, svc.ContainerID,
 			svc.Username, encPassword, svc.HealthCheckAt); err != nil {
