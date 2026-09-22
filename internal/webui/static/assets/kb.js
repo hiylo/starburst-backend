@@ -271,3 +271,20 @@ async function loadRagStats() {
 document.querySelectorAll("#nav button[data-href]").forEach(function (b) {
   b.addEventListener("click", function () { location.href = b.dataset.href || "/"; });
 });
+
+/* 顶栏主题选择：与主 SPA 同一语义（sb.theme → <html data-theme>） */
+function initTopbarTheme() {
+  var sel = document.getElementById("themeMode");
+  if (!sel) return;
+  sel.innerHTML = '<option value="system">跟随系统</option><option value="light">浅色</option><option value="dark">深色</option>';
+  var cur = localStorage.getItem("sb.theme") || "system";
+  sel.value = ["system", "light", "dark"].indexOf(cur) >= 0 ? cur : "system";
+  applyTopbarTheme(sel.value);
+  sel.addEventListener("change", function () { applyTopbarTheme(sel.value); });
+}
+function applyTopbarTheme(mode) {
+  localStorage.setItem("sb.theme", mode);
+  var light = window.matchMedia("(prefers-color-scheme: light)").matches;
+  document.documentElement.dataset.theme = mode === "system" ? (light ? "light" : "dark") : mode;
+}
+initTopbarTheme();

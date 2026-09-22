@@ -58,8 +58,14 @@
     </nav>
   </aside>
   <div class="main">
-
-  <div class="kb-wrap">
+    <header class="topbar">
+      <h1 id="pageTitle">知识库</h1>
+      <span class="plate">starburst-backend</span>
+      <select id="themeMode" class="theme-pick" aria-label="外观主题" title="外观主题"></select>
+    </header>
+    <div class="content">
+      
+      <div class="kb-wrap">
     <div id="authMsg" class="hint" style="display:none;padding:40px;text-align:center">
       未登录或会话已过期，请先 <a href="/">登录</a>。
     </div>
@@ -90,13 +96,15 @@
         <h3 style="font-size:13px;margin:0 0 6px">RAG-in-Prompt 命中统计（会话自动带入知识库的结局分布）</h3>
         <div id="ragStatsBody" class="hint" style="line-height:1.8">加载中…</div>
       </div>
+    
     </div>
-
   </div>
-
-  <script src="/assets/kb.js"></script>
+</div>
 
   </div>
 </div>
+  </div>
+</div>
+<script src="/assets/kb.js"></script>
 </body>
 </html>

@@ -48,6 +48,33 @@
     } catch (e) { if (e.message === "unauthorized") throw e; throw new Error(e.message); }
   }
 
+  // 后台任务查询：轮询 /api/tasks/{id} 直到终态，成功后刷新最近文档。
+  function pollDocTask(taskId, onProgress, onDone) {
+    var intervalMs = 2000;
+    var attempts = 0;
+    var maxAttempts = 150; // 5min 上限（服务端单任务 150s，留 buff）
+    var finished = false;
+    var timer = setInterval(function () {
+      attempts++;
+      fetch("/api/tasks/" + encodeURIComponent(taskId), { headers: authHeaders() })
+        .then(function (res) { return res.ok ? res.json() : null; })
+        .then(function (t) {
+          if (t && onProgress) onProgress(t.status, t.progress || "", t);
+          if (t && (t.status === "succeeded" || t.status === "failed" || t.status === "canceled")) {
+            if (!finished) {
+              finished = true;
+              clearInterval(timer);
+              if (onDone) onDone(t.status === "succeeded" ? t : null, t);
+            }
+          } else if (attempts >= maxAttempts) {
+            clearInterval(timer);
+            if (!finished) { finished = true; if (onDone) onDone(null, null); if (onProgress) onProgress(null, "任务超时未完成，请到「任务」页查看"); }
+          }
+        })
+        .catch(function () { if (attempts >= maxAttempts) { clearInterval(timer); if (!finished) { finished = true; if (onDone) onDone(null, null); } } });
+    }, intervalMs);
+  }
+
   // 反向入库目标集合下拉：选中后生成产物自动进入知识库。
   function populateDocKbCollections() {
     if (!authed) return;
@@ -114,13 +141,30 @@
     var prompt = document.getElementById("docPrompt").value.trim();
     if (!prompt) { alert("请描述要生成的文档"); return; }
     var kbID = currentKbCollectionID();
+    var asyncBox = document.getElementById("docAsync");
+    var isAsync = !!(asyncBox && asyncBox.checked);
     var btn = document.getElementById("btnGenerate");
-    btn.disabled = true; btn.textContent = "生成中（LLM 出骨架 + 渲染，约 10-60s）…";
+    btn.disabled = true;
+    btn.textContent = isAsync ? "已提交后台渲染…" : "生成中（LLM 出骨架 + 渲染，约 10-60s）…";
+    var reqBody = { type: type, prompt: prompt, kbCollectionId: kbID, kbCollectionIds: kbID ? [kbID] : [] };
+    if (isAsync) reqBody.async = true;
     docReq("/generate", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ type: type, prompt: prompt, kbCollectionId: kbID, kbCollectionIds: kbID ? [kbID] : [] })
+      body: JSON.stringify(reqBody)
     }).then(function (g) {
+      if (g.async && g.taskId) {
+        docResultsBox.innerHTML = '<div class="kb-card"><h3>已提交后台生成</h3>' +
+          '<p class="hint" style="margin:6px 0">任务 ' + esc(g.taskId) + " 已入队，正在后台渲染。完成后会自动刷新最近文档，也可到「任务」页查看进度。</p>" +
+          '<div class="hint" id="docTaskProgress" style="margin-top:4px">排队中…</div></div>';
+        pollDocTask(g.taskId, function (st, msg) {
+          var box = document.getElementById("docTaskProgress");
+          if (!box) return;
+          box.textContent = (st ? (st + "：") : "") + (msg || "");
+        }, function () { loadDocHistory(); });
+        loadDocHistory();
+        return;
+      }
       docResultsBox.innerHTML = renderDocCard(g);
       bindDocGenActions(docResultsBox);
       loadDocHistory();
@@ -146,11 +190,27 @@
     var instruction = prompt("按意见修改（留空 = 原需求重新生成）：\n当前文档：" + name, "");
     if (instruction === null) return;
     var kbID = currentKbCollectionID();
+    var asyncBox = document.getElementById("docAsync");
+    var isAsync = !!(asyncBox && asyncBox.checked);
+    var reqBody = { docId: id, instruction: instruction, kbCollectionId: kbID, kbCollectionIds: kbID ? [kbID] : [] };
+    if (isAsync) reqBody.async = true;
     docReq("/regenerate", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ docId: id, instruction: instruction, kbCollectionId: kbID, kbCollectionIds: kbID ? [kbID] : [] })
+      body: JSON.stringify(reqBody)
     }).then(function (g) {
+      if (g.async && g.taskId) {
+        docResultsBox.innerHTML = '<div class="kb-card"><h3>已提交后台重新生成</h3>' +
+          '<p class="hint" style="margin:6px 0">任务 ' + esc(g.taskId) + " 已入队。完成后会自动刷新最近文档，也可到「任务」页查看。</p>" +
+          '<div class="hint" id="docTaskProgress" style="margin-top:4px">排队中…</div></div>';
+        pollDocTask(g.taskId, function (st, msg) {
+          var box = document.getElementById("docTaskProgress");
+          if (!box) return;
+          box.textContent = (st ? (st + "：") : "") + (msg || "");
+        }, function () { loadDocHistory(); });
+        loadDocHistory();
+        return;
+      }
       docResultsBox.innerHTML = renderDocCard(g);
       bindDocGenActions(docResultsBox);
       loadDocHistory();
@@ -203,3 +263,20 @@
 document.querySelectorAll("#nav button[data-href]").forEach(function (b) {
   b.addEventListener("click", function () { location.href = b.dataset.href || "/"; });
 });
+
+/* 顶栏主题选择：与主 SPA 同一语义（sb.theme → <html data-theme>） */
+function initTopbarTheme() {
+  var sel = document.getElementById("themeMode");
+  if (!sel) return;
+  sel.innerHTML = '<option value="system">跟随系统</option><option value="light">浅色</option><option value="dark">深色</option>';
+  var cur = localStorage.getItem("sb.theme") || "system";
+  sel.value = ["system", "light", "dark"].indexOf(cur) >= 0 ? cur : "system";
+  applyTopbarTheme(sel.value);
+  sel.addEventListener("change", function () { applyTopbarTheme(sel.value); });
+}
+function applyTopbarTheme(mode) {
+  localStorage.setItem("sb.theme", mode);
+  var light = window.matchMedia("(prefers-color-scheme: light)").matches;
+  document.documentElement.dataset.theme = mode === "system" ? (light ? "light" : "dark") : mode;
+}
+initTopbarTheme();
