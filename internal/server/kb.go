@@ -5,8 +5,10 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -173,6 +175,77 @@ func (s *Server) handleKbIngest(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
+	// 兼容两种载体：JSON（content / contentBase64）或 multipart（大文件）。
+	collectionID, name, mime, content, code, errMsg := s.parseIngestInput(w, r)
+	if code != 0 {
+		writeErr(w, code, errMsg)
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Minute)
+	defer cancel()
+
+	doc, chunkCount, err := s.ingestKBDocument(ctx, collectionID, name, mime, content)
+	if err != nil {
+		if errors.Is(err, store.ErrRagUnsupported) {
+			writeErr(w, http.StatusServiceUnavailable,
+				"the knowledge-base index needs PostgreSQL with pgvector; SQLite deployments do not include the knowledge base")
+			return
+		}
+		if errors.Is(err, errEmbeddingDisabled) {
+			writeErr(w, http.StatusServiceUnavailable, "embeddings not configured (set 嵌入模型配置 in settings)")
+			return
+		}
+		writeErr(w, http.StatusInternalServerError, "ingest failed: "+err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"document": doc, "chunks": chunkCount})
+}
+
+// parseIngestInput reads collectionId/name/mime/content from either a JSON body
+// or a multipart form (大文件走 multipart，绕开 4MiB JSON 上限). On error it
+// returns a non-zero HTTP status plus message for the caller to write.
+func (s *Server) parseIngestInput(w http.ResponseWriter, r *http.Request) (collectionID int64, name, mime, content string, status int, errMsg string) {
+	ct := r.Header.Get("Content-Type")
+	if strings.HasPrefix(ct, "multipart/form-data") {
+		r.Body = http.MaxBytesReader(w, r.Body, maxUploadRequestBytes)
+		if err := r.ParseMultipartForm(maxUploadRequestBytes); err != nil {
+			return 0, "", "", "", http.StatusBadRequest, "invalid multipart form"
+		}
+		collectionID, _ = strconv.ParseInt(strings.TrimSpace(r.FormValue("collectionId")), 10, 64)
+		name = strings.TrimSpace(r.FormValue("name"))
+		if name == "" {
+			name = sanitizeUploadName(r.FormValue("fileName"))
+		}
+		mime = r.FormValue("mime")
+		file, header, err := r.FormFile("file")
+		if err != nil {
+			return 0, "", "", "", http.StatusBadRequest, "file is required"
+		}
+		defer file.Close()
+		raw, err := io.ReadAll(io.LimitReader(file, maxUploadFileBytes+1))
+		if err != nil {
+			return 0, "", "", "", http.StatusBadRequest, "read upload failed: " + err.Error()
+		}
+		if len(raw) > maxUploadFileBytes {
+			return 0, "", "", "", http.StatusRequestEntityTooLarge, "file exceeds 10 MiB"
+		}
+		if name == "" {
+			name = sanitizeUploadName(header.Filename)
+		}
+		if collectionID <= 0 {
+			return 0, "", "", "", http.StatusBadRequest, "collectionId is required"
+		}
+		if name == "" {
+			return 0, "", "", "", http.StatusBadRequest, "name is required"
+		}
+		md, err := s.parseUploadedDocument(name, mime, raw)
+		if err != nil {
+			return 0, "", "", "", http.StatusBadRequest, err.Error()
+		}
+		return collectionID, name, mime, md, 0, ""
+	}
+
 	var req struct {
 		CollectionID  int64  `json:"collectionId"`
 		Name          string `json:"name"`
@@ -181,86 +254,96 @@ func (s *Server) handleKbIngest(w http.ResponseWriter, r *http.Request) {
 		ContentBase64 string `json:"contentBase64"`
 	}
 	if err := readJSONLimited(w, r, &req); err != nil {
-		writeErr(w, http.StatusBadRequest, "invalid request body")
-		return
+		return 0, "", "", "", http.StatusBadRequest, "invalid request body"
 	}
 	if req.CollectionID <= 0 {
-		writeErr(w, http.StatusBadRequest, "collectionId is required")
-		return
+		return 0, "", "", "", http.StatusBadRequest, "collectionId is required"
 	}
 	if strings.TrimSpace(req.Name) == "" {
-		writeErr(w, http.StatusBadRequest, "name is required")
-		return
+		return 0, "", "", "", http.StatusBadRequest, "name is required"
 	}
-
-	// 二进制文件走 base64：交给 internal/doc 解析成 Markdown，再走统一的分块链路。
-	content := req.Content
+	content = req.Content
 	if req.ContentBase64 != "" {
 		raw, err := base64.StdEncoding.DecodeString(req.ContentBase64)
 		if err != nil {
-			writeErr(w, http.StatusBadRequest, "contentBase64 is not valid base64")
-			return
+			return 0, "", "", "", http.StatusBadRequest, "contentBase64 is not valid base64"
 		}
-		markdown, err := doc.Parse(req.Name, req.MIME, raw)
+		md, err := s.parseUploadedDocument(req.Name, req.MIME, raw)
 		if err != nil {
-			if errors.Is(err, doc.ErrUnsupported) {
-				writeErr(w, http.StatusBadRequest, "unsupported document type: "+req.Name)
-				return
-			}
-			writeErr(w, http.StatusBadRequest, "parse document failed: "+err.Error())
-			return
+			return 0, "", "", "", http.StatusBadRequest, err.Error()
 		}
-		content = markdown
+		content = md
 	}
 	if strings.TrimSpace(content) == "" {
-		writeErr(w, http.StatusBadRequest, "content or contentBase64 is required")
-		return
+		return 0, "", "", "", http.StatusBadRequest, "content or contentBase64 is required"
 	}
+	return req.CollectionID, strings.TrimSpace(req.Name), req.MIME, content, 0, ""
+}
+
+// parseUploadedDocument renders raw bytes to Markdown via internal/doc, with a
+// uniform error message for unsupported/parse failures. Plain-text formats
+// (Markdown/TXT/JSON/… or any text/* mime) are used as-is — doc.Parse only
+// handles the binary/structured office formats.
+func (s *Server) parseUploadedDocument(name, mime string, raw []byte) (string, error) {
+	if isPlainTextDoc(name, mime) {
+		return string(raw), nil
+	}
+	md, err := doc.Parse(name, mime, raw)
+	if err != nil {
+		if errors.Is(err, doc.ErrUnsupported) {
+			return "", fmt.Errorf("unsupported document type: %s", name)
+		}
+		return "", fmt.Errorf("parse document failed: %v", err)
+	}
+	return md, nil
+}
+
+// isPlainTextDoc reports whether a document should be ingested as raw text
+// rather than parsed.
+func isPlainTextDoc(name, mime string) bool {
+	if strings.HasPrefix(strings.ToLower(mime), "text/") {
+		return true
+	}
+	switch strings.ToLower(filepath.Ext(name)) {
+	case ".md", ".markdown", ".txt", ".text", ".json", ".yaml", ".yml",
+		".log", ".xml", ".toml", ".ini", ".conf":
+		return true
+	}
+	return false
+}
+
+// ingestKBDocument is the shared ingest pipeline (create doc → chunk → embed →
+// store), reused by /api/kb/ingest and the generate→KB reverse-ingest path.
+func (s *Server) ingestKBDocument(ctx context.Context, collectionID int64, name, mime, content string) (*store.KBDocument, int, error) {
 	if s.embedding == nil || !s.embedding.Enabled() {
-		writeErr(w, http.StatusServiceUnavailable, "embeddings not configured (set 嵌入模型配置 in settings)")
-		return
+		return nil, 0, errEmbeddingDisabled
 	}
-	if ok, err := s.store.PGVectorInstalled(r.Context()); err != nil || !ok {
-		writeErr(w, http.StatusServiceUnavailable,
-			"the knowledge-base index needs PostgreSQL with pgvector; SQLite deployments do not include the knowledge base")
-		return
+	if ok, err := s.store.PGVectorInstalled(ctx); err != nil || !ok {
+		return nil, 0, store.ErrRagUnsupported
 	}
-
-	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Minute)
-	defer cancel()
-
 	doc := &store.KBDocument{
-		CollectionID: req.CollectionID,
-		Name:         strings.TrimSpace(req.Name),
-		MIME:         req.MIME,
+		CollectionID: collectionID,
+		Name:         name,
+		MIME:         mime,
 		SizeBytes:    int64(len(content)),
 		Status:       "pending",
 	}
 	if err := s.store.CreateKBDocument(ctx, doc); err != nil {
-		writeErr(w, http.StatusInternalServerError, "create document failed: "+err.Error())
-		return
+		return nil, 0, fmt.Errorf("create document: %w", err)
 	}
-
-	chunks, err := s.embedKnowledgeChunks(ctx, doc, req.Content)
+	chunks, err := s.embedKnowledgeChunks(ctx, doc, content)
 	if err != nil {
 		_ = s.store.UpdateKBDocumentResult(ctx, doc.ID, "failed", 0, err.Error())
-		if errors.Is(err, store.ErrRagUnsupported) {
-			writeErr(w, http.StatusServiceUnavailable,
-				"the knowledge-base index needs PostgreSQL with pgvector; SQLite deployments do not include the knowledge base")
-			return
-		}
-		writeErr(w, http.StatusInternalServerError, "ingest failed: "+err.Error())
-		return
+		return nil, 0, err
 	}
 	if err := s.store.ReplaceKBDocumentChunks(ctx, doc, chunks); err != nil {
 		_ = s.store.UpdateKBDocumentResult(ctx, doc.ID, "failed", 0, err.Error())
-		writeErr(w, http.StatusInternalServerError, "store chunks failed: "+err.Error())
-		return
+		return nil, 0, fmt.Errorf("store chunks: %w", err)
 	}
 	if err := s.store.UpdateKBDocumentResult(ctx, doc.ID, "indexed", int64(len(chunks)), ""); err != nil {
 		log.Printf("kb ingest: update result: %v", err)
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"document": doc, "chunks": len(chunks)})
+	return doc, len(chunks), nil
 }
 
 // kbHit is a single retrieved KB fragment in the shape RAG-in-Prompt expects:
@@ -306,8 +389,13 @@ func (s *Server) searchKB(ctx context.Context, query string, collectionIDs []int
 		if c.Similarity < minScore {
 			continue
 		}
+		source := c.Source
+		if source == "" {
+			// 兜底：JOIN 未命中时（老数据 / 文档已删）退回单查。
+			source = kbSourceName(ctx, s.store, c.DocumentID)
+		}
 		hits = append(hits, kbHit{
-			source:  kbSourceName(ctx, s.store, c.DocumentID),
+			source:  source,
 			section: c.Title,
 			content: c.Content,
 			score:   c.Similarity,

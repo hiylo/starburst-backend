@@ -40,6 +40,9 @@ func TestPostgresKBSearch(t *testing.T) {
 	if got[0].Title != "库存规则" || got[0].DocumentID != doc.ID {
 		t.Fatalf("top result = %+v, want 库存规则 of doc %d", got[0], doc.ID)
 	}
+	if got[0].Source != "需求.md" {
+		t.Fatalf("joined source = %q, want 需求.md (no per-chunk name lookups)", got[0].Source)
+	}
 	if got[0].Similarity <= 0.99 {
 		t.Fatalf("identical-vector similarity %v should be ~1.0", got[0].Similarity)
 	}

@@ -97,8 +97,9 @@ func (s *Server) handleDocGenerate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		Type   string `json:"type"`
-		Prompt string `json:"prompt"`
+		Type           string `json:"type"`
+		Prompt         string `json:"prompt"`
+		KbCollectionID int64  `json:"kbCollectionId"`
 	}
 	if err := readJSONLimited(w, r, &req); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid request body")
@@ -174,12 +175,14 @@ func (s *Server) handleDocGenerate(w http.ResponseWriter, r *http.Request) {
 		log.Printf("doc generate: update result: %v", err)
 	}
 	s.broadcastDocEvent("ready", docRow)
+	kbIngested := s.reverseIngestGenerated(ctx, req.KbCollectionID, docRow, data)
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"id":          docRow.ID,
 		"name":        docRow.Name,
 		"docType":     docRow.DocType,
 		"chunkCount":  docRow.SizeBytes,
+		"kbIngested":  kbIngested,
 		"downloadUrl": fmt.Sprintf("/api/documents/%d/download", docRow.ID),
 	})
 }
@@ -207,9 +210,10 @@ func (s *Server) handleDocRegenerate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		DocID       int64  `json:"docId"`
-		Instruction string `json:"instruction"`
-		SessionID   string `json:"sessionId"`
+		DocID          int64  `json:"docId"`
+		Instruction    string `json:"instruction"`
+		SessionID      string `json:"sessionId"`
+		KbCollectionID int64  `json:"kbCollectionId"`
 	}
 	if err := readJSONLimited(w, r, &req); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid request body")
@@ -295,11 +299,13 @@ func (s *Server) handleDocRegenerate(w http.ResponseWriter, r *http.Request) {
 		log.Printf("doc regenerate: update result: %v", err)
 	}
 	s.broadcastDocEvent("ready", docRow)
+	kbIngested := s.reverseIngestGenerated(ctx, req.KbCollectionID, docRow, data)
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"id":          docRow.ID,
 		"name":        docRow.Name,
 		"docType":     docRow.DocType,
+		"kbIngested":  kbIngested,
 		"downloadUrl": fmt.Sprintf("/api/documents/%d/download", docRow.ID),
 	})
 }
@@ -350,6 +356,27 @@ func (s *Server) sessionContextExcerpt(ctx context.Context, sessionID string) st
 		}
 	}
 	return strings.TrimSpace(sb.String())
+}
+
+// reverseIngestGenerated optionally ingests a freshly rendered document back
+// into the knowledge base (docs/DOCUMENTS.md §2.1): the rendered file is
+// parsed to Markdown and run through the same chunk/embed pipeline. Best-effort:
+// a failure only drops the KB copy and is surfaced via the kbIngested flag.
+func (s *Server) reverseIngestGenerated(ctx context.Context, collectionID int64, rec *store.DocDocument, data []byte) bool {
+	if collectionID <= 0 || len(data) == 0 {
+		return false
+	}
+	md, err := doc.Parse(rec.Name+doc.Extension(rec.DocType), "", data)
+	if err != nil {
+		log.Printf("doc reverse-ingest: parse: %v", err)
+		return false
+	}
+	kbName := fmt.Sprintf("%s-@doc%d", rec.Name, rec.ID)
+	if _, _, err := s.ingestKBDocument(ctx, collectionID, kbName, "text/markdown", md); err != nil {
+		log.Printf("doc reverse-ingest: ingest: %v", err)
+		return false
+	}
+	return true
 }
 
 // handleDocDocuments lists generated documents (GET).

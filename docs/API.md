@@ -697,19 +697,24 @@ data: {"payload":{"type":"message.part.updated","properties":{...}}}
 
 ### 采集（`POST /api/kb/ingest`）
 
-请求（二选一）：
+请求三选一：
 ```json
 { "collectionId": 1, "name": "仓储制度", "content": "纯文本 / Markdown 内容" }
 { "collectionId": 1, "name": "报价单.pdf", "contentBase64": "<base64>" }
+multipart/form-data: file + collectionId + name? + mime? + fileName?
 ```
 - `contentBase64` 非空时走 `internal/doc.Parse` 解析成 Markdown 再进入分块链路；支持的二进制
   类型（按扩展名/MIME）：`pdf`、`xlsx`、`xls`、`csv`、`docx`、`pptx`。
+- **multipart**：大文件绕过 4MiB JSON 上限（≤10MiB），`file` 字段必填；纯文本类
+  （`text/*` mime 或 `.md/.txt/.json/.yaml/.log/.xml/.toml/.ini/.conf` 扩展名）按原文入库，
+  其余二进制走 `doc.Parse`。
 - 200 → `{"document":{...KBDocument},"chunks":<n>}`。同步执行（5min 上限）：按 Markdown 标题
   切块（无标题则以文档名为标题，单块正文目标 ~800 rune）、批量向量化、一次性落库
   （成功 `status=indexed`；中途失败回写 `status=failed` + `error`）。
 - 400 → `collectionId`/`name` 缺失、`content` 与 `contentBase64` 同时为空、
   `contentBase64` 非法 base64、类型不支持（`unsupported document type: <name>`）或解析失败。
-- 503 → 未配置嵌入模型（`embeddings not configured`）或 SQLite 无 pgvector。
+- 413 → multipart 文件超 10MiB；503 → 未配置嵌入模型（`embeddings not configured`）或
+  SQLite 无 pgvector。
 
 ### 检索（`POST /api/kb/search`）
 
@@ -722,6 +727,18 @@ data: {"payload":{"type":"message.part.updated","properties":{...}}}
 { "results": [ { "source": "仓储制度.docx", "section": "第 4 章 库存",
                  "content": "安全库存 = 日均出库量 × 备货周期 × 1.2", "score": 0.93 } ] }
 ```
+- `source` 通过 `kb_chunks LEFT JOIN kb_documents` 一次取回（无逐 chunk 查库）。
+- **503** → SQLite 无 pgvector → `vector retrieval needs PostgreSQL ...`。
+
+### 统计（`GET /api/kb/stats`）
+
+RAG-in-Prompt 结局计数器（进程内累计，重启归零）：
+```json
+{ "rag": { "spliced": 3, "skipNoEmbedding": 1, "skipNoVector": 0,
+           "skipTimeout": 0, "skipNoResult": 2, "skipBelowThreshold": 0 } }
+```
+- `spliced`=命中并拼装；`skipNoEmbedding`/`skipNoVector`=能力缺失；`skipTimeout`=800ms 检索超时；
+  `skipNoResult`=无命中/检索失败；`skipBelowThreshold`=命中但低于阈值/预算放不下。双通道鉴权。
 
   按相关度降序；`source` 取文档名，文档已删时回落 `文档#<id>`。
 - 503 → SQLite 无 pgvector 或未配置嵌入模型。本端点即是 RAG-in-Prompt 代理层的检索入口。
@@ -749,12 +766,14 @@ data: {"payload":{"type":"message.part.updated","properties":{...}}}
 > `<docs-dir>/<id><ext>`。`--docs-dir` / `STARBURST_DOCS_DIR` 配置（默认 `./data/docs`，按需
 > 创建）。文档类型由请求方决定，LLM 只产对应 body（`sheets`/`paragraphs`/`slides`）。
 
-- `POST /api/documents/generate` `{"type":"xlsx|docx|pptx","prompt":"做一份排期表"}` → **200**
-  `{"id":12,"name":"排期表","docType":"xlsx","downloadUrl":"/api/documents/12/download"}`。
+- `POST /api/documents/generate` `{"type":"xlsx|docx|pptx","prompt":"做一份排期表","kbCollectionId":3?}`
+  → **200** `{"id":12,"name":"排期表","docType":"xlsx","kbIngested":false,"downloadUrl":"/api/documents/12/download"}`.
   `prompt` 必填、`type` 必须是 `xlsx|docx|pptx`（否则 400）；未配编排 LLM、或未配 `--docs-dir` →
   **503**；骨架失败/渲染失败/落盘失败 → 500。**同步**，2min 上限（不会 204 立即返回）。
-- `POST /api/documents/regenerate` `{"docId":12,"instruction":"把第3页改成对比图","sessionId":"ses_..."}`
-  → 200 + 同样的 `{id,name,docType,downloadUrl}`。基于原骨架 + 修改意见 + 最近会话上下文
+  `kbCollectionId` 可选：>0 时把渲染产物 `doc.Parse` 成 Markdown 反向入库（best-effort，
+  失败只置 `kbIngested:false` 并记日志，不阻断生成）。
+- `POST /api/documents/regenerate` `{"docId":12,"instruction":"把第3页改成对比图","sessionId":"ses_...","kbCollectionId":3?}`
+  → 200 + 同样的 `{id,name,docType,kbIngested,downloadUrl}`。基于原骨架 + 修改意见 + 最近会话上下文
   （best-effort：最近 20 条 turn、单条截 500 字、共 ≤4000 字、5s 拉取上限，失败只缺上下文不报错）
   重新出骨架 → 重渲染 → 覆盖落盘并回写新骨架。`docId` 必填（400）；404 → 文档不存在；
   已存类型不可再生成 → 400。其余方法 405。

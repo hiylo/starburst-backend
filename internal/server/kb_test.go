@@ -1,8 +1,12 @@
 package server
 
 import (
+	"bytes"
 	"encoding/json"
+	"mime/multipart"
 	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -80,5 +84,71 @@ func TestKbSearchRequiresAuth(t *testing.T) {
 	rec := s.do(t, http.MethodPost, "/api/kb/search", `{"query":"测试"}`, nil)
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("search unauthenticated status = %d, want 401", rec.Code)
+	}
+}
+
+// TestKbStatsEndpoint covers the RAG outcome counters surface.
+func TestKbStatsEndpoint(t *testing.T) {
+	s := newTestServer(t)
+	wh := loginWeb(t, s)
+
+	if rec := s.do(t, http.MethodGet, "/api/kb/stats", "", nil); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated stats = %d, want 401", rec.Code)
+	}
+	rec := s.do(t, http.MethodGet, "/api/kb/stats", "", wh)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("stats = %d: %s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Rag map[string]int64 `json:"rag"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("stats json: %v", err)
+	}
+	if _, ok := body.Rag["spliced"]; !ok {
+		t.Fatalf("stats missing spliced counter: %s", rec.Body.String())
+	}
+}
+
+// TestRagCounterNoEmbedding pins that an unconfigured embedding bumps the
+// skipNoEmbedding counter visible via /api/kb/stats.
+func TestRagCounterNoEmbedding(t *testing.T) {
+	s := newTestServer(t)
+	wh := loginWeb(t, s)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/opencode/session/s1/prompt_async",
+		strings.NewReader(`{"parts":[{"type":"text","text":"问题"}]}`))
+	_, spliced := s.applyRagSpliceToProxy(req)
+	if spliced {
+		t.Fatal("no embedding configured must not splice")
+	}
+	rec := s.do(t, http.MethodGet, "/api/kb/stats", "", wh)
+	var body struct {
+		Rag map[string]int64 `json:"rag"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &body)
+	if body.Rag["skipNoEmbedding"] < 1 {
+		t.Fatalf("skipNoEmbedding = %d, want >=1", body.Rag["skipNoEmbedding"])
+	}
+}
+
+// TestKbIngestMultipartParsed ensures a multipart ingest is parsed (and then
+// rejected by the pgvector gate on SQLite, i.e. 503 not 400).
+func TestKbIngestMultipartParsed(t *testing.T) {
+	s := newTestServer(t)
+	wh := loginWeb(t, s)
+
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	_ = mw.WriteField("collectionId", "1")
+	_ = mw.WriteField("name", "需求.md")
+	fw, _ := mw.CreateFormFile("file", "需求.md")
+	_, _ = fw.Write([]byte("# 标题\n正文内容"))
+	_ = mw.Close()
+
+	rec := s.do(t, http.MethodPost, "/api/kb/ingest", buf.String(),
+		mergeWith(map[string]string{"Content-Type": mw.FormDataContentType()}, wh))
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("multipart ingest on SQLite = %d, want 503 (parsed then pgvector gate): %s", rec.Code, rec.Body.String())
 	}
 }

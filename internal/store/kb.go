@@ -47,6 +47,7 @@ type KBChunk struct {
 	Content      string    `json:"content"`
 	Embedding    []float32 `json:"-"`
 	Similarity   float64   `json:"similarity,omitempty"`
+	Source       string    `json:"-"`
 	CreatedAt    time.Time `json:"createdAt"`
 }
 
@@ -264,9 +265,11 @@ func (s *sqlStore) SearchKBChunks(ctx context.Context, collectionIDs []int64, em
 	if !isPostgres(s.driver) {
 		return nil, ErrRagUnsupported
 	}
-	query := `SELECT id, collection_id, document_id, seq, title, content,
-		1 - (embedding <=> ?::vector) AS similarity
-		FROM kb_chunks`
+	query := `SELECT c.id, c.collection_id, c.document_id, c.seq, c.title, c.content,
+		1 - (c.embedding <=> ?::vector) AS similarity,
+		COALESCE(d.name, '')
+		FROM kb_chunks c
+		LEFT JOIN kb_documents d ON d.id = c.document_id`
 	args := []any{VectorString(embedding)}
 	if len(collectionIDs) > 0 {
 		placeholders := ""
@@ -277,9 +280,9 @@ func (s *sqlStore) SearchKBChunks(ctx context.Context, collectionIDs []int64, em
 			placeholders += "?"
 			args = append(args, collectionIDs[i])
 		}
-		query += ` WHERE collection_id IN (` + placeholders + `)`
+		query += ` WHERE c.collection_id IN (` + placeholders + `)`
 	}
-	query += ` ORDER BY embedding <=> ?::vector LIMIT ?`
+	query += ` ORDER BY c.embedding <=> ?::vector LIMIT ?`
 	args = append(args, VectorString(embedding), limit)
 
 	rows, err := s.db.QueryContext(ctx, s.q(query), args...)
@@ -291,7 +294,7 @@ func (s *sqlStore) SearchKBChunks(ctx context.Context, collectionIDs []int64, em
 	for rows.Next() {
 		c := &KBChunk{}
 		if err := rows.Scan(&c.ID, &c.CollectionID, &c.DocumentID, &c.Seq,
-			&c.Title, &c.Content, &c.Similarity); err != nil {
+			&c.Title, &c.Content, &c.Similarity, &c.Source); err != nil {
 			return nil, err
 		}
 		out = append(out, c)

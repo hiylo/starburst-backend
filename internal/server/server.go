@@ -62,6 +62,8 @@ type Server struct {
 	// intelCancelMu 保护 intelCancels：runID → cancel，供取消接口终止执行。
 	intelCancelMu sync.Mutex
 	intelCancels  map[int64]context.CancelFunc
+	// ragCounters 统计 RAG-in-Prompt 各结局，供 /api/kb/stats 观测（docs §8）。
+	ragCounters *ragStats
 	// sessionStatuses 是采集器从 session.status/idle 事件聚合的最新会话状态
 	//（sessionId → "busy"|"idle"|"retry"|"error"），用于给 App 提供比上游
 	// /session/status 快照更准确、更完整的状态视图。
@@ -97,6 +99,7 @@ func New(cfg *config.Config, st store.Store, am *auth.Manager, oc *opencode.Clie
 		intelSem:      newIntelSem(intelExecConcurrency),
 		intelCancels:  make(map[int64]context.CancelFunc),
 		intelAutoLast: make(map[int64]time.Time),
+		ragCounters:   newRagStats(),
 	}
 }
 

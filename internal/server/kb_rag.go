@@ -10,7 +10,10 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"time"
+
+	"github.com/hiylo/starburst-backend/internal/store"
 )
 
 // RAG-in-Prompt（Go 端拼装，docs/RAG_PROMPT.md）：拦截 POST /api/opencode/session/{id}
@@ -19,6 +22,30 @@ import (
 
 // ragQueryTimeout 是代理内知识库检索的上限：超时即按「没找到」原样转发，杜绝拖慢 prompt。
 const ragQueryTimeout = 800 * time.Millisecond
+
+// ragStats 统计 RAG-in-Prompt 的结局分布（docs/RAG_PROMPT.md §9）：spliced 之外
+// 的 skip* 归因让「知识库有没有被用上」可观测。
+type ragStats struct {
+	spliced            atomic.Int64 // 命中并拼装
+	skipNoEmbedding    atomic.Int64 // embedding 未配置
+	skipNoVector       atomic.Int64 // 无 pgvector（SQLite）
+	skipTimeout        atomic.Int64 // 检索超时
+	skipNoResult       atomic.Int64 // 检索无命中 / 检索失败
+	skipBelowThreshold atomic.Int64 // 有命中但低于相关度阈值 / 预算放不下
+}
+
+func newRagStats() *ragStats { return &ragStats{} }
+
+func (rs *ragStats) snapshot() map[string]any {
+	return map[string]any{
+		"spliced":            rs.spliced.Load(),
+		"skipNoEmbedding":    rs.skipNoEmbedding.Load(),
+		"skipNoVector":       rs.skipNoVector.Load(),
+		"skipTimeout":        rs.skipTimeout.Load(),
+		"skipNoResult":       rs.skipNoResult.Load(),
+		"skipBelowThreshold": rs.skipBelowThreshold.Load(),
+	}
+}
 
 // ragMinScore 是 Top-K 检索的相关度阈值，低于即弃（低质量噪音不如不拼）。
 const ragMinScore = 0.5
@@ -61,13 +88,13 @@ type promptPartBody struct {
 // Fields outside parts are preserved via json.RawMessage so nothing else in the
 // body is dropped when we splice.
 type promptAsyncBody struct {
-	MessageID string          `json:"messageID"`
+	MessageID string           `json:"messageID"`
 	Parts     []promptPartBody `json:"parts"`
-	Model     json.RawMessage `json:"model,omitempty"`
-	Agent     string          `json:"agent,omitempty"`
-	Variant   string          `json:"variant,omitempty"`
-	System    string          `json:"system,omitempty"`
-	Tools     json.RawMessage `json:"tools,omitempty"`
+	Model     json.RawMessage  `json:"model,omitempty"`
+	Agent     string           `json:"agent,omitempty"`
+	Variant   string           `json:"variant,omitempty"`
+	System    string           `json:"system,omitempty"`
+	Tools     json.RawMessage  `json:"tools,omitempty"`
 }
 
 // ragSpliceJSON reads a prompt_async body, optionally injects the KB context as
@@ -92,21 +119,34 @@ func (s *Server) ragSpliceJSON(ctx context.Context, body []byte) (out []byte, sp
 	hits, err := s.searchKB(searchCtx, query, nil, ragTopK, ragMinScore)
 	if err != nil {
 		// 任何检索失败都不阻塞发送：按「没找到」原样转发。
-		if !errors.Is(err, context.DeadlineExceeded) {
+		if errors.Is(err, context.DeadlineExceeded) {
+			s.ragCounters.skipTimeout.Add(1)
+		} else if errors.Is(err, store.ErrRagUnsupported) {
+			s.ragCounters.skipNoVector.Add(1)
+			log.Printf("rag splice: search skip: %v", err)
+		} else {
+			s.ragCounters.skipNoResult.Add(1)
 			log.Printf("rag splice: search skip: %v", err)
 		}
 		return body, false
 	}
+	if len(hits) == 0 {
+		s.ragCounters.skipNoResult.Add(1)
+		return body, false
+	}
 	contextText := ragPromptBlock(hits)
 	if contextText == "" {
+		s.ragCounters.skipBelowThreshold.Add(1)
 		return body, false
 	}
 
 	prompt.Parts = append([]promptPartBody{{Type: "text", Text: contextText}}, prompt.Parts...)
 	rewritten, err := json.Marshal(&prompt)
 	if err != nil {
+		s.ragCounters.skipNoResult.Add(1)
 		return body, false
 	}
+	s.ragCounters.spliced.Add(1)
 	return rewritten, true
 }
 
@@ -222,6 +262,7 @@ func estimateGoTokens(text string) int {
 // not configured it short-circuits to the original stream (no buffering cost).
 func (s *Server) applyRagSpliceToProxy(r *http.Request) (io.Reader, bool) {
 	if s.embedding == nil || !s.embedding.Enabled() {
+		s.ragCounters.skipNoEmbedding.Add(1)
 		return r.Body, false
 	}
 	body, err := io.ReadAll(r.Body)
@@ -230,4 +271,17 @@ func (s *Server) applyRagSpliceToProxy(r *http.Request) (io.Reader, bool) {
 	}
 	out, spliced := s.ragSpliceJSON(r.Context(), body)
 	return bytes.NewReader(out), spliced
+}
+
+// handleKbStats reports RAG-in-Prompt outcome counters (docs §8).
+func (s *Server) handleKbStats(w http.ResponseWriter, r *http.Request) {
+	if !s.requireDualAuth(r) {
+		writeErr(w, http.StatusUnauthorized, "web session or APP token required")
+		return
+	}
+	if r.Method != http.MethodGet {
+		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"rag": s.ragCounters.snapshot()})
 }
