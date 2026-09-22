@@ -201,3 +201,69 @@
   setAuthed(authed);
   if (authed) loadCollections();
 })();
+/* ---------- 文档生成（/api/documents/*） ---------- */
+async function docReq(path, opts) {
+  var o = opts || {};
+  o.headers = authHeaders(o.headers);
+  try {
+    var res = await fetch("/api/documents" + path, o);
+    if (res.status === 401) { setAuthed(false); throw new Error("unauthorized"); }
+    if (!res.ok) {
+      var detail = "";
+      try { detail = (await res.json()).error || ""; } catch (e) {}
+      throw new Error("HTTP " + res.status + (detail ? ": " + detail : ""));
+    }
+    return res.json();
+  } catch (e) { if (e.message === "unauthorized") throw e; throw new Error(e.message); }
+}
+
+var docResultsBox = document.getElementById("docResults");
+var docHistoryBox = document.getElementById("docHistory");
+
+document.getElementById("btnGenerate").addEventListener("click", generateDoc);
+document.getElementById("docPrompt").addEventListener("keydown", function (e) {
+  if (e.key === "Enter") generateDoc();
+});
+function generateDoc() {
+  var type = document.getElementById("docType").value;
+  var prompt = document.getElementById("docPrompt").value.trim();
+  if (!prompt) { alert("请描述要生成的文档"); return; }
+  var btn = document.getElementById("btnGenerate");
+  btn.disabled = true; btn.textContent = "生成中（LLM 出骨架 + 渲染，约 10-60s）…";
+  docReq("/generate", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ type: type, prompt: prompt })
+  }).then(function (g) {
+    docResultsBox.innerHTML = renderDocCard(g);
+    loadDocHistory();
+  }).catch(function (e) {
+    docResultsBox.innerHTML = '<p class="hint" style="color:var(--err)">生成失败：' + esc(e.message) + "</p>";
+  }).finally(function () { btn.disabled = false; btn.textContent = "生成"; });
+}
+
+function renderDocCard(g) {
+  var origin = window.location.origin;
+  var src = encodeURIComponent(origin + g.downloadUrl);
+  return '<div class="kb-card" style="margin-top:10px"><h3>' + esc(g.name) + "</h3>" +
+    '<span class="stat">' + esc(g.docType) + (g.kbIngested ? " · 已同步进知识库" : "") + "</span>" +
+    '<div class="ops"><a class="btn xs" href="' + origin + g.downloadUrl + '" download>下载</a>' +
+    '<a class="btn xs" href="/doc/preview.html?src=' + src + '" target="_blank" rel="noopener">预览</a></div></div>';
+}
+
+function loadDocHistory() {
+  if (!authed) return;
+  docReq("/?limit=8").then(function (data) {
+    var docs = data.documents || [];
+    if (!docs.length) { docHistoryBox.innerHTML = ""; return; }
+    docHistoryBox.innerHTML = '<h3 style="font-size:13px;margin:0 0 6px">最近生成</h3>' +
+      docs.map(function (d) {
+        var origin = window.location.origin;
+        var src = encodeURIComponent(origin + "/api/documents/" + d.id + "/download");
+        return '<div class="kb-row"><span class="name">' + esc(d.name) + "</span>" +
+          '<span class="meta">' + esc(d.docType) + " · " + fmtBytes(d.sizeBytes) + "</span>" +
+          '<a class="ghost xs" href="/doc/preview.html?src=' + src + '" target="_blank" rel="noopener">预览</a>' +
+          '<a class="ghost xs" href="' + origin + "/api/documents/" + d.id + '/download" download>下载</a></div>';
+      }).join("");
+  }).catch(function () {});
+}

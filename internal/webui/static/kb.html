@@ -65,6 +65,21 @@
       </div>
       <div id="searchResults"></div>
     </div>
+
+    <div id="docgenSec" style="margin-top:22px">
+      <h2 style="font-size:14px;margin:0 0 8px">文档生成（LLM 出骨架 → 渲染 → 可下载/预览）</h2>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+        <select id="docType" class="mono" style="padding:5px 8px;background:var(--bg);border:1px solid var(--line);border-radius:var(--r-md);color:var(--fg)">
+          <option value="pptx">PPT (.pptx)</option>
+          <option value="docx">Word (.docx)</option>
+          <option value="xlsx">Excel (.xlsx)</option>
+        </select>
+        <input type="text" id="docPrompt" class="mono" style="flex:1;min-width:260px" placeholder="描述文档，如：做一份 5 页产品发布会 PPT，含参数对比表和一张柱状图">
+        <button class="primary sm" id="btnGenerate" type="button">生成</button>
+      </div>
+      <div id="docResults"></div>
+      <div id="docHistory" style="margin-top:14px"></div>
+    </div>
   </div>
 
   <script src="/assets/kb.js"></script>
