@@ -326,7 +326,10 @@ h1, h2, h3, h4 { margin: 0; font-weight: 600; letter-spacing: -0.01em; }
   background: var(--primary-hover);
   box-shadow: 0 0 8px rgba(99, 102, 241, 0.6);
 }
-.content { padding: var(--sp-sm) var(--sp-lg) var(--sp-lg); flex: 1; max-width: 1560px; width: 100%; overflow-y: auto; min-height: 0; }
+/* margin: 0 auto 让 1560px 列在宽屏下于 .main 内水平居中——flex column 的
+   align-items:stretch 对定宽子项退化为 start，不加会在宽屏右侧留死区、
+   登录卡片整体偏左。 */
+.content { padding: var(--sp-sm) var(--sp-lg) var(--sp-lg); flex: 1; max-width: 1560px; width: 100%; margin: 0 auto; overflow-y: auto; min-height: 0; }
 .content > .page { animation: pageIn 200ms ease; }
 @keyframes pageIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
 
@@ -415,6 +418,14 @@ input:focus, select:focus, textarea:focus {
   box-shadow: 0 0 0 2px var(--primary-focus);
 }
 input::placeholder, textarea::placeholder { color: var(--ink-tertiary); }
+/* 勾选框用原生尺寸，不走上面的 input{width:100%}：被撑成整行宽后，
+   .md 任务清单的 flex 行里 checkbox 会吃掉全部宽度，右侧 span 宽度归零、
+   文字逐字换行（表现为任务清单显示错乱）。 */
+input[type="checkbox"], input[type="radio"] {
+  width: auto; flex: 0 0 auto;
+  margin: 0; padding: 0;
+  background: none; border: 0; border-radius: 0;
+}
 textarea { font-family: inherit; min-height: 72px; resize: vertical; line-height: 1.5; }
 select option { background: var(--surface-3); }
 
@@ -523,8 +534,13 @@ td .actions { display: inline-flex; gap: 6px; }
 .stream .meta { color: var(--ink-subtle); }
 
 /* ============================== 登录页 ============================== */
+/* 登录卡片在内容区内水平 + 垂直居中：.content 是 flex:1 的块级容器（非 flex），
+   子项用 min-height:100% + flex 列 + justify-content:center 撑满并垂直居中，
+   margin:0 auto 水平居中。原 margin:9vh auto 0 只在宽屏顶栏隐藏时勉强像居中，
+   实际卡片偏高且偏左。 */
 .login-wrap {
-  max-width: 400px; margin: 9vh auto 0;
+  max-width: 400px; margin: 0 auto; min-height: 100%;
+  display: flex; flex-direction: column; justify-content: center;
 }
 .login-card {
   padding: var(--sp-xl);
@@ -1312,6 +1328,16 @@ button.ghost.xs { min-height: 20px; padding: 1px 8px; font-size: 10.5px; border-
 .content.wb-tight > .wb-page { flex: 1; min-height: 0; }
 /* 智能测试（列表 + 详情）整宽铺满，消除右侧 max-width 空白 */
 .content.full { max-width: none; }
+/* 实时流整宽 + 纵向撑满：卡片撑满内容区，事件流框占满卡片剩余高度，
+   消除右侧（max-width 限制）与底部（固定 60vh）空余 */
+.content.stream-tight { max-width: none; display: flex; flex-direction: column; }
+.content.stream-tight > .stream-page { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.stream-page .card { flex: 1; min-height: 0; display: flex; flex-direction: column; margin-bottom: 0; }
+.stream-page .card h2,
+.stream-page .card > p,
+.stream-page .card > .row,
+.stream-page .card > .msg { flex-shrink: 0; }
+.stream-page .stream { flex: 1; min-height: 0; height: auto; }
 
 /* ============================== 会话明细 ============================== */
 .session-mini-nav { display: flex; flex-direction: column; gap: 8px; }

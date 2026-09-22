@@ -71,9 +71,10 @@ func TestDocVendorLibrariesEmbedded(t *testing.T) {
 		t.Fatalf("traversal should 404, got %d", rec.Code)
 	}
 }
+
 // TestKbManagementPageServed verifies the standalone KB management page and its
 // script are embedded, served with the right content type and free of inline
-// scripts (CSP `script-src 'self'`).
+// scripts (CSP `script-src-elem 'self'`).
 func TestKbManagementPageServed(t *testing.T) {
 	f := New()
 
@@ -85,8 +86,11 @@ func TestKbManagementPageServed(t *testing.T) {
 	if !strings.Contains(body, `src="/assets/kb.js"`) {
 		t.Fatal("kb.html missing kb.js script tag")
 	}
-	if strings.Contains(body, "<script>") || strings.Contains(body, "onclick=") {
-		t.Fatal("kb.html must have no inline script or inline handlers (CSP)")
+	if strings.Contains(body, "<script>") {
+		t.Fatal("kb.html must have no inline script (blocked by script-src-elem 'self')")
+	}
+	if strings.Contains(body, "onclick=") {
+		t.Fatal("kb.html must have no inline event handlers (use addEventListener)")
 	}
 
 	js := servePath(f, "/assets/kb.js")
@@ -95,5 +99,53 @@ func TestKbManagementPageServed(t *testing.T) {
 	}
 	if len(js.Body.Bytes()) < 1024 {
 		t.Fatalf("kb.js suspiciously small (%d bytes)", len(js.Body.Bytes()))
+	}
+}
+
+// TestCSPInlineScriptSplit pins the elem/attr CSP split that keeps inline
+// <script> blocked while inline event handlers (onclick 等) keep working.
+// 兜底 script-src 必须保留 'unsafe-inline'：不支持 elem/attr 拆分的旧浏览器
+// 只认它，收紧到 'self' 会静默废掉 index.html 里 100+ 处内联事件属性。
+func TestCSPInlineScriptSplit(t *testing.T) {
+	f := New()
+	rec := servePath(f, "/index.html")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("index.html status = %d", rec.Code)
+	}
+
+	csp := rec.Header().Get("Content-Security-Policy")
+	for _, want := range []string{
+		"script-src 'self' 'unsafe-inline'", // 旧浏览器兜底：内联事件属性靠它存活
+		"script-src-elem 'self'",            // CSP3 浏览器：内联 <script> 仍被拦
+		"script-src-attr 'unsafe-inline'",   // CSP3 浏览器：内联事件属性显式放行
+	} {
+		if !strings.Contains(csp, want) {
+			t.Errorf("CSP 缺少 %q：%s", want, csp)
+		}
+	}
+	if strings.Contains(csp, "script-src-elem 'self' 'unsafe-inline'") {
+		t.Errorf("script-src-elem 不应放行内联 <script>：%s", csp)
+	}
+
+	body := rec.Body.String()
+	if strings.Contains(body, "<script>") {
+		t.Error("index.html 含内联 <script>，会被 script-src-elem 'self' 拦截")
+	}
+	for _, p := range []string{"/assets/theme.js", "/assets/chat.js", "/assets/app.js"} {
+		if !strings.Contains(body, `src="`+p) {
+			t.Errorf("index.html 缺少外置脚本 %s", p)
+		}
+	}
+}
+
+// TestCSPMobilePageServed covers the hidden /mobile entry with the same headers.
+func TestCSPMobilePageServed(t *testing.T) {
+	f := New()
+	rec := servePath(f, "/mobile")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("/mobile status = %d", rec.Code)
+	}
+	if rec := servePath(f, "/mobile.html"); rec.Code != http.StatusOK {
+		t.Fatalf("/mobile.html status = %d", rec.Code)
 	}
 }

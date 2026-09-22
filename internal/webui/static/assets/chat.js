@@ -455,9 +455,22 @@ function renderFilePart(p) {
       <img src="${esc(p.url)}" alt="${esc(name)}" loading="lazy"><span class="cap">${esc(name)}</span></button></div>`;
   }
   const previewable = p.url && isPreviewableDoc(name);
+  // 生成文档的文件名带 -@doc<id> 标记（后端 /api/documents/{id}/download / attach 约定），
+  // 据此挂上「重新生成 / 按意见修改」操作，接 /api/documents/regenerate。
+  const docId = parseDocIdFromName(name);
   return `<div class="ct-file"><span class="ct-ico">${icon("file", 13)}</span><code>${esc(name)}</code>${
     mime ? `<span class="chip">${esc(mime.replace("application/", "").replace("text/", ""))}</span>` : ""}${
-    previewable ? `<button class="ghost xs" type="button" data-doc-preview="${esc(p.url)}">预览</button>` : ""}</div>`;
+    previewable ? `<button class="ghost xs" type="button" data-doc-preview="${esc(p.url)}">预览</button>` : ""}${
+    docId > 0
+      ? `<button class="ghost xs" type="button" data-doc-regen="${docId}" data-name="${esc(name)}" title="按原需求重新生成"><span>${icon("refresh", 12)}</span></button>` +
+        `<button class="ghost xs" type="button" data-doc-revise="${docId}" data-name="${esc(name)}" title="按意见修改后重新生成"><span>${icon("edit", 12)}</span></button>`
+      : ""}</div>`;
+}
+// parseDocIdFromName returns the numeric id after "-@doc" in a filename
+// (docs/DOCUMENTS.md §6.1 convention: <name>-@doc<id>.<ext>), or 0 when absent.
+function parseDocIdFromName(name) {
+  const m = String(name || "").match(/-@doc(\d+)/);
+  return m ? Number(m[1]) : 0;
 }
 function isPreviewableDoc(name) {
   const ext = String(name || "").split(".").pop().toLowerCase();
@@ -1083,6 +1096,10 @@ ChatView.prototype.onClick = function (e) {
     if (window.open) window.open(base, "_blank", "noopener"); else window.location.href = base;
     return;
   }
+  const regen = t.closest("[data-doc-regen]");
+  if (regen && regen.dataset.docRegen) { this.docRegenerate(Number(regen.dataset.docRegen), regen.dataset.name, ""); return; }
+  const revise = t.closest("[data-doc-revise]");
+  if (revise && revise.dataset.docRevise) { this.docRegenerate(Number(revise.dataset.docRevise), revise.dataset.name, null); return; }
   const child = t.closest("[data-open-child]");
   if (child && child.dataset.openChild && c.openSession) c.openSession(child.dataset.openChild);
 };
@@ -1120,6 +1137,89 @@ ChatView.prototype.lastUserTurn = function () {
   }
   return null;
 };
+
+// docRegenerate re-runs a generated document (/api/documents/regenerate):
+// mode "" = 原需求重生成，null = 弹输入框按意见修改。成功后在结果卡展示新版本
+// 下载 / 预览入口，不修改会话内已存在的附件 part（聊天记录是事实日志）。
+ChatView.prototype.docRegenerate = function (docId, name, instruction) {
+  const c = this.ctx;
+  if (!docId || docId <= 0) return;
+  if (instruction === null) {
+    instruction = window.prompt("按意见修改（留空 = 原需求重新生成）：\n当前文档：" + name, "");
+    if (instruction === undefined || instruction === null) return;
+  }
+  const sid = this.sessionId || "";
+  if (c.toast) c.toast("重新生成中", name + "（LLM 出骨架 + 渲染，约 10-60s）", "info");
+  const h = { "Content-Type": "application/json" };
+  const sh = c.dirHeaders ? c.dirHeaders() : {};
+  fetch("/api/documents/regenerate", {
+    method: "POST",
+    headers: Object.assign({}, sh, h),
+    body: JSON.stringify({ docId: docId, instruction: instruction, sessionId: sid })
+  }).then(async (res) => {
+    const body = res.ok ? await res.json() : await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(body.error || ("HTTP " + res.status));
+    const origin = window.location.origin;
+    const src = encodeURIComponent(origin + body.downloadUrl);
+    const card = `<div class="ct-card sys"><span class="ct-label">✅ 文档已重新生成：${esc(body.name)}</span>` +
+      `<div class="ct-body open"><div class="ops">` +
+      `<a class="btn xs" href="${origin + body.downloadUrl}" download>下载</a>` +
+      `<a class="btn xs" href="/doc/preview.html?src=${src}" target="_blank" rel="noopener">预览</a>` +
+      `<button class="ghost xs" type="button" data-doc-attach="${docId}" data-name="${esc(body.name)}">发送到本会话</button>` +
+      `</div></div></div>`;
+    if (c.toast) c.toast("文档已重新生成", body.name, "ok");
+    const wrap = this.el("list");
+    if (wrap) {
+      const div = document.createElement("div");
+      div.innerHTML = card;
+      wrap.appendChild(div.firstChild);
+      this.bindDocAttach(wrap);
+      this.scrollToBottom(true);
+    }
+  }).catch((e) => {
+    if (c.toast) c.toast("重新生成失败", String(e.message || e).slice(0, 200), "crit");
+  });
+};
+
+// bindDocAttach wires the「发送到本会话」button on a freshly regenerated doc
+// card: it copies the generated file into the session workdir via
+// POST /api/documents/{id}/attach and returns the workdir-relative path, then
+// appends it as a user message attachment so the next prompt carries the file.
+ChatView.prototype.bindDocAttach = function (root) {
+  const self = this;
+  if (!root) return;
+  root.querySelectorAll("[data-doc-attach]").forEach((b) => {
+    b.addEventListener("click", async function () {
+      const docId = Number(b.dataset.docAttach);
+      const c = self.ctx;
+      const sid = self.sessionId || "";
+      if (!sid) { if (c.toast) c.toast("未打开会话", "请先打开一个会话再发送文档", "warn"); return; }
+      b.disabled = true; b.textContent = "发送中…";
+      try {
+        const sh = c.dirHeaders ? c.dirHeaders() : {};
+        const res = await fetch("/api/documents/" + docId + "/attach", {
+          method: "POST",
+          headers: Object.assign({}, sh, { "Content-Type": "application/json" }),
+          body: JSON.stringify({ sessionId: sid })
+        });
+        const body = res.ok ? await res.json() : await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(body.error || ("HTTP " + res.status));
+        // 复制到输入区附件草稿（与普通附件一致），用户点发送即带文件入会话。
+        if (self.addAttachmentWorkPath && body.path && body.name) {
+          self.addAttachmentWorkPath(body.name, body.path, body.size || 0);
+          if (c.toast) c.toast("已附加", body.name + " 已放入输入区，点发送即可带入会话", "ok");
+        } else {
+          if (c.toast) c.toast("已写入工作区", body.absolutePath || body.path, "ok");
+        }
+      } catch (e) {
+        if (c.toast) c.toast("附加失败", String(e.message || e).slice(0, 200), "crit");
+      } finally {
+        b.disabled = false; b.textContent = "发送到本会话";
+      }
+    });
+  });
+};
+
 
 /* ============================================================================
  * 输入区
@@ -1421,8 +1521,17 @@ ChatView.prototype.addFiles = function (files) {
     reader.readAsDataURL(f);
   }
 };
-ChatView.prototype.renderAtts = function () {
-  const box = this.host && this.host.querySelector('[data-role="atts"]');
+// addAttachmentWorkPath attaches a file that already lives in the session work
+// directory (e.g. a generated document copied there via /api/documents/attach),
+// referenced by its workdir-relative path instead of a base64 data URL. The
+// next send emits a `{type:"file", path}` part so the upstream reads the real
+// file on disk (no re-upload / size inflation).
+ChatView.prototype.addAttachmentWorkPath = function (name, relPath, size) {
+  this.attachments.push({ name: name, mime: "application/octet-stream", size: size || 0, path: relPath });
+  this.renderAtts();
+  this.saveAtts();
+};
+ChatView.prototype.renderAtts = function () {  const box = this.host && this.host.querySelector('[data-role="atts"]');
   if (!box) return;
   box.classList.toggle("hidden", !this.attachments.length);
   box.innerHTML = this.attachments.map((a, i) => `<span class="att">
@@ -1461,6 +1570,12 @@ function buildPartsFromText(raw, attachments) {
     if (tail) parts.push({ type: "text", text: tail });
   }
   for (const a of attachments || []) {
+    // 工作区内的真实文件（如 attach 端点复制进 uploads/ 的生成文档）走 path 引用，
+    // 上游直接读磁盘文件；否则按 base64 内联。
+    if (a.path) {
+      parts.push({ type: "file", path: a.path, filename: a.name, mime: a.mime || "application/octet-stream" });
+      continue;
+    }
     parts.push({ type: a.mime.indexOf("image/") === 0 ? "image" : "file", mime: a.mime, url: a.url, filename: a.name });
   }
   return parts;

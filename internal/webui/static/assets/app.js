@@ -8,6 +8,37 @@ const SESSION_KEY = "ocb_web_session";
 const APP_TOKEN_KEY = "ocb_app_token";
 let session = localStorage.getItem(SESSION_KEY) || "";
 
+/* ---------- 全局弹窗 Esc 关闭（桌面端需求） ---------- */
+// 各弹层（wbModal / intelMockModal / 聊天弹层）在打开时 push 关闭函数、关闭时 pop；
+// 全局 Escape 逐个关闭最顶层，无弹层时不拦截按键（输入法组词期间的 Esc 不抢）。
+window.SBDismiss = (function () {
+  const stack = [];
+  return {
+    push(fn) {
+      if (typeof fn === "function" && stack.indexOf(fn) < 0) stack.push(fn);
+    },
+    pop(fn) {
+      const i = stack.indexOf(fn);
+      if (i >= 0) stack.splice(i, 1);
+    },
+    closeTop() {
+      while (stack.length) {
+        const fn = stack.pop();
+        try { fn(); return true; } catch (_) { /* 单个关闭失败继续找下层 */ }
+      }
+      return false;
+    },
+    get size() { return stack.length; },
+  };
+})();
+document.addEventListener("keydown", (e) => {
+  if (e.key !== "Escape" || e.isComposing) return;
+  if (window.SBDismiss && window.SBDismiss.closeTop()) {
+    e.preventDefault();
+    e.stopPropagation();
+  }
+});
+
 const TASK_STATUS = {
   queued: "排队中", running: "执行中", succeeded: "已完成",
   failed: "失败", retrying: "重试中", canceled: "已取消",
@@ -96,23 +127,36 @@ function escapeHtml(s) {
   return String(s ?? "").replace(/[&<>"']/g, c =>
     ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
-/* ---------------- 浏览器系统通知（页面后台时也能收到关键事件提醒） ---------------- */
-// 系统通知受浏览器权限控制（必须用户手势触发授权请求），本端开关记录在 localStorage。
+/* ---------------- 系统通知（桌面端原生 / 浏览器 HTML5 双通道） ---------------- */
+// 桌面客户端桥接：starburst-desktop 的 preload-main.js 注入 window.desktopApi。
+// 有桥接时走原生系统通知（前台也弹、无需浏览器授权）；纯浏览器才走 HTML5 Notification。
 const SYS_NOTIF_KEY = "sysNotif.enabled";
+function desktopBridge() {
+  return (typeof window !== "undefined" && window.desktopApi && window.desktopApi.isDesktop) ? window.desktopApi : null;
+}
 function sysNotifSupported() {
-  return typeof window !== "undefined" && "Notification" in window;
+  return !!desktopBridge() || (typeof window !== "undefined" && "Notification" in window);
 }
 function sysNotifPermission() {
+  if (desktopBridge()) return "granted";
   return sysNotifSupported() ? Notification.permission : "unsupported";
 }
-// 端上已开启（授权 + 用户打开开关）才弹系统通知。
+// 端上已开启才弹系统通知。桌面端默认开启（无浏览器授权门槛），显式关过（"0"）才关闭；
+// 浏览器端仍需授权 + 开关（localStorage 记 "1"）。
 function sysNotifOn() {
+  if (desktopBridge()) return localStorage.getItem(SYS_NOTIF_KEY) !== "0";
   return sysNotifPermission() === "granted" && localStorage.getItem(SYS_NOTIF_KEY) === "1";
 }
-// 用户手势触发的授权入口：浏览器只允许在点击等手势里请求通知权限。
+// 用户手势触发的授权入口：浏览器只允许在点击等手势里请求通知权限；桌面端无需授权。
 async function enableSysNotif() {
   if (!sysNotifSupported()) {
-    toast("系统通知", "当前浏览器不支持系统通知", "warn");
+    toast("系统通知", "当前环境不支持系统通知", "warn");
+    return;
+  }
+  if (desktopBridge()) {
+    localStorage.setItem(SYS_NOTIF_KEY, "1");
+    toast("系统通知", "已开启：新消息 / 会话完成 / 待回应等会弹桌面系统通知", "info");
+    renderSysNotifUI();
     return;
   }
   let perm = Notification.permission;
@@ -127,13 +171,23 @@ async function enableSysNotif() {
   renderSysNotifUI();
 }
 function disableSysNotif() {
-  localStorage.removeItem(SYS_NOTIF_KEY);
+  if (desktopBridge()) localStorage.setItem(SYS_NOTIF_KEY, "0");
+  else localStorage.removeItem(SYS_NOTIF_KEY);
   toast("系统通知", "已关闭", "info");
   renderSysNotifUI();
 }
-// 弹一条系统通知；前台页面已有站内 toast，系统通知只在页面不可见时弹出以免重复打扰。
+// 弹一条系统通知。桌面端走原生通道且前台也弹；浏览器端仅在页面不可见时弹，以免与站内 toast 重复。
+// opts 支持 { silent, data }：data 随通知回传，点击后用于跳转到对应会话/页面。
 function sysNotif(title, body, opts) {
-  if (!sysNotifOn() || !document.hidden) return;
+  if (!sysNotifOn()) return;
+  const db = desktopBridge();
+  if (db) {
+    try {
+      db.notify(Object.assign({ title: String(title || ""), body: String(body || "") }, opts || {}));
+      return;
+    } catch (_) { /* 桥接异常时降级走 HTML5 */ }
+  }
+  if (!document.hidden) return;
   try {
     const n = new Notification(title, Object.assign({ body: body || "" }, opts || {}));
     n.onclick = () => { window.focus(); n.close(); };
@@ -149,13 +203,31 @@ function renderSysNotifUI() {
   btn.textContent = on ? "关闭系统通知" : "开启系统通知";
   btn.style.display = "";
   if (st) {
-    if (!sysNotifSupported()) st.textContent = "当前浏览器不支持";
+    if (desktopBridge()) {
+      st.textContent = on ? "已开启 · 桌面系统通知（前台也弹）" : "已关闭";
+    } else if (!sysNotifSupported()) st.textContent = "当前浏览器不支持";
     else if (sysNotifPermission() === "denied") st.textContent = "浏览器权限已拒绝，需在站点设置中手动开启";
     else if (on) st.textContent = "已开启 · 页面在后台时弹提醒";
     else if (sysNotifPermission() === "default") st.textContent = "未授权，点击开启将请求浏览器权限";
     else st.textContent = "未开启";
   }
 }
+// 桌面端：点击系统通知 → 跳转到对应会话/页面（Web 端点击 HTML5 通知仅聚焦窗口）。
+(function bindDesktopNotifyClick() {
+  const db = desktopBridge();
+  if (!db || typeof db.onNotifyClicked !== "function") return;
+  db.onNotifyClicked((data) => {
+    if (!data || !data.action) return;
+    try {
+      if (data.action === "session" && data.sessionId) {
+        switchPage("workbench");
+        openWbPanel(data.sessionId);
+      } else if (data.action === "tasks") {
+        switchPage("tasks");
+      }
+    } catch (_) { /* 跳转失败不影响通知本身 */ }
+  });
+})();
 /* ---------------- 代码语法高亮（零依赖，正则分词） ---------------- */
 const HL_KEYWORDS = {
   c: ("if else for while do switch case default break continue return func function var let const class interface " +
@@ -430,6 +502,7 @@ function switchPage(name) {
   if (content) {
     content.classList.toggle("wb-tight", name === "workbench");
     content.classList.toggle("full", name === "intel");
+    content.classList.toggle("stream-tight", name === "stream");
   }
   // 每个页面切到时自动加载数据，避免打开就是空的、还得手动点"刷新"。
   // 对话区的 SSE 通道只在停在工作台时保持（见 wbSyncStream）。
@@ -2588,6 +2661,30 @@ function wbHandleActivity(sid) {
     wbScheduleRenderList();
   }
 }
+// 会话显示名：优先标题，其次 slug，最后 id 前 8 位。
+function wbSessionLabel(sid) {
+  const s = wbSessions.find(x => x.id === sid);
+  const t = s && (s.title || s.slug);
+  return (t && String(t).trim()) || (sid ? String(sid).slice(0, 8) : "会话");
+}
+// 从事件 payload 提取通知正文（复用动态栏的摘要提取，尽量给出具体动作）。
+function wbNotifyBody(ev, fallback) {
+  try {
+    const meta = wbPayloadMeta(ev.payload, ev.eventType);
+    let s = (meta && meta.summary) || "";
+    // 新消息尽量取 AI 回复正文，比「本轮回复完成」更有用。
+    if (ev.eventType === "message.complete" && ev.payload && typeof ev.payload === "object") {
+      const obj = ev.payload;
+      const inner = obj.properties || obj.data || (obj.payload && (obj.payload.properties || obj.payload.data)) || {};
+      const msg = inner.message || obj.message;
+      if (msg && msg.content) {
+        const txt = (Array.isArray(msg.content) ? msg.content.map(c => (c && c.text) || "").join(" ") : String(msg.content)).trim().replace(/\s+/g, " ");
+        if (txt) s = txt.slice(0, 120);
+      }
+    }
+    return s || fallback || "";
+  } catch (_) { return fallback || ""; }
+}
 function handleWbPush(ev) {
   const sid = ev.sessionId;
   const et = ev.eventType;
@@ -2604,17 +2701,34 @@ function handleWbPush(ev) {
       wbScheduleWorkbench();
       return;
     }
+    const prev = (wbStatuses[sid] && wbStatuses[sid].type) || "";
     let st = "idle";
     if (et !== "session.idle") {
       const stt = wbStatusFromPayload(ev.payload);
-      st = ["busy", "idle", "retry"].includes(stt) ? stt : (wbStatuses[sid] && wbStatuses[sid].type) || "idle";
+      st = ["busy", "idle", "retry"].includes(stt) ? stt : prev || "idle";
     }
     wbStatuses[sid] = { type: st };
+    // 会话完成：从处理中/重试转为空闲，且不是当前正在查看的会话时弹系统通知。
+    if ((prev === "busy" || prev === "retry") && st === "idle" && sid !== wbSelected) {
+      sysNotif("会话完成 · " + wbSessionLabel(sid), wbNotifyBody(ev, "本轮处理已完成"),
+        { data: { action: "session", sessionId: sid } });
+    }
     wbHandleActivity(sid);
     wbScheduleRenderList();
     if (wbSelected === sid && (et === "session.status" || et === "session.updated")) wbSchedulePanelRefresh(sid);
   }
   if (et === "question.asked" || et === "question.updated" || et === "permission.asked" || et === "message.complete" || et === "session.error" || et === "session.failed") {
+    // 待回应：APP 提问/授权请求需要用户处理，无论是否当前会话都提醒。
+    if (et === "question.asked" || et === "permission.asked") {
+      const kind = et === "permission.asked" ? "需要授权" : "有提问待回答";
+      sysNotif("待回应 · " + wbSessionLabel(sid), wbNotifyBody(ev, kind),
+        { data: { action: "session", sessionId: sid } });
+    }
+    // 新消息：非当前正在查看的会话有 AI 回复完成时提醒。
+    if (et === "message.complete" && sid !== wbSelected) {
+      sysNotif("新消息 · " + wbSessionLabel(sid), wbNotifyBody(ev, "有新的 AI 回复"),
+        { data: { action: "session", sessionId: sid } });
+    }
     wbHandleActivity(sid);
     wbScheduleWorkbench();
     return;
@@ -3532,10 +3646,12 @@ function wbModalOpen(title, html) {
   if (window.innerWidth <= 768) card && card.classList.add("wb-modal-scroll");
   else card && card.classList.remove("wb-modal-scroll");
   document.getElementById("wbModal").classList.remove("hidden");
+  if (window.SBDismiss) window.SBDismiss.push(wbModalClose);
 }
 function wbModalClose() {
   document.getElementById("wbModal").classList.add("hidden");
   document.getElementById("wbModalBody").innerHTML = "";
+  if (window.SBDismiss) window.SBDismiss.pop(wbModalClose);
 }
 document.getElementById("wbFilter").addEventListener("input", renderWbList);
 
@@ -4246,6 +4362,7 @@ function openIntelMock(idx) {
   document.getElementById("intelContractStatus").textContent = "";
   document.getElementById("intelContractResult").innerHTML = "";
   document.getElementById("intelMockModal").classList.remove("hidden");
+  if (window.SBDismiss) window.SBDismiss.push(closeIntelMock);
 }
 
 function renderMockCurl() {

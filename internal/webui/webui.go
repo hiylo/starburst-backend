@@ -63,10 +63,19 @@ func (f *FS) Serve(w http.ResponseWriter, r *http.Request, p string) {
 	// 安全头：防 MIME 嗅探执行（页面公开可访问，兜一层）。
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("X-Frame-Options", "DENY")
-	// CSP：只允许同源 + 内联样式/脚本（前端 100+ 处内联 style）+ Google Fonts，
-	// 阻止向第三方加载脚本 / 外传数据（管理员页面被 XSS 时的外泄面收敛）。
+	// CSP：脚本按 CSP3 拆成 elem / attr 两级，兼顾安全与可用性——
+	// script-src-elem 'self' 阻断 XSS 注入的内联 <script>（页面脚本已全部外置
+	// 到 /assets/*.js，doc 预览与知识库页同样零内联脚本），阻断数据外传；
+	// script-src-attr 'unsafe-inline' 放行 index.html / app.js 里的内联事件属性
+	//（onclick 等 100+ 处），否则整站按钮点击全被拦截失效。
+	// 兜底的 script-src 保留 'unsafe-inline'：不支持 elem/attr 拆分的旧浏览器
+	// （以及 Chromium 把 script-src 当额外约束而非回退的版本）只认它，若收紧到
+	// 'self' 会在这些浏览器里静默废掉全部内联事件属性。代价是旧浏览器放行内联
+	// <script>（与拆分前的基线一致）；支持 CSP3 的浏览器仍由 elem 'self' 拦住。
+	// 样式保留 'unsafe-inline'（前端 100+ 处内联 style）+ Google Fonts。
 	w.Header().Set("Content-Security-Policy",
 		"default-src 'self'; script-src 'self' 'unsafe-inline'; "+
+			"script-src-elem 'self'; script-src-attr 'unsafe-inline'; "+
 			"style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "+
 			"font-src 'self' https://fonts.gstatic.com data:; "+
 			"img-src 'self' data: blob:; connect-src 'self' ws: wss:; "+
