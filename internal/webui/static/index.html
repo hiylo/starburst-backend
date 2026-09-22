@@ -35,8 +35,8 @@
       <button data-page="archives"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="4" rx="1"/><path d="M5 8v10a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8M10 12h4"/></svg><span class="txt">会话归档</span></button>
       <div class="nav-label">系统</div>
       <button data-page="intel"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg><span class="txt">智能测试</span></button>
-      <a href="/kb.html" style="display:flex;align-items:center;gap:10px;padding:6px 10px;border-radius:var(--r-md);color:var(--ink-subtle);font-size:13px;text-decoration:none" title="团队知识库：上传文档 → 向量检索 → 会话自动带入"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg><span class="txt">知识库</span></a>
-      <a href="/docgen.html" style="display:flex;align-items:center;gap:10px;padding:6px 10px;border-radius:var(--r-md);color:var(--ink-subtle);font-size:13px;text-decoration:none" title="文档生成：LLM 出骨架 → PPT/Word/Excel → 下载/预览/重新生成"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M12 18v-6M9 15l3 3 3-3"/></svg><span class="txt">文档</span></a>
+      <button data-page="kb" title="团队知识库：上传文档 → 向量检索 → 会话自动带入"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg><span class="txt">知识库</span></button>
+      <button data-page="docgen" title="文档生成：LLM 出骨架 → PPT/Word/Excel → 下载/预览/重新生成"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M12 18v-6M9 15l3 3 3-3"/></svg><span class="txt">文档</span></button>
       <button data-page="audit"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M9 13h6M9 17h6"/></svg><span class="txt">审计日志</span></button>
       <button data-page="tokens"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg><span class="txt">Token 管理</span></button>
       <button data-page="settings"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg><span class="txt">设置</span></button>
@@ -727,6 +727,82 @@
         </div>
       </div>
 
+      <!-- 知识库（团队知识库：集合管理 + 文档上传/检索 + RAG 命中统计） -->
+      <div id="page-kb" class="page hidden">
+        <div class="kb-wrap">
+          <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">
+            <h2 style="font-size:14px;margin:0">知识库集合</h2>
+            <span class="spacer" style="flex:1"></span>
+            <button class="primary sm" id="btnNewCollection" type="button">新建集合</button>
+          </div>
+          <div id="authMsg" class="hint" style="display:none;padding:40px;text-align:center">
+            未登录或会话已过期，请先 <a href="/">登录</a>。
+          </div>
+          <div id="collections"></div>
+
+          <div id="detail" style="display:none">
+            <div style="display:flex;align-items:center;gap:10px;margin:18px 0 10px">
+              <button class="ghost sm" id="btnBack" type="button">← 返回集合</button>
+              <h2 id="detailTitle" style="font-size:15px;margin:0"></h2>
+              <span class="spacer" style="flex:1"></span>
+              <button class="primary sm" id="btnUpload" type="button">上传文档</button>
+              <input type="file" id="fileInput">
+            </div>
+            <div id="documents"></div>
+          </div>
+
+          <div id="searchSec" style="margin-top:22px">
+            <h2 style="font-size:14px;margin:0 0 8px">检索测试</h2>
+            <div style="display:flex;gap:8px">
+              <select id="searchCollection" class="mono" style="padding:5px 8px;background:var(--surface-2);border:1px solid var(--hairline);border-radius:var(--r-md);color:var(--ink)" title="限定检索范围（默认全库）">
+                <option value="">全部集合</option>
+              </select>
+              <input type="text" id="searchQ" class="mono" style="flex:1" placeholder="输入问题，验证知识库命中（如：安全库存规则是什么？）">
+              <button class="primary sm" id="btnSearch" type="button">检索</button>
+            </div>
+            <div id="searchResults"></div>
+            <div id="ragStats" style="margin-top:16px">
+              <h3 style="font-size:13px;margin:0 0 6px">RAG-in-Prompt 命中统计（会话自动带入知识库的结局分布）</h3>
+              <div id="ragStatsBody" class="hint" style="line-height:1.8">加载中…</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 文档生成（LLM 出骨架 → PPT/Word/Excel → 下载/预览/重新生成） -->
+      <div id="page-docgen" class="page hidden">
+        <div class="kb-wrap">
+          <div id="authMsgDocgen" class="hint" style="display:none;padding:40px;text-align:center">
+            未登录或会话已过期，请先 <a href="/">登录</a>。
+          </div>
+
+          <div id="genForm" style="display:none">
+            <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+              <select id="docTemplate" class="mono" style="padding:5px 8px;background:var(--surface-2);border:1px solid var(--hairline);border-radius:var(--r-md);color:var(--ink)" title="内置模板：选中即填充类型与需求描述，可再修改">
+                <option value="">内置模板…</option>
+              </select>
+              <select id="docType" class="mono" style="padding:5px 8px;background:var(--surface-2);border:1px solid var(--hairline);border-radius:var(--r-md);color:var(--ink)">
+                <option value="pptx">PPT (.pptx)</option>
+                <option value="docx">Word (.docx)</option>
+                <option value="xlsx">Excel (.xlsx)</option>
+              </select>
+              <select id="docKbCollection" class="mono" style="padding:5px 8px;background:var(--surface-2);border:1px solid var(--hairline);border-radius:var(--r-md);color:var(--ink)" title="生成后同步进的知识库集合（可选）">
+                <option value="">不同步知识库</option>
+              </select>
+              <input type="text" id="docPrompt" class="mono" style="flex:1;min-width:260px" placeholder="描述文档，如：做一份 6 页立项汇报 PPT，含方案对比表和一张趋势图">
+              <label class="hint" style="display:flex;align-items:center;gap:4px;cursor:pointer" title="入队后台渲染（task），可关页面；进度见任务页 / 完成后自动刷新">
+                <input type="checkbox" id="docAsync" style="margin:0"> 后台
+              </label>
+              <button class="primary sm" id="btnGenerate" type="button">生成</button>
+            </div>
+            <p class="hint" style="margin:6px 0 0">选择集合后产物会自动入库，下次聊天可直接引用自己生成的文档。</p>
+          </div>
+
+          <div id="docResults"></div>
+          <div id="docHistory" style="margin-top:16px"></div>
+        </div>
+      </div>
+
     </div>
   </div>
 </div>
@@ -773,5 +849,7 @@
 
 <script src="/assets/chat.js?v=__BUILD__"></script>
 <script src="/assets/app.js?v=__BUILD__"></script>
+<script src="/assets/kb.js?v=__BUILD__"></script>
+<script src="/assets/docgen.js?v=__BUILD__"></script>
 </body>
 </html>

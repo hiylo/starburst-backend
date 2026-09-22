@@ -1875,3 +1875,21 @@ button.ghost.xs { min-height: 20px; padding: 1px 8px; font-size: 10.5px; border-
 .wb-diff-item .badge.df-modified { background: var(--info-dim); color: var(--primary-hover); }
 .wb-diff-body .col.before h5 .del { color: var(--danger); }
 .wb-diff-body .col.after h5 .add { color: var(--success); }
+
+/* ============================== 知识库 / 文档生成（并入 SPA 后的页面样式） ============================== */
+.kb-wrap { max-width: 960px; margin: 0 auto; }
+.hint { color: var(--ink-subtle); font-size: 12px; }
+#fileInput { display: none; }
+.kb-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 12px; }
+.kb-card { background: var(--surface-2); border: 1px solid var(--hairline); border-radius: var(--r-lg); padding: 14px; }
+.kb-card h3 { margin: 0 0 4px; font-size: 14px; }
+.kb-card .desc { color: var(--ink-subtle); font-size: 12px; margin: 0 0 8px; }
+.kb-card .stat { font-size: 12px; color: var(--ink-subtle); }
+.kb-card .ops { display: flex; gap: 8px; margin-top: 10px; }
+.kb-row { display: flex; align-items: center; gap: 10px; padding: 9px 12px; border-bottom: 1px solid var(--hairline); }
+.kb-row:last-child { border-bottom: none; }
+.kb-row .name { flex: 1; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.kb-row .meta { color: var(--ink-subtle); font-size: 12px; }
+.kb-search-result { border: 1px solid var(--hairline); border-radius: var(--r-md); padding: 10px 12px; margin-top: 8px; }
+.kb-search-result .src { font-size: 12px; color: var(--primary-hover); font-weight: 600; }
+.kb-search-result .body { font-size: 13px; margin: 4px 0 0; white-space: pre-wrap; }

@@ -487,6 +487,7 @@ const TITLES = {
   workbench: "AI 工作台", tasks: "任务", workflow: "编排", stream: "实时流", projects: "项目 / 会话",
   rules: "自动化规则", archives: "会话归档", audit: "审计日志",
   tokens: "Token 管理", settings: "设置", intel: "智能测试",
+  kb: "知识库", docgen: "文档",
 };
 function switchPage(name) {
   // 不记忆所在页：每次打开一律从 AI 工作台开始，避免误入/混叠其他页面。
@@ -523,6 +524,8 @@ function switchPage(name) {
   else if (name === "settings") { loadLLMConfig(); loadEmbedConfig(); loadIntelAiRules(); renderSysNotifUI(); }
   else if (name === "stream") ensureStream();
   else if (name === "intel") loadIntelProjects();
+  else if (name === "kb") { if (window.__kbInit) window.__kbInit(); }
+  else if (name === "docgen") { if (window.__docgenInit) window.__docgenInit(); }
 }
 document.querySelectorAll("#nav button").forEach(b => {
   b.addEventListener("click", () => switchPage(b.dataset.page));

@@ -17,8 +17,10 @@
   var authed = !!session();
   function setAuthed(v) {
     authed = v;
-    document.getElementById("authMsg").style.display = v ? "none" : "block";
-    document.getElementById("genForm").style.display = v ? "" : "none";
+    var am = document.getElementById("authMsgDocgen");
+    if (am) am.style.display = v ? "none" : "block";
+    var gf = document.getElementById("genForm");
+    if (gf) gf.style.display = v ? "" : "none";
   }
 
   function esc(s) {
@@ -106,6 +108,7 @@
     { name: "业务汇报 docx", type: "docx", prompt: "写一份业务季度汇报：执行摘要、核心指标（表格：指标/数值/环比）、进展、挑战与风险、下季度目标。" },
   ];
 
+  var docTemplatesBound = false;
   function populateDocTemplates() {
     var sel = document.getElementById("docTemplate");
     if (!sel) return;
@@ -113,6 +116,9 @@
       DOC_TEMPLATES.map(function (t, i) {
         return '<option value="' + i + '">' + esc(t.name) + "</option>";
       }).join("");
+    // 幂等：切页重复触发 init 时不重复绑定 change 监听。
+    if (docTemplatesBound) return;
+    docTemplatesBound = true;
     sel.addEventListener("change", function () {
       var t = DOC_TEMPLATES[Number(sel.value)];
       if (!t) return;
@@ -255,9 +261,17 @@
     }).catch(function () {});
   }
 
-  document.getElementById("btnHome").addEventListener("click", function () { location.href = "/"; });
-  setAuthed(authed);
-  if (authed) { populateDocTemplates(); populateDocKbCollections(); loadDocHistory(); }
+  var btnHome = document.getElementById("btnHome");
+  if (btnHome) btnHome.addEventListener("click", function () { location.href = "/"; });
+
+  /* 进入页面才执行的加载：SPA 由 app.js switchPage 触发（幂等，重复切页只重刷数据）；
+     独立页 /docgen.html 无 #page-docgen 容器，脚本加载后立即初始化。 */
+  window.__docgenInit = function () {
+    authed = !!session();
+    setAuthed(authed);
+    if (authed) { populateDocTemplates(); populateDocKbCollections(); loadDocHistory(); }
+  };
+  if (!document.getElementById("page-docgen")) window.__docgenInit();
 })();
 /* 侧边栏导航（data-href → 整页跳转） */
 document.querySelectorAll("#nav button[data-href]").forEach(function (b) {
@@ -279,4 +293,5 @@ function applyTopbarTheme(mode) {
   var light = window.matchMedia("(prefers-color-scheme: light)").matches;
   document.documentElement.dataset.theme = mode === "system" ? (light ? "light" : "dark") : mode;
 }
-initTopbarTheme();
+/* 独立页才有顶栏主题选择；SPA 主站顶栏由 app.js/theme.js 管理，这里跳过。 */
+if (!document.getElementById("page-docgen")) initTopbarTheme();

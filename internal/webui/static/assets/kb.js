@@ -35,9 +35,12 @@
   var authed = !!session();
   function setAuthed(v) {
     authed = v;
-    document.getElementById("authMsg").style.display = v ? "none" : "block";
-    document.getElementById("collections").style.display = v ? "" : "none";
-    document.getElementById("searchSec").style.display = v ? "" : "none";
+    var am = document.getElementById("authMsg");
+    if (am) am.style.display = v ? "none" : "block";
+    var cols = document.getElementById("collections");
+    if (cols) cols.style.display = v ? "" : "none";
+    var ss = document.getElementById("searchSec");
+    if (ss) ss.style.display = v ? "" : "none";
   }
 
   function esc(s) {
@@ -116,7 +119,8 @@
     });
   }
 
-  document.getElementById("btnNewCollection").addEventListener("click", function () {
+  var btnNewCollection = document.getElementById("btnNewCollection");
+  if (btnNewCollection) btnNewCollection.addEventListener("click", function () {
     var name = prompt("集合名称（必填）：");
     if (name == null) return;
     name = name.trim();
@@ -165,6 +169,7 @@
         return '<div class="kb-row"><span class="name">' + esc(d.name) + "</span>" +
           '<span class="meta">' + esc((d.mime || "").split("/").pop() || "—") + " · " + fmtBytes(d.sizeBytes) + " · 片段 " + (d.chunkCount || 0) + "</span> " +
           stc +
+          '<button class="ghost xs" type="button" data-view-doc="' + d.id + '" data-name="' + esc(d.name) + '">查看</button>' +
           '<button class="ghost xs danger" type="button" data-del-doc="' + d.id + '" data-name="' + esc(d.name) + '">删除</button></div>';
       }).join("");
       if (total > 50) {
@@ -181,7 +186,39 @@
           kb("/documents/" + b.dataset.delDoc, { method: "DELETE" }).then(loadDocuments).catch(function (e) { alert(e.message); });
         });
       });
+      documentsBox.querySelectorAll("[data-view-doc]").forEach(function (b) {
+        b.addEventListener("click", function () { viewDocumentContent(Number(b.dataset.viewDoc), b.dataset.name); });
+      });
     }).catch(function (e) { documentsBox.innerHTML = '<p class="hint" style="color:var(--err)">' + esc(e.message) + "</p>"; });
+  }
+
+  /* ---------- 查看文档内容（摄入切片） ---------- */
+  function viewDocumentContent(docId, docName) {
+    var overlay = document.createElement("div");
+    overlay.style.cssText = "position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:999;display:flex;align-items:center;justify-content:center";
+    var box = document.createElement("div");
+    box.style.cssText = "background:var(--bg,#fff);color:var(--fg,#111);max-width:640px;width:90%;max-height:80vh;overflow:auto;border-radius:12px;padding:16px 20px;box-shadow:0 10px 30px rgba(0,0,0,.3)";
+    box.innerHTML = '<h3 style="margin:0 0 6px">' + esc(docName) + '</h3><div id="docChunksBody" class="hint">加载中…</div>' +
+      '<div style="text-align:right;margin-top:12px"><button class="btn xs" type="button">关闭</button></div>';
+    box.querySelector("button").addEventListener("click", function () { overlay.remove(); });
+    overlay.addEventListener("click", function (e) { if (e.target === overlay) overlay.remove(); });
+    overlay.appendChild(box);
+    document.body.appendChild(overlay);
+    kb("/documents/" + docId + "/chunks").then(function (data) {
+      var chunks = data.chunks || [];
+      var body = document.getElementById("docChunksBody");
+      if (!body) return;
+      body.classList.remove("hint");
+      body.innerHTML = chunks.length
+        ? chunks.map(function (c) {
+            var title = (c.title && c.title !== docName) ? "<h4 style=\"margin:10px 0 2px\">" + esc(c.title) + "</h4>" : "";
+            return title + "<p style=\"margin:4px 0\">" + esc(c.content) + "</p>";
+          }).join("")
+        : '<p class="hint">该文档没有可提取的内容</p>';
+    }).catch(function (e) {
+      var body = document.getElementById("docChunksBody");
+      if (body) body.innerHTML = '<p class="hint" style="color:var(--err)">' + esc(e.message) + "</p>";
+    });
   }
 
   document.getElementById("btnUpload").addEventListener("click", function () {
@@ -235,10 +272,18 @@
     }).catch(function (e) { box.innerHTML = '<p class="hint" style="color:var(--err)">' + esc(e.message) + "</p>"; });
   }
 
-  document.getElementById("btnHome").addEventListener("click", function () { location.href = "/"; });
-  setAuthed(authed);
-  if (authed) loadCollections();
-  if (authed) { loadRagStats(); }
+  var btnHome = document.getElementById("btnHome");
+  if (btnHome) btnHome.addEventListener("click", function () { location.href = "/"; });
+
+  /* 进入页面才执行的加载：SPA 由 app.js switchPage 触发（幂等，重复切页只重刷数据）；
+     独立页 /kb.html 无 #page-kb 容器，脚本加载后立即初始化。 */
+  window.__kbInit = function () {
+    authed = !!session();
+    setAuthed(authed);
+    if (authed) loadCollections();
+    if (authed) loadRagStats();
+  };
+  if (!document.getElementById("page-kb")) window.__kbInit();
 
 /* ---------- RAG 命中统计（/api/kb/stats） ---------- */
 async function loadRagStats() {
@@ -287,4 +332,5 @@ function applyTopbarTheme(mode) {
   var light = window.matchMedia("(prefers-color-scheme: light)").matches;
   document.documentElement.dataset.theme = mode === "system" ? (light ? "light" : "dark") : mode;
 }
-initTopbarTheme();
+/* 独立页才有顶栏主题选择；SPA 主站顶栏由 app.js/theme.js 管理，这里跳过。 */
+if (!document.getElementById("page-kb")) initTopbarTheme();
